@@ -1,3 +1,5 @@
+![Trade Pilot banner](assets/trade-pilot-banner.svg)
+
 # Trade Pilot
 
 Production-minded AI trading stack built around a strict execution boundary: strategy proposes, policy approves, execution persists fills, and portfolio state is derived from fills only.
