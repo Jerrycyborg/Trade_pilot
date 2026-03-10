@@ -1,0 +1,9 @@
+[
+  {
+    "fill_id": "sample-fill-1",
+    "order_id": "sample-order-1",
+    "symbol": "AAPL",
+    "qty": 10,
+    "price": 100.0
+  }
+]

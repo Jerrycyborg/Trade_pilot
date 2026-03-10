@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trade Pilot Dashboard MVP</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Trade Pilot</p>
+          <h1>Dashboard MVP</h1>
+          <p class="lede">
+            Refresh-based operator dashboard for the Milestone 1 trading flow.
+          </p>
+        </div>
+        <div class="controls">
+          <button id="refresh">Refresh</button>
+          <p id="status">Idle</p>
+        </div>
+      </header>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Latest Signals</h2>
+          <pre id="signals">[]</pre>
+        </article>
+        <article class="card">
+          <h2>Policy Decisions</h2>
+          <pre id="policy-decisions">[]</pre>
+        </article>
+        <article class="card">
+          <h2>Orders</h2>
+          <pre id="orders">[]</pre>
+        </article>
+        <article class="card">
+          <h2>Fills</h2>
+          <pre id="fills">[]</pre>
+        </article>
+        <article class="card">
+          <h2>Positions</h2>
+          <pre id="positions">[]</pre>
+        </article>
+        <article class="card">
+          <h2>Rejection Reasons</h2>
+          <pre id="rejections">[]</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="./mvp.js"></script>
+  </body>
+</html>

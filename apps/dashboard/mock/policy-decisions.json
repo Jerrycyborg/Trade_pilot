@@ -1,0 +1,8 @@
+[
+  {
+    "signal_id": "sample-signal-1",
+    "decision": "APPROVE",
+    "approved_size_pct": 0.01,
+    "reasons": []
+  }
+]

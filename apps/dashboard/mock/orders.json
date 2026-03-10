@@ -1,0 +1,14 @@
+[
+  {
+    "order_id": "sample-order-1",
+    "symbol": "AAPL",
+    "status": "ACCEPTED",
+    "rejection_reason": null
+  },
+  {
+    "order_id": "sample-order-2",
+    "symbol": "REJECT",
+    "status": "REJECTED",
+    "rejection_reason": "symbol_rejected"
+  }
+]

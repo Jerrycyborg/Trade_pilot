@@ -1,0 +1,9 @@
+[
+  {
+    "symbol": "AAPL",
+    "net_qty": 10,
+    "average_cost": 100.0,
+    "realized_pnl": 0.0,
+    "unrealized_pnl": 10.0
+  }
+]

@@ -176,3 +176,37 @@ def test_snapshot_generation_works(tmp_path: Path) -> None:
     assert body["gross_exposure"] == 636.0
     assert round(body["realized_pnl"], 6) == 20.0
     assert round(body["unrealized_pnl"], 6) == 36.0
+
+
+def test_sell_after_multiple_buys_updates_realized_and_remaining_cost(tmp_path: Path) -> None:
+    client, execution_models, execution_database, _ = _client(tmp_path)
+    _insert_fill(execution_database, execution_models, fill_id="1", qty=10, price=100.0)
+    _insert_fill(execution_database, execution_models, fill_id="2", qty=10, price=110.0)
+    _insert_fill(execution_database, execution_models, fill_id="3", side="SELL", qty=5, price=120.0)
+    reconcile = client.post("/v1/portfolio/reconcile", json={"latest_quotes": {"AAPL": 120.0}})
+    assert reconcile.status_code == 200
+    position = client.get("/v1/portfolio/positions").json()[0]
+    assert position["net_qty"] == 15
+    assert round(position["average_cost"], 6) == 105.0
+    assert round(position["realized_pnl"], 6) == 75.0
+
+
+def test_quote_fallback_to_last_fill_price(tmp_path: Path) -> None:
+    client, execution_models, execution_database, _ = _client(tmp_path)
+    _insert_fill(execution_database, execution_models, fill_id="1", qty=10, price=99.5)
+    reconcile = client.post("/v1/portfolio/reconcile", json={})
+    assert reconcile.status_code == 200
+    position = client.get("/v1/portfolio/positions").json()[0]
+    assert position["market_price"] == 99.5
+    assert position["unrealized_pnl"] == 0.0
+
+
+def test_repeated_reconcile_idempotency_returns_same_snapshot(tmp_path: Path) -> None:
+    client, execution_models, execution_database, _ = _client(tmp_path)
+    _insert_fill(execution_database, execution_models, fill_id="1", qty=10, price=100.0)
+    first = client.post("/v1/portfolio/reconcile", json={"latest_quotes": {"AAPL": 101.0}})
+    second = client.post("/v1/portfolio/reconcile", json={"latest_quotes": {"AAPL": 101.0}})
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["idempotent"] is True
+    assert first.json()["snapshot"] == second.json()["snapshot"]

@@ -1,0 +1,9 @@
+[
+  {
+    "signal_id": "sample-signal-1",
+    "symbol": "AAPL",
+    "candidate_action": "BUY",
+    "confidence": 0.66,
+    "model_version": "strategy-m1"
+  }
+]
