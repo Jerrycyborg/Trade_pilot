@@ -1,0 +1,171 @@
+AAHP Protocol + Token Saving Guide
+
+AAHP = AI Agent Handoff Protocol
+
+It enables multiple AI agents (Claude / Codex / GPT) to collaborate on a codebase with minimal token usage.
+
+Goal
+
+Without AAHP:
+
+agent loads entire repo
+context explodes
+tokens wasted
+
+With AAHP:
+
+agent loads only needed files
+uses summaries
+uses task briefs
+
+Result:
+
+80–95% token savings
+AAHP Directory
+.ai/
+  handoff/
+    manifest.json
+    summaries/
+    task_briefs/
+    decisions/
+    checksums/
+manifest.json
+
+Defines which files agents may read.
+
+Example:
+
+{
+ "context_files": [
+  "services/strategy-service/",
+  "libs/contracts/",
+  "docs/architecture.md"
+ ],
+ "max_context_tokens": 6000
+}
+Task Briefs
+
+Each AI task has a short brief.
+
+Example:
+
+task: implement policy-service
+
+context:
+- libs/contracts/policy_models.py
+- services/policy-service/
+
+output:
+- rule engine
+
+constraints:
+- deterministic
+- audit logging
+
+This prevents the AI from loading the entire repo.
+
+Summaries
+
+After each task the AI writes:
+
+.ai/handoff/summaries/
+
+Example summary:
+
+policy service implemented
+rules added:
+- max position size
+- stale data rejection
+
+Future agents read this instead of full history.
+
+Decision Logs
+.ai/handoff/decisions/
+
+Stores architecture decisions.
+
+Example:
+
+ADR-001
+Execution service separated from LLM
+Checksums
+
+Ensures agents read the correct file versions.
+
+.ai/handoff/checksums/
+Token Saving Strategies
+1. Context Budgeting
+
+Example:
+
+max tokens per task = 6000
+2. File-Level Context
+
+Load only required files.
+
+Example:
+
+services/policy-service/*
+
+NOT the entire repo.
+
+3. Structured Outputs
+
+Agents communicate using JSON.
+
+Example:
+
+SignalCandidate
+PolicyDecision
+ExecutionOrder
+
+Instead of paragraphs.
+
+4. Replay Logs
+
+Agents read summaries instead of history.
+
+5. Prompt Templates
+
+Reusable prompts reduce tokens.
+
+Example AI Workflow
+
+Agent 1
+
+task: create policy service
+reads:
+- contracts
+- policy service folder
+
+Agent 2
+
+task: add new risk rule
+reads:
+- summary
+- policy service
+
+Agent 3
+
+task: add execution adapter
+reads:
+- execution service
+Result
+
+AAHP gives you:
+
+deterministic AI workflows
+small prompts
+fast iterations
+multi-agent collaboration
+Recommended AI Setup
+
+Use multiple agents:
+
+Architect Agent
+Backend Agent
+Strategy Agent
+Risk Agent
+Testing Agent
+
+Each with AAHP manifests.

@@ -1,0 +1,43 @@
+[project]
+name = "trading-stack"
+version = "0.1.0"
+description = "Milestone 1 bootstrap for a production-minded AI trading stack."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "contracts",
+  "execution-service",
+  "policy-service",
+  "strategy-service",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28.0",
+  "pytest>=8.3.0",
+  "ruff>=0.11.0",
+]
+
+[tool.uv.workspace]
+members = [
+  "libs/contracts",
+  "services/execution-service",
+  "services/policy-service",
+  "services/strategy-service",
+]
+
+[tool.uv.sources]
+contracts = { workspace = true }
+execution-service = { workspace = true }
+policy-service = { workspace = true }
+strategy-service = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]

@@ -1,0 +1,297 @@
+AI Trading Stack – Production Blueprint
+Overview
+
+This document describes a production-ready architecture for building an AI-assisted trading system.
+
+The system combines ideas from:
+
+TradingAgents (LLM reasoning)
+
+FinRL (reinforcement learning trading agents)
+
+TensorTrade (modular trading environments)
+
+QuantConnect Lean (execution infrastructure)
+
+Freqtrade (operator workflow)
+
+The goal is to create a system that is:
+
+autonomous in signal generation
+
+safe in execution
+
+explainable in reasoning
+
+reproducible in backtesting
+
+System Architecture
+Market Data
+     ↓
+Data Service
+     ↓
+Feature / State Service
+     ↓
+Strategy Engine
+     ↓
+Reasoning & Risk Engine
+     ↓
+Policy Gate
+     ↓
+Execution Engine
+     ↓
+Broker / Exchange
+     ↓
+Monitoring & Evaluation
+Core Services
+1. Data Service
+
+Responsible for:
+
+market prices
+
+fundamentals
+
+news
+
+alt-data
+
+timestamps
+
+symbol normalization
+
+Responsibilities:
+
+fetch data
+validate freshness
+store in timeseries DB
+publish events
+
+Recommended stack:
+
+Python
+FastAPI
+Postgres
+Redis
+Kafka
+2. Feature Service
+
+Builds the state vector for trading models.
+
+Examples:
+
+RSI
+MACD
+volatility
+volume imbalance
+news sentiment
+macro indicators
+
+Output example:
+
+{
+  "symbol": "AAPL",
+  "timestamp": "2026-03-10T10:00:00Z",
+  "features": {
+    "rsi": 61,
+    "macd": 1.4,
+    "volatility": 0.02,
+    "news_sentiment": 0.32
+  }
+}
+3. Strategy Service
+
+This is the systematic trading brain.
+
+Possible engines:
+
+RL (FinRL style)
+
+rule based
+
+ML prediction
+
+factor models
+
+Output:
+
+{
+  "signal_id": "uuid",
+  "symbol": "AAPL",
+  "action": "BUY",
+  "confidence": 0.72,
+  "target_size_pct": 0.03,
+  "model_version": "policy_v1"
+}
+4. Reasoning Service (LLM Layer)
+
+This layer provides human-like reasoning.
+
+Agents:
+
+Analyst agent
+Macro agent
+Technical agent
+Risk agent
+Challenger agent
+
+Responsibilities:
+
+generate thesis
+
+generate counter-thesis
+
+detect risk events
+
+explain strategy output
+
+Output example:
+
+{
+ "thesis": "Momentum remains intact after earnings revision",
+ "counter_thesis": "Move may be exhausted",
+ "risk_flags": ["earnings_proximity"],
+ "recommendation": "ALLOW_WITH_CAUTION"
+}
+
+Important rule:
+
+⚠️ LLM layer NEVER sends orders.
+
+5. Policy Gate
+
+This is the safety firewall.
+
+Deterministic rules:
+
+max position size
+max portfolio exposure
+daily loss limit
+market hours
+symbol whitelist
+liquidity thresholds
+event blackout windows
+
+Example decision:
+
+{
+ "decision": "REJECT",
+ "reasons": ["stale_data"]
+}
+6. Execution Engine
+
+This layer communicates with brokers.
+
+Responsibilities:
+
+submit orders
+track order state
+reconcile fills
+cancel/replace
+audit logging
+
+Execution states:
+
+NEW
+ACCEPTED
+FILLED
+PARTIAL_FILL
+REJECTED
+CANCELLED
+
+Adapters:
+
+paper broker
+alpaca
+interactive brokers
+binance
+coinbase
+Repository Structure
+trading-stack/
+  apps/
+    api-gateway/
+    dashboard/
+    backtest-runner/
+
+  services/
+    data-service/
+    feature-service/
+    strategy-service/
+    reasoning-service/
+    policy-service/
+    execution-service/
+    portfolio-service/
+    eval-service/
+
+  libs/
+    contracts/
+    broker-adapters/
+    data-adapters/
+    feature-lib/
+    risk-lib/
+
+  infra/
+    docker/
+    terraform/
+    monitoring/
+
+  docs/
+    architecture/
+
+  tests/
+Development Phases
+Phase 1 – Paper Trading
+
+Build:
+
+data pipeline
+
+feature pipeline
+
+simple strategy
+
+policy gate
+
+paper execution
+
+No LLMs yet.
+
+Phase 2 – Reasoning Layer
+
+Add:
+
+LLM reasoning
+
+thesis generation
+
+challenger agent
+
+risk memos
+
+Phase 3 – Bounded Autonomy
+
+Add:
+
+confidence thresholds
+kill switches
+daily loss limits
+event blackout windows
+Phase 4 – Learning Loop
+
+Add:
+
+offline training
+reward updates
+backtest replay
+model retraining
+Safety Rules
+
+Before live trading:
+
+paper trade for weeks
+max 0.5% risk per trade
+daily loss stop
+kill switch
+human override
+stale data rejection
+event blackout windows

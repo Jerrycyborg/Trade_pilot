@@ -1,0 +1,16 @@
+{
+  "context_files": [
+    "Project_spec2.md",
+    "Bootstrap.md",
+    "docs/architecture.md",
+    "libs/contracts/",
+    "services/policy-service/",
+    "services/execution-service/",
+    "services/strategy-service/",
+    "tests/"
+  ],
+  "max_context_tokens": 6000,
+  "checksum_file": ".ai/handoff/checksums/manifest_checksums.json",
+  "task_brief_template": ".ai/handoff/task_briefs/TEMPLATE.md",
+  "prompt_template": ".ai/handoff/prompts/agent_prompt_template.md"
+}
