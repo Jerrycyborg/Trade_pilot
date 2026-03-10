@@ -71,7 +71,7 @@ def test_accepted_order_persistence_live_postgres() -> None:
     assert stored is not None
     assert stored.status == "ACCEPTED"
     assert stored.external_order_id
-    assert fills == 0
+    assert fills == 1
 
 
 def test_rejected_order_persistence_live_postgres() -> None:
@@ -107,9 +107,11 @@ def test_idempotent_duplicate_submission_live_postgres() -> None:
     with database.SessionLocal() as session:
         order_count = session.scalar(select(func.count()).select_from(models.OrderRecord))
         event_count = session.scalar(select(func.count()).select_from(models.ExecutionEventRecord))
+        fill_count = session.scalar(select(func.count()).select_from(models.FillRecord))
 
     assert order_count == 1
-    assert event_count == 2
+    assert event_count == 3
+    assert fill_count == 1
 
 
 def test_execution_event_persistence_live_postgres() -> None:
@@ -129,11 +131,13 @@ def test_execution_event_persistence_live_postgres() -> None:
             )
         ).all()
 
-    assert len(events) == 2
+    assert len(events) == 3
     submitted = next(event for event in events if event.event_type == "order.submitted")
     terminal = next(event for event in events if event.event_type == "order.accepted")
+    fill_recorded = next(event for event in events if event.event_type == "fill.recorded")
     submitted_payload = json.loads(submitted.payload_json)
     terminal_payload = json.loads(terminal.payload_json)
+    fill_payload = json.loads(fill_recorded.payload_json)
 
     assert submitted.signal_id == "sig-postgres-events"
     assert submitted.external_order_id
@@ -141,3 +145,4 @@ def test_execution_event_persistence_live_postgres() -> None:
     assert submitted_payload["event_type"] == "order.submitted"
     assert terminal_payload["event_type"] == "order.accepted"
     assert terminal_payload["order_status"] == "ACCEPTED"
+    assert fill_payload["event_type"] == "fill.recorded"

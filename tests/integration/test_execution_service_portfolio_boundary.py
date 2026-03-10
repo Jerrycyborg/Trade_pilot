@@ -111,3 +111,40 @@ def test_execution_events_persisted_live_postgres() -> None:
         ).all()
 
     assert len(stored_events) == 3
+
+
+def test_portfolio_facing_boundary_behavior_live_postgres() -> None:
+    client, models, database = _client()
+    created = client.post(
+        "/v1/orders",
+        json=_request(symbol="REJECT", signal_id="sig-boundary-reject"),
+        headers={"Idempotency-Key": "portfolio-reject"},
+    )
+    assert created.status_code == 200
+    order = created.json()
+    assert order["status"] == "REJECTED"
+
+    fills_response = client.get(f"/v1/orders/{order['order_id']}/fills")
+    assert fills_response.status_code == 200
+    assert fills_response.json() == []
+
+    all_fills = client.get("/v1/fills")
+    assert all_fills.status_code == 200
+    assert all_fills.json() == []
+
+    events_response = client.get("/v1/execution/events")
+    assert events_response.status_code == 200
+    events = [event for event in events_response.json() if event["order_id"] == order["order_id"]]
+    assert len(events) == 2
+    assert {event["event_type"] for event in events} == {"order.submitted", "order.rejected"}
+
+    with database.SessionLocal() as session:
+        stored_fills = session.scalars(select(models.FillRecord)).all()
+        stored_events = session.scalars(
+            select(models.ExecutionEventRecord).where(
+                models.ExecutionEventRecord.order_id == order["order_id"]
+            )
+        ).all()
+
+    assert stored_fills == []
+    assert len(stored_events) == 2
