@@ -127,6 +127,45 @@ class ExecutionEvent(BaseModel):
     payload: dict[str, object] = Field(default_factory=dict)
 
 
+class PositionRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    net_qty: int
+    average_cost: float = Field(ge=0.0)
+    realized_pnl: float
+    unrealized_pnl: float
+    market_price: float = Field(ge=0.0)
+    market_value: float
+    updated_at: datetime
+
+
+class PortfolioSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    as_of: datetime
+    positions: list[PositionRecord] = Field(default_factory=list)
+    realized_pnl: float
+    unrealized_pnl: float
+    gross_exposure: float = Field(ge=0.0)
+
+
+class PortfolioReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    latest_quotes: dict[str, float] = Field(default_factory=dict)
+    as_of: datetime | None = None
+
+
+class PortfolioReconcileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot: PortfolioSnapshot
+    processed_fill_count: int = Field(ge=0)
+    idempotent: bool
+    reconcile_key: str
+
+
 class FeatureSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -11,7 +11,11 @@ from .models import (
     OrderStatus,
     PolicyDecision,
     PolicyEvaluationRequest,
+    PortfolioReconcileRequest,
+    PortfolioReconcileResponse,
+    PortfolioSnapshot,
     PortfolioContext,
+    PositionRecord,
     SignalCandidate,
 )
 
@@ -26,6 +30,10 @@ __all__ = [
     "OrderStatus",
     "PolicyDecision",
     "PolicyEvaluationRequest",
+    "PortfolioReconcileRequest",
+    "PortfolioReconcileResponse",
+    "PortfolioSnapshot",
     "PortfolioContext",
+    "PositionRecord",
     "SignalCandidate",
 ]

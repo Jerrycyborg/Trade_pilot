@@ -8,6 +8,7 @@ Included components:
 - `services/strategy-service`: deterministic fake signal generator
 - `services/policy-service`: deterministic policy evaluation with persistence
 - `services/execution-service`: paper broker order flow with idempotency
+- `services/portfolio-service`: derived positions and PnL from execution fills
 - `apps/dashboard`: placeholder app directory
 - `tests`: unit and API-level tests
 - `.ai/handoff`: AAHP handoff scaffold
@@ -23,6 +24,7 @@ Included components:
    - `make run-strategy`
    - `make run-policy`
    - `make run-execution`
+   - `make run-portfolio`
 
 ## Development commands
 
@@ -30,6 +32,7 @@ Included components:
 - `make test`
 - `make run-policy`
 - `make run-execution`
+- `make run-portfolio`
 - `make run-strategy`
 - `make aahp-validate`
 - `make aahp-checksums`
@@ -61,6 +64,7 @@ Implemented:
 
 - shared contracts
 - strategy, policy, and execution services
+- portfolio service derived from execution fills
 - paper broker adapter
 - service persistence models
 - AAHP bootstrap scaffold

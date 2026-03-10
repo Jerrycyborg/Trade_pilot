@@ -36,6 +36,20 @@ services:
     ports:
       - "8002:8002"
 
+  portfolio-service:
+    build:
+      context: .
+      dockerfile: services/portfolio-service/Dockerfile
+    env_file:
+      - .env.example
+    environment:
+      PORTFOLIO_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      PORTFOLIO_EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+    depends_on:
+      - postgres
+    ports:
+      - "8004:8004"
+
   strategy-service:
     build:
       context: .

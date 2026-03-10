@@ -1,6 +1,6 @@
 UV ?= uv
 
-.PHONY: setup lint test run-policy run-execution run-strategy aahp-validate aahp-checksums
+.PHONY: setup lint test run-policy run-execution run-portfolio run-strategy aahp-validate aahp-checksums
 
 setup:
 	$(UV) sync --all-packages --group dev
@@ -17,11 +17,14 @@ run-policy:
 run-execution:
 	$(UV) run uvicorn execution_service.main:app --host 0.0.0.0 --port 8002
 
+run-portfolio:
+	$(UV) run uvicorn portfolio_service.main:app --host 0.0.0.0 --port 8004
+
 run-strategy:
 	$(UV) run uvicorn strategy_service.main:app --host 0.0.0.0 --port 8003
 
 run:
-	@echo "Run one service at a time with make run-policy, run-execution, or run-strategy"
+	@echo "Run one service at a time with make run-policy, run-execution, run-portfolio, or run-strategy"
 
 aahp-validate:
 	python3 tools/aahp.py validate-manifest

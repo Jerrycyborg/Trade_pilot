@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "contracts",
   "execution-service",
+  "portfolio-service",
   "policy-service",
   "strategy-service",
 ]
@@ -22,6 +23,7 @@ dev = [
 members = [
   "libs/contracts",
   "services/execution-service",
+  "services/portfolio-service",
   "services/policy-service",
   "services/strategy-service",
 ]
@@ -29,6 +31,7 @@ members = [
 [tool.uv.sources]
 contracts = { workspace = true }
 execution-service = { workspace = true }
+portfolio-service = { workspace = true }
 policy-service = { workspace = true }
 strategy-service = { workspace = true }
 
