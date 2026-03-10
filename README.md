@@ -1,56 +1,123 @@
-# AI Trading Stack Bootstrap
+# Trade Pilot
 
-This workspace bootstraps Milestone 1 of the trading stack described in `Project_spec2.md` and `Bootstrap.md`.
+Production-minded AI trading stack built around a strict execution boundary: strategy proposes, policy approves, execution persists fills, and portfolio state is derived from fills only.
 
-Included components:
+Suggested GitHub description:
+`Production-minded AI trading stack with deterministic execution, fill-driven portfolio reconciliation, and AAHP-based AI handoffs.`
+
+Suggested GitHub topics:
+`ai-trading`, `algorithmic-trading`, `fastapi`, `python`, `postgresql`, `portfolio-management`, `risk-management`, `multi-agent`, `aahp`
+
+## Overview
+
+This repository implements a staged trading platform architecture with explicit service boundaries:
+
+- `strategy-service` generates deterministic signals
+- `policy-service` applies deterministic risk and approval rules
+- `execution-service` handles order persistence, fills, and execution events
+- `portfolio-service` derives positions and PnL from execution fills only
+
+The design intentionally separates reasoning, policy, execution, and portfolio state so that trading behavior stays auditable and deterministic.
+
+## Architecture
+
+Core flow:
+
+1. strategy proposes a signal
+2. policy approves or rejects it
+3. execution persists orders, fills, and events
+4. portfolio reconciles from fills only
+
+Key boundary rule:
+
+- `orders` are not portfolio truth
+- `fills` are the source of truth for positions
+- `execution_events` are the lifecycle and audit stream
+
+## Services
 
 - `libs/contracts`: shared Pydantic contracts
-- `services/strategy-service`: deterministic fake signal generator
-- `services/policy-service`: deterministic policy evaluation with persistence
-- `services/execution-service`: paper broker order flow with idempotency
-- `services/portfolio-service`: derived positions and PnL from execution fills
-- `apps/dashboard`: placeholder app directory
-- `tests`: unit and API-level tests
-- `.ai/handoff`: AAHP handoff scaffold
-- `tools/aahp.py`: AAHP helper for manifest validation, checksums, and task briefs
+- `services/strategy-service`: fake deterministic signal generation
+- `services/policy-service`: deterministic policy gate
+- `services/execution-service`: paper execution, fills, idempotency, execution events
+- `services/portfolio-service`: derived positions, snapshots, and PnL reconciliation
+- `apps/dashboard`: placeholder for future operator UI
 
-## Local setup
+## Quick Start
 
-1. Install Python 3.11 and [uv](https://docs.astral.sh/uv/).
+1. Install Python 3.11 and `uv`.
 2. Run `make setup`.
-3. Copy `.env.example` to `.env` if you want to customize database URLs.
-4. Start Postgres with `docker compose up postgres -d`.
-5. Run services with:
-   - `make run-strategy`
-   - `make run-policy`
-   - `make run-execution`
-   - `make run-portfolio`
+3. Copy `.env.example` to `.env` if you need custom database URLs.
+4. Start Postgres:
 
-## Development commands
+```bash
+docker compose up postgres -d
+```
+
+5. Run services as needed:
+
+```bash
+make run-strategy
+make run-policy
+make run-execution
+make run-portfolio
+```
+
+## Development
+
+Commands:
 
 - `make lint`
 - `make test`
+- `make run-strategy`
 - `make run-policy`
 - `make run-execution`
 - `make run-portfolio`
-- `make run-strategy`
 - `make aahp-validate`
 - `make aahp-checksums`
 
-## AAHP workflow
+Live Postgres execution integration tests:
 
-The repo now includes a lightweight AAHP workflow:
+1. Start Postgres locally.
+2. Set `TEST_EXECUTION_POSTGRES_URL`.
+3. Run:
 
-- `.ai/handoff/manifest.json` defines the intended context boundary.
-- `.ai/handoff/checksums/manifest_checksums.json` records hashes for files inside that boundary.
-- `.ai/handoff/task_briefs/TEMPLATE.md` is the standard task brief format.
-- `.ai/handoff/prompts/agent_prompt_template.md` is the reusable prompt skeleton.
-- `tools/aahp.py` provides:
-  - `validate-manifest`
-  - `generate-checksums`
-  - `create-task-brief <task-id> <title>`
+```bash
+pytest tests/integration/test_execution_service_postgres.py
+pytest tests/integration/test_execution_service_portfolio_boundary.py
+```
 
-Example:
+## Repository Layout
+
+```text
+libs/
+  contracts/
+
+services/
+  strategy-service/
+  policy-service/
+  execution-service/
+  portfolio-service/
+
+apps/
+  dashboard/
+
+tests/
+.ai/handoff/
+```
+
+## AAHP Workflow
+
+The repository includes a lightweight AAHP handoff structure for multi-agent work:
+
+- `.ai/handoff/manifest.json`
+- `.ai/handoff/checksums/manifest_checksums.json`
+- `.ai/handoff/task_briefs/`
+- `.ai/handoff/summaries/`
+- `.ai/handoff/decisions/`
+- `.ai/handoff/prompts/`
+
+Helper commands:
 
 ```bash
 python3 tools/aahp.py validate-manifest
@@ -58,36 +125,21 @@ python3 tools/aahp.py generate-checksums
 python3 tools/aahp.py create-task-brief TASK-001 "Implement dashboard shell"
 ```
 
-## Milestone 1 status
+## Status
 
 Implemented:
 
 - shared contracts
-- strategy, policy, and execution services
-- portfolio service derived from execution fills
+- strategy, policy, execution, and portfolio services
 - paper broker adapter
-- service persistence models
-- AAHP bootstrap scaffold
+- execution-to-portfolio fill boundary
+- positions, snapshots, and PnL persistence
+- AAHP scaffold and summaries
 
-Remaining for Milestone 1:
+Out of scope:
 
-- dashboard implementation beyond placeholder docs
-- service-to-service wiring and local orchestration beyond standalone endpoints
-- deeper integration tests against a live Postgres container
-
-## Execution to Portfolio Boundary
-
-The repo treats execution persistence as the upstream boundary for a future `portfolio-service`.
-
-- `fills` are the source of truth for position changes and realized execution.
-- `orders` are the source of truth for order intent and lifecycle requests, but not for positions.
-- `execution_events` are the audit/event stream for downstream consumers that need lifecycle visibility.
-
-Until `portfolio-service` exists, the execution service owns these records and downstream code should derive positions from fills, not accepted orders alone.
-
-Live Postgres execution integration tests:
-
-- start Postgres locally, for example with `docker compose up postgres -d`
-- set `TEST_EXECUTION_POSTGRES_URL`
-- run `pytest tests/integration/test_execution_service_postgres.py`
-- portfolio-facing read boundary coverage lives in `tests/integration/test_execution_service_portfolio_boundary.py`
+- live broker sync
+- options or margin logic
+- advanced analytics
+- background workers
+- large-scale LLM orchestration
