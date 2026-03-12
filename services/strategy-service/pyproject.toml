@@ -5,8 +5,13 @@ description = "Deterministic fake strategy service."
 requires-python = ">=3.11"
 dependencies = [
   "contracts",
+  "market_data",
   "fastapi>=0.115.0",
+  "sqlalchemy>=2.0.0",
   "uvicorn>=0.34.0",
+  "anthropic>=0.40.0",
+  "httpx>=0.27.0",
+  "apscheduler>=3.10.0",
 ]
 
 [build-system]

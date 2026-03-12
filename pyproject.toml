@@ -6,10 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "contracts",
+  "market_data",
+  "brokers",
   "execution-service",
   "portfolio-service",
   "policy-service",
   "strategy-service",
+  "research-service",
 ]
 
 [dependency-groups]
@@ -22,18 +25,24 @@ dev = [
 [tool.uv.workspace]
 members = [
   "libs/contracts",
+  "libs/market_data",
+  "libs/brokers",
   "services/execution-service",
   "services/portfolio-service",
   "services/policy-service",
   "services/strategy-service",
+  "services/research-service",
 ]
 
 [tool.uv.sources]
 contracts = { workspace = true }
+market_data = { workspace = true }
+brokers = { workspace = true }
 execution-service = { workspace = true }
 portfolio-service = { workspace = true }
 policy-service = { workspace = true }
 strategy-service = { workspace = true }
+research-service = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

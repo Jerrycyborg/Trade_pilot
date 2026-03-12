@@ -9,6 +9,90 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# ---------------------------------------------------------------------------
+# Risk classification
+# ---------------------------------------------------------------------------
+
+
+class RiskScore(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+# ---------------------------------------------------------------------------
+# Market data / technical analysis contracts
+# ---------------------------------------------------------------------------
+
+
+class TechnicalSummaryContract(BaseModel):
+    """Stripped-down TA summary for inter-service transport."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    trend_direction: str  # "bullish" | "bearish" | "neutral"
+    signal_tags: list[str] = Field(default_factory=list)
+    rsi_14: float
+    macd_histogram: float
+    bb_position: float  # 0-1 position within Bollinger Bands
+    data_source: str
+    as_of: datetime
+
+
+# ---------------------------------------------------------------------------
+# Research contracts
+# ---------------------------------------------------------------------------
+
+
+class ResearchReport(BaseModel):
+    """Structured output from research-service per symbol."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    generated_at: datetime
+    sentiment: str  # "bullish" | "bearish" | "neutral"
+    headline_summary: str
+    risk_factors: list[str] = Field(default_factory=list)
+    macro_context: str = ""
+    confidence_modifier: float = Field(default=0.0, ge=-0.2, le=0.2)
+    cached: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Broker / account contracts
+# ---------------------------------------------------------------------------
+
+
+class AccountInfo(BaseModel):
+    """Broker account state."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    buying_power: float
+    equity: float
+    cash: float
+    mode: str  # "paper" | "live"
+
+
+# ---------------------------------------------------------------------------
+# Worker / scheduler contracts
+# ---------------------------------------------------------------------------
+
+
+class WorkerStatus(BaseModel):
+    """Trade worker / scheduler state."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    last_run_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = None
+    symbols_watched: list[str] = Field(default_factory=list)
+    is_running: bool = False
+    last_run_error: Optional[str] = None
+
+
 class OrderStatus(str, Enum):
     NEW = "NEW"
     ACCEPTED = "ACCEPTED"
@@ -19,7 +103,8 @@ class OrderStatus(str, Enum):
 
 
 class SignalCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Relaxed to "ignore" to allow forward-compatible field additions
+    model_config = ConfigDict(extra="ignore")
 
     signal_id: str
     symbol: str
@@ -30,6 +115,10 @@ class SignalCandidate(BaseModel):
     horizon: str = "intraday"
     source: str = "strategy-service"
     model_version: str
+    # Milestone 2 additions
+    risk_score: str = "MEDIUM"
+    ta_summary: Optional[TechnicalSummaryContract] = None
+    research_summary: Optional[str] = None
 
 
 class MarketContext(BaseModel):
@@ -50,7 +139,7 @@ class PortfolioContext(BaseModel):
 
 
 class PolicyEvaluationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     signal_id: str
     symbol: str
@@ -59,6 +148,8 @@ class PolicyEvaluationRequest(BaseModel):
     size_pct: float = Field(gt=0.0, le=1.0)
     market_context: MarketContext
     portfolio_context: PortfolioContext
+    # Milestone 2 addition
+    risk_score: str = "MEDIUM"
 
 
 class PolicyDecision(BaseModel):
@@ -69,6 +160,18 @@ class PolicyDecision(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     approved_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
     policy_version: str = "risk_policy_v1"
+
+
+class PolicyEvaluationRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    signal_id: str
+    symbol: str
+    decision: str
+    reasons: list[str] = Field(default_factory=list)
+    approved_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
+    policy_version: str
+    created_at: datetime
 
 
 class ExecutionOrderRequest(BaseModel):

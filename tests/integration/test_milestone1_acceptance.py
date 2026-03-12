@@ -3,16 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 
 def _build_clients(
     tmp_path: Path,
 ) -> tuple[
-    TestClient, TestClient, TestClient, TestClient, object, object, object, object, object
+    TestClient,
+    TestClient,
+    TestClient,
+    TestClient,
+    object,
+    object,
+    object,
+    object,
+    object,
+    object,
 ]:
-    strategy_client = _build_strategy_client()
+    strategy_client = _build_strategy_client(tmp_path / "strategy.db")
     policy_client, policy_models, policy_database = _build_policy_client(tmp_path / "policy.db")
     execution_client, execution_models, execution_database = _build_execution_client(
         tmp_path / "execution.db"
@@ -29,14 +38,30 @@ def _build_clients(
         execution_models,
         portfolio_models,
         policy_database,
+        execution_database,
         portfolio_database,
     )
 
 
-def _build_strategy_client() -> TestClient:
-    from strategy_service.main import app
+def _build_strategy_client(db_path: Path) -> TestClient:
+    import strategy_service.config as config
+    import strategy_service.database as database
+    import strategy_service.main as main
 
-    return TestClient(app)
+    config.settings = config.StrategySettings(database_url=f"sqlite+pysqlite:///{db_path}")
+    database.settings = config.settings
+    database.connect_args = {"check_same_thread": False}
+    database.engine = create_engine(
+        config.settings.database_url, future=True, connect_args=database.connect_args
+    )
+    database.SessionLocal = sessionmaker(
+        bind=database.engine, autoflush=False, autocommit=False, future=True
+    )
+    database.Base.metadata.create_all(bind=database.engine)
+    main.engine = database.engine
+    main.SessionLocal = database.SessionLocal
+
+    return TestClient(main.app)
 
 
 def _build_policy_client(db_path: Path) -> tuple[TestClient, object, object]:
@@ -158,6 +183,7 @@ def test_milestone1_acceptance_flow(tmp_path: Path) -> None:
         execution_models,
         portfolio_models,
         policy_database,
+        execution_database,
         portfolio_database,
     ) = _build_clients(tmp_path)
 
@@ -201,7 +227,19 @@ def test_milestone1_acceptance_flow(tmp_path: Path) -> None:
     assert snapshot["positions"][0]["symbol"] == "AAPL"
     assert snapshot["positions"][0]["net_qty"] == 10
 
-    with execution_models.SessionLocal() as session:
+    signals_response = strategy_client.get("/v1/signals", params={"limit": 1})
+    assert signals_response.status_code == 200
+    assert signals_response.json()[0]["signal_id"] == signal["signal_id"]
+
+    evaluations_response = policy_client.get("/v1/policy/evaluations", params={"limit": 1})
+    assert evaluations_response.status_code == 200
+    assert evaluations_response.json()[0]["signal_id"] == signal["signal_id"]
+
+    orders_response = execution_client.get("/v1/orders", params={"limit": 1})
+    assert orders_response.status_code == 200
+    assert orders_response.json()[0]["order_id"] == order["order_id"]
+
+    with execution_database.SessionLocal() as session:
         stored_order = session.scalar(
             select(execution_models.OrderRecord).where(
                 execution_models.OrderRecord.order_id == order["order_id"]
@@ -229,3 +267,67 @@ def test_milestone1_acceptance_flow(tmp_path: Path) -> None:
     assert policy_eval.decision == "APPROVE"
     assert len(positions) == 1
     assert len(snapshots) == 1
+
+
+def test_review_path_is_visible_without_execution_or_portfolio_mutation(tmp_path: Path) -> None:
+    (
+        strategy_client,
+        policy_client,
+        execution_client,
+        portfolio_client,
+        policy_models,
+        execution_models,
+        portfolio_models,
+        policy_database,
+        execution_database,
+        portfolio_database,
+    ) = _build_clients(tmp_path)
+
+    signal_response = strategy_client.post("/v1/signals/generate", json={"symbol": "MSFT"})
+    assert signal_response.status_code == 200
+    signal = signal_response.json()
+
+    review_payload = _policy_payload(signal)
+    review_payload["confidence"] = 0.4
+    policy_response = policy_client.post("/v1/policy/evaluate", json=review_payload)
+    assert policy_response.status_code == 200
+    decision = policy_response.json()
+    assert decision["decision"] == "REVIEW"
+    assert "confidence_below_floor" in decision["reasons"]
+
+    evaluations_response = policy_client.get(
+        "/v1/policy/evaluations",
+        params={"symbol": "MSFT", "decision": "review"},
+    )
+    assert evaluations_response.status_code == 200
+    assert evaluations_response.json()[0]["signal_id"] == signal["signal_id"]
+
+    orders_response = execution_client.get("/v1/orders")
+    assert orders_response.status_code == 200
+    assert orders_response.json() == []
+
+    reconcile_response = portfolio_client.post("/v1/portfolio/reconcile", json={"latest_quotes": {}})
+    assert reconcile_response.status_code == 200
+    snapshot_response = portfolio_client.get("/v1/portfolio/snapshot")
+    assert snapshot_response.status_code == 200
+    snapshot = snapshot_response.json()
+    assert snapshot["positions"] == []
+    assert snapshot["gross_exposure"] == 0.0
+
+    with execution_database.SessionLocal() as session:
+        order_count = session.scalar(select(func.count()).select_from(execution_models.OrderRecord))
+
+    with policy_database.SessionLocal() as session:
+        policy_eval = session.scalar(
+            select(policy_models.PolicyEvaluationRecord).where(
+                policy_models.PolicyEvaluationRecord.signal_id == signal["signal_id"]
+            )
+        )
+
+    with portfolio_database.SessionLocal() as session:
+        positions = session.scalars(select(portfolio_models.PositionRecordModel)).all()
+
+    assert order_count == 0
+    assert policy_eval is not None
+    assert policy_eval.decision == "REVIEW"
+    assert positions == []

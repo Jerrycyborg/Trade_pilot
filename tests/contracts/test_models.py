@@ -32,18 +32,41 @@ def test_order_status_enum_serializes() -> None:
     assert response.model_dump()["status"] == OrderStatus.ACCEPTED
 
 
-def test_signal_candidate_rejects_extra_fields() -> None:
-    with pytest.raises(Exception):
-        SignalCandidate(
-            signal_id="sig-1",
-            symbol="AAPL",
-            ts=datetime.now(timezone.utc),
-            candidate_action="BUY",
-            confidence=0.7,
-            size_pct=0.02,
-            model_version="v1",
-            unexpected="boom",
-        )
+def test_signal_candidate_ignores_extra_fields() -> None:
+    # SignalCandidate uses extra="ignore" for forward compatibility.
+    # Extra fields should be silently ignored rather than raising an error.
+    signal = SignalCandidate(
+        signal_id="sig-1",
+        symbol="AAPL",
+        ts=datetime.now(timezone.utc),
+        candidate_action="BUY",
+        confidence=0.7,
+        size_pct=0.02,
+        model_version="v1",
+        unexpected_future_field="ignored",
+    )
+    assert signal.symbol == "AAPL"
+    assert not hasattr(signal, "unexpected_future_field")
+
+
+def test_signal_candidate_new_risk_fields() -> None:
+    from contracts import TechnicalSummaryContract
+    from datetime import datetime, timezone
+
+    signal = SignalCandidate(
+        signal_id="sig-2",
+        symbol="MSFT",
+        ts=datetime.now(timezone.utc),
+        candidate_action="BUY",
+        confidence=0.75,
+        size_pct=0.015,
+        model_version="ai-v1",
+        risk_score="LOW",
+        research_summary="Strong earnings beat.",
+    )
+    assert signal.risk_score == "LOW"
+    assert signal.research_summary == "Strong earnings beat."
+    assert signal.ta_summary is None
 
 
 def test_execution_fill_validation() -> None:

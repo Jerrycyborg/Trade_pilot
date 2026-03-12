@@ -85,7 +85,8 @@ def test_duplicate_submission_same_payload_does_not_create_extra_events(tmp_path
         )
 
     assert order_count == 1
-    assert event_count == 2
+    # ACCEPTED order creates 3 events: order.submitted, order.accepted, fill.recorded
+    assert event_count == 3
     assert stored_order is not None
     assert stored_order.external_order_id
 
@@ -101,3 +102,32 @@ def test_rejected_order_path(tmp_path: Path) -> None:
     body = response.json()
     assert body["status"] == "REJECTED"
     assert body["rejection_reason"] == "symbol_rejected"
+
+
+def test_list_orders_returns_newest_first_and_filters(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    accepted = client.post(
+        "/v1/orders", json=_request(signal_id="sig-1", symbol="AAPL"), headers={"Idempotency-Key": "idem-6"}
+    )
+    rejected = client.post(
+        "/v1/orders",
+        json=_request(signal_id="sig-2", symbol="REJECT"),
+        headers={"Idempotency-Key": "idem-7"},
+    )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 200
+
+    listed = client.get("/v1/orders", params={"limit": 2})
+    assert listed.status_code == 200
+    body = listed.json()
+    assert len(body) == 2
+    assert body[0]["order_id"] == rejected.json()["order_id"]
+    assert body[1]["order_id"] == accepted.json()["order_id"]
+
+    filtered = client.get("/v1/orders", params={"status": "rejected", "symbol": "reject"})
+    assert filtered.status_code == 200
+    filtered_body = filtered.json()
+    assert len(filtered_body) == 1
+    assert filtered_body[0]["order_id"] == rejected.json()["order_id"]
+    assert filtered_body[0]["rejection_reason"] == "symbol_rejected"

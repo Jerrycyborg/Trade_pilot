@@ -1,6 +1,7 @@
-"""Shared contracts for Milestone 1 services."""
+"""Shared contracts for Trade Pilot services."""
 
 from .models import (
+    AccountInfo,
     ExecutionEvent,
     ExecutionFill,
     ExecutionOrderRequest,
@@ -10,16 +11,22 @@ from .models import (
     MarketContext,
     OrderStatus,
     PolicyDecision,
+    PolicyEvaluationRecordResponse,
     PolicyEvaluationRequest,
     PortfolioReconcileRequest,
     PortfolioReconcileResponse,
     PortfolioSnapshot,
     PortfolioContext,
     PositionRecord,
+    ResearchReport,
+    RiskScore,
     SignalCandidate,
+    TechnicalSummaryContract,
+    WorkerStatus,
 )
 
 __all__ = [
+    "AccountInfo",
     "ExecutionOrderRequest",
     "ExecutionOrderResponse",
     "ExecutionEvent",
@@ -29,11 +36,16 @@ __all__ = [
     "MarketContext",
     "OrderStatus",
     "PolicyDecision",
+    "PolicyEvaluationRecordResponse",
     "PolicyEvaluationRequest",
     "PortfolioReconcileRequest",
     "PortfolioReconcileResponse",
     "PortfolioSnapshot",
     "PortfolioContext",
     "PositionRecord",
+    "ResearchReport",
+    "RiskScore",
     "SignalCandidate",
+    "TechnicalSummaryContract",
+    "WorkerStatus",
 ]

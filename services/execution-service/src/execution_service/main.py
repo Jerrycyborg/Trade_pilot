@@ -8,19 +8,18 @@ import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from contracts import ExecutionEvent, ExecutionOrderRequest, ExecutionOrderResponse, FillRecord
-from fastapi import FastAPI, Header, HTTPException
+from contracts import AccountInfo, ExecutionEvent, ExecutionOrderRequest, ExecutionOrderResponse, FillRecord
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .broker import PaperBroker
+from .broker import broker
 from .database import Base, SessionLocal, engine
 from .logging_utils import log_event
 from .models import ExecutionEventRecord, FillRecord as FillRecordModel, OrderRecord
 
 logging.basicConfig(level=logging.INFO)
-
-broker = PaperBroker()
 
 
 @asynccontextmanager
@@ -30,6 +29,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="execution-service", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/v1/orders", response_model=ExecutionOrderResponse)
@@ -87,7 +93,7 @@ def create_order(
             payload={"rejection_reason": broker_result.rejection_reason},
         )
         if broker_result.status.value == "ACCEPTED":
-            fill = _persist_fill(session, order=order)
+            fill = _persist_fill(session, order=order, fill_price=broker_result.fill_price)
             _persist_event(
                 session,
                 order=order,
@@ -115,6 +121,24 @@ def get_order(order_id: str) -> ExecutionOrderResponse:
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
         return _to_response(order)
+
+
+@app.get("/v1/orders", response_model=list[ExecutionOrderResponse])
+def list_orders(
+    limit: int = Query(default=20, ge=1, le=100),
+    symbol: str | None = None,
+    status: str | None = None,
+) -> list[ExecutionOrderResponse]:
+    """Return persisted orders ordered newest-first."""
+
+    with SessionLocal() as session:
+        statement = select(OrderRecord)
+        if symbol:
+            statement = statement.where(OrderRecord.symbol == symbol.upper())
+        if status:
+            statement = statement.where(OrderRecord.status == status.upper())
+        orders = session.scalars(statement.order_by(OrderRecord.created_at.desc()).limit(limit)).all()
+        return [_to_response(order) for order in orders]
 
 
 @app.get("/v1/orders/{order_id}/fills", response_model=list[FillRecord])
@@ -147,6 +171,12 @@ def list_execution_events() -> list[ExecutionEvent]:
     with SessionLocal() as session:
         events = session.scalars(select(ExecutionEventRecord)).all()
         return [_to_event_response(event) for event in events]
+
+
+@app.get("/v1/account", response_model=AccountInfo)
+def get_account() -> AccountInfo:
+    """Return broker account balance and mode (paper/live)."""
+    return broker.get_account()
 
 
 def _hash_payload(request: ExecutionOrderRequest) -> str:
@@ -230,7 +260,8 @@ def _persist_event(
     )
 
 
-def _persist_fill(session, *, order: OrderRecord) -> FillRecord:
+def _persist_fill(session, *, order: OrderRecord, fill_price: float | None = None) -> FillRecord:
+    price = fill_price if fill_price is not None else 100.0
     fill = FillRecord(
         fill_id=str(uuid4()),
         order_id=order.order_id,
@@ -239,7 +270,7 @@ def _persist_fill(session, *, order: OrderRecord) -> FillRecord:
         symbol=order.symbol,
         side=order.side,
         qty=order.qty,
-        price=100.0,
+        price=price,
         filled_at=order.created_at,
     )
     session.add(

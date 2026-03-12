@@ -5,6 +5,7 @@ description = "Execution service with paper broker adapter."
 requires-python = ">=3.11"
 dependencies = [
   "contracts",
+  "brokers",
   "fastapi>=0.115.0",
   "sqlalchemy>=2.0.39",
   "psycopg[binary]>=3.2.0",

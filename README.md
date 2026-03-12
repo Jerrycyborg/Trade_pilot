@@ -2,146 +2,189 @@
 
 # Trade Pilot
 
-Production-minded AI trading stack built around a strict execution boundary: strategy proposes, policy approves, execution persists fills, and portfolio state is derived from fills only.
+Production-minded AI trading stack: strategy proposes → policy approves → execution fills → portfolio reconciles. Milestone 2 adds real AI signal generation (Claude), live market data, Alpaca broker integration, web research, and an automated trade worker.
 
 Suggested GitHub description:
-`Production-minded AI trading stack with deterministic execution, fill-driven portfolio reconciliation, and AAHP-based AI handoffs.`
+`AI-driven trading stack with Claude-powered signals, Alpaca integration, live charts, manual trading UI, and fill-driven portfolio reconciliation.`
 
 Suggested GitHub topics:
-`ai-trading`, `algorithmic-trading`, `fastapi`, `python`, `postgresql`, `portfolio-management`, `risk-management`, `multi-agent`, `aahp`
-
-## Overview
-
-This repository implements a staged trading platform architecture with explicit service boundaries:
-
-- `strategy-service` generates deterministic signals
-- `policy-service` applies deterministic risk and approval rules
-- `execution-service` handles order persistence, fills, and execution events
-- `portfolio-service` derives positions and PnL from execution fills only
-
-The design intentionally separates reasoning, policy, execution, and portfolio state so that trading behavior stays auditable and deterministic.
+`ai-trading`, `algorithmic-trading`, `fastapi`, `python`, `alpaca`, `anthropic`, `claude`, `portfolio-management`, `risk-management`
 
 ## Architecture
 
-Core flow:
+```
+┌───────────────────────────────────────────────────────────────┐
+│                        Trade Pilot                            │
+│                                                               │
+│  research-service ──► strategy-service ──► policy-service    │
+│       (Claude)          (AI signals)       (risk rules)      │
+│                                │                              │
+│                         execution-service                     │
+│                         (Alpaca / paper)                      │
+│                                │                              │
+│                        portfolio-service                      │
+│                        (fill-driven PnL)                      │
+│                                                               │
+│                     dashboard (port 8080)                     │
+│              charts · ticker · manual trades · AI research    │
+└───────────────────────────────────────────────────────────────┘
+```
 
-1. strategy proposes a signal
-2. policy approves or rejects it
-3. execution persists orders, fills, and events
-4. portfolio reconciles from fills only
+**Core flow:**
+1. Research service fetches web news + fundamentals via Claude with `web_search` tool
+2. Strategy service generates AI signals (Claude Haiku for TA analysis) with risk scoring (LOW / MEDIUM / HIGH)
+3. Policy service approves / reviews / rejects based on risk tier and hard rules
+4. Execution service places orders via Alpaca (paper or live) or paper broker fallback
+5. Portfolio service derives positions and PnL from fills only (ADR-002)
+6. Trade worker runs the full pipeline on a configurable schedule
 
-Key boundary rule:
-
-- `orders` are not portfolio truth
-- `fills` are the source of truth for positions
-- `execution_events` are the lifecycle and audit stream
+**ADR boundaries preserved:**
+- ADR-001: Only execution-service places orders
+- ADR-002: Portfolio state derived exclusively from fills
 
 ## Services
 
-- `libs/contracts`: shared Pydantic contracts
-- `services/strategy-service`: fake deterministic signal generation
-- `services/policy-service`: deterministic policy gate
-- `services/execution-service`: paper execution, fills, idempotency, execution events
-- `services/portfolio-service`: derived positions, snapshots, and PnL reconciliation
-- `apps/dashboard`: placeholder for future operator UI
+| Service | Port | Purpose |
+|---|---|---|
+| `libs/contracts` | — | Shared Pydantic contracts |
+| `libs/market_data` | — | OHLCV fetching + technical indicators (RSI, MACD, Bollinger, EMA) |
+| `libs/brokers` | — | AlpacaBroker + PaperBroker behind common interface |
+| `services/research-service` | 8005 | Claude + web search per-symbol research with 30-min cache |
+| `services/strategy-service` | 8003 | AI signal generation, market data API, trade worker/scheduler |
+| `services/policy-service` | 8001 | Risk-tier routing + hard reject rules |
+| `services/execution-service` | 8002 | Order placement, fills, idempotency, account balance |
+| `services/portfolio-service` | 8004 | Positions, snapshots, PnL reconciliation |
+| `apps/dashboard` | 8080 | Live charts, ticker bar, manual trades, AI research |
 
 ## Quick Start
 
-1. Install Python 3.11 and `uv`.
-2. Run `make setup`.
-3. Copy `.env.example` to `.env` if you need custom database URLs.
-4. Start Postgres:
+### Prerequisites
+- Python 3.11+
+- `uv` package manager
 
+### 1. Install
 ```bash
-docker compose up postgres -d
+uv sync --all-packages --group dev
 ```
 
-5. Run services as needed:
+### 2. Configure (optional — all have safe defaults)
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+Key environment variables:
+```bash
+ANTHROPIC_API_KEY=sk-ant-...     # enables AI signals + web research
+ALPACA_API_KEY=PK...             # enables real market data + trading
+ALPACA_SECRET_KEY=...
+ALPACA_PAPER=true                # paper trading (default; set false for live)
+WORKER_ENABLED=true              # enables 15-min auto-trade loop
+STRATEGY_WATCHLIST=AAPL,MSFT,GOOGL,BTC/USD,ETH/USD
+```
+
+### 3. Start all services
+```bash
+# Terminal 1-5 (or use a process manager)
+make run-research     # port 8005
+make run-strategy     # port 8003
+make run-policy       # port 8001
+make run-execution    # port 8002
+make run-portfolio    # port 8004
+
+# Dashboard
+python3 -m http.server 8080 --directory apps/dashboard
+```
+
+Then open **http://localhost:8080**
+
+### 4. Without API keys (zero-config mode)
+All services work without any API keys:
+- Signals use deterministic hash algorithm (Milestone 1 fallback)
+- Market data uses Yahoo Finance (free)
+- Orders go through PaperBroker ($100k simulated balance)
+- Research returns neutral stubs
+
+## Dashboard Features
+
+- **Live Ticker Bar** — real-time prices with % change (Yahoo Finance / Alpaca)
+- **Price Chart** — TradingView Lightweight Charts candlestick + EMA-20/50 overlays
+- **Technical Indicators** — RSI, MACD, Bollinger Bands shown below chart
+- **Manual Trade Panel** — BUY / SELL form → policy check → execution
+- **AI Signal Generator** — generate and preview signals per symbol
+- **Wallet Panel** — buying power, equity, cash + PAPER/LIVE mode badge
+- **Worker Status** — last/next run, "Run Now" button
+- **AI Research Panel** — per-symbol sentiment, headlines, risk factors
+- **Lifecycle Drill-down** — full signal → policy → order → fill → position chain
+
+## Development
 
 ```bash
+make lint       # ruff check
+make test       # pytest (37 passing, 7 skipped for live services)
+make setup      # uv sync all packages
+```
+
+Service-specific make targets:
+```bash
+make run-research
 make run-strategy
 make run-policy
 make run-execution
 make run-portfolio
 ```
 
-## Development
-
-Commands:
-
-- `make lint`
-- `make test`
-- `make run-strategy`
-- `make run-policy`
-- `make run-execution`
-- `make run-portfolio`
-- `make aahp-validate`
-- `make aahp-checksums`
-
-Live Postgres execution integration tests:
-
-1. Start Postgres locally.
-2. Set `TEST_EXECUTION_POSTGRES_URL`.
-3. Run:
-
-```bash
-pytest tests/integration/test_execution_service_postgres.py
-pytest tests/integration/test_execution_service_portfolio_boundary.py
-```
-
 ## Repository Layout
 
 ```text
 libs/
-  contracts/
+  contracts/          Shared Pydantic models (SignalCandidate, FillRecord, etc.)
+  market_data/        OHLCV + technical indicators library
+  brokers/            AlpacaBroker + PaperBroker
 
 services/
-  strategy-service/
-  policy-service/
-  execution-service/
-  portfolio-service/
+  research-service/   Claude web research (port 8005)
+  strategy-service/   AI signals + market data API + trade worker (port 8003)
+  policy-service/     Risk-tier routing + hard rules (port 8001)
+  execution-service/  Order placement + fills + account (port 8002)
+  portfolio-service/  Positions + PnL reconciliation (port 8004)
 
 apps/
-  dashboard/
+  dashboard/          Live trading dashboard (serve on port 8080)
 
 tests/
-.ai/handoff/
+.ai/handoff/          AAHP task briefs, summaries, ADRs, checksums
 ```
 
-## AAHP Workflow
+## AAHP Handoff
 
-The repository includes a lightweight AAHP handoff structure for multi-agent work:
-
-- `.ai/handoff/manifest.json`
-- `.ai/handoff/checksums/manifest_checksums.json`
-- `.ai/handoff/task_briefs/`
-- `.ai/handoff/summaries/`
-- `.ai/handoff/decisions/`
-- `.ai/handoff/prompts/`
-
-Helper commands:
-
+Multi-agent handoff structure for maintainability:
 ```bash
 python3 tools/aahp.py validate-manifest
 python3 tools/aahp.py generate-checksums
-python3 tools/aahp.py create-task-brief TASK-001 "Implement dashboard shell"
 ```
 
 ## Status
 
-Implemented:
+**Milestone 2 (complete):**
+- Claude-powered AI signal generation with TA + fundamental research
+- Alpaca Markets broker integration (paper + live toggle)
+- Real OHLCV market data via Alpaca / Yahoo Finance fallback
+- Technical indicators: RSI, MACD, Bollinger Bands, EMA
+- Research service: Claude + `web_search_20250305` tool, 30-min cache
+- Risk-tier policy routing (LOW auto-approve, HIGH auto-reject)
+- Automated trade worker with APScheduler (15-min intervals)
+- Live ticker bar, price charts, manual trade UI
+- Wallet panel with real Alpaca account balance
 
-- shared contracts
-- strategy, policy, execution, and portfolio services
-- paper broker adapter
-- execution-to-portfolio fill boundary
-- positions, snapshots, and PnL persistence
-- AAHP scaffold and summaries
+**Milestone 1 (complete):**
+- Shared contracts, service boundaries, paper broker
+- Fill-driven portfolio reconciliation with PnL
+- Execution events audit stream
+- Refresh-based operator dashboard
 
-Out of scope:
-
-- live broker sync
-- options or margin logic
-- advanced analytics
-- background workers
-- large-scale LLM orchestration
+**Out of scope:**
+- Options or margin logic
+- Real-time WebSocket streaming
+- Authentication / multi-user
+- Advanced order types (stop-loss, trailing stop)

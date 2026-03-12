@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from contracts import PortfolioReconcileRequest, PortfolioReconcileResponse, PortfolioSnapshot, PositionRecord
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, select
 
 from .database import Base, SessionLocal, engine
@@ -27,6 +28,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="portfolio-service", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/v1/portfolio/positions", response_model=list[PositionRecord])

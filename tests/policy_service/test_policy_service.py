@@ -80,3 +80,34 @@ def test_approve_path(tmp_path: Path) -> None:
     assert body["decision"] == "APPROVE"
     assert body["approved_size_pct"] == 0.01
     assert body["policy_version"] == "risk_policy_v1"
+
+
+def test_list_evaluations_returns_newest_first_and_filters(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    approved = client.post("/v1/policy/evaluate", json=_request(signal_id="sig-1", symbol="AAPL"))
+    review = client.post(
+        "/v1/policy/evaluate",
+        json=_request(signal_id="sig-2", symbol="MSFT", confidence=0.4),
+    )
+    rejected = client.post(
+        "/v1/policy/evaluate",
+        json=_request(signal_id="sig-3", symbol="AAPL", size_pct=0.05),
+    )
+
+    assert approved.status_code == 200
+    assert review.status_code == 200
+    assert rejected.status_code == 200
+
+    listed = client.get("/v1/policy/evaluations", params={"limit": 2})
+    assert listed.status_code == 200
+    body = listed.json()
+    assert len(body) == 2
+    assert body[0]["signal_id"] == "sig-3"
+    assert body[1]["signal_id"] == "sig-2"
+
+    filtered = client.get("/v1/policy/evaluations", params={"symbol": "aapl", "decision": "reject"})
+    assert filtered.status_code == 200
+    filtered_body = filtered.json()
+    assert len(filtered_body) == 1
+    assert filtered_body[0]["signal_id"] == "sig-3"
+    assert "max_size_exceeded" in filtered_body[0]["reasons"]

@@ -1,0 +1,19 @@
+[project]
+name = "market_data"
+version = "0.1.0"
+description = "OHLCV data fetching and technical indicator computation."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.10.0",
+    "alpaca-py>=0.38.0",
+    "yfinance>=0.2.0",
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/market_data"]

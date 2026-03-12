@@ -3,53 +3,282 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Trade Pilot Dashboard MVP</title>
+    <title>Trade Pilot Dashboard</title>
     <link rel="stylesheet" href="./styles.css" />
+    <!-- TradingView Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
     <main class="page">
       <header class="hero">
         <div>
           <p class="eyebrow">Trade Pilot</p>
-          <h1>Dashboard MVP</h1>
+          <h1>Live Trading Dashboard</h1>
           <p class="lede">
-            Refresh-based operator dashboard for the Milestone 1 trading flow.
+            Real-time operator dashboard — live charts, manual trades, AI signals, and portfolio tracking.
           </p>
         </div>
         <div class="controls">
           <button id="refresh">Refresh</button>
+          <span id="mode-badge" class="mode-badge mode-paper">PAPER</span>
           <p id="status">Idle</p>
+          <dl class="service-list">
+            <div><dt>Strategy</dt><dd id="strategy-url"></dd></div>
+            <div><dt>Policy</dt><dd id="policy-url"></dd></div>
+            <div><dt>Execution</dt><dd id="execution-url"></dd></div>
+            <div><dt>Portfolio</dt><dd id="portfolio-url"></dd></div>
+            <div><dt>Research</dt><dd id="research-url"></dd></div>
+          </dl>
         </div>
       </header>
 
+      <!-- Live Price Ticker Bar -->
+      <section class="ticker-bar" id="ticker-bar">
+        <div id="ticker-items" class="ticker-items">
+          <span class="ticker-loading">Loading prices...</span>
+        </div>
+      </section>
+
+      <!-- Wallet Panel -->
+      <section class="wallet-panel card">
+        <div class="card-head">
+          <h2>Wallet</h2>
+          <span id="wallet-mode-badge" class="mode-badge mode-paper">PAPER</span>
+        </div>
+        <div class="wallet-metrics">
+          <article class="metric-card">
+            <span class="metric-label">Buying Power</span>
+            <strong class="metric-value" id="wallet-buying-power">—</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Equity</span>
+            <strong class="metric-value" id="wallet-equity">—</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Cash</span>
+            <strong class="metric-value" id="wallet-cash">—</strong>
+          </article>
+        </div>
+      </section>
+
+      <!-- Chart + Manual Trade layout -->
+      <section class="trading-layout">
+
+        <!-- Price Chart Card -->
+        <article class="chart-card card">
+          <div class="card-head">
+            <h2>Price Chart</h2>
+            <div class="chart-controls">
+              <select id="chart-symbol">
+                <option value="AAPL">AAPL</option>
+                <option value="MSFT">MSFT</option>
+                <option value="GOOGL">GOOGL</option>
+                <option value="BTC/USD">BTC/USD</option>
+                <option value="ETH/USD">ETH/USD</option>
+              </select>
+              <select id="chart-days">
+                <option value="30">30d</option>
+                <option value="60" selected>60d</option>
+                <option value="90">90d</option>
+                <option value="180">180d</option>
+              </select>
+              <button id="chart-load" class="btn-secondary">Load Chart</button>
+            </div>
+          </div>
+          <div id="chart-price-info" class="chart-price-info"></div>
+          <div id="chart-container" class="chart-container">
+            <div class="chart-placeholder">Select a symbol and click Load Chart</div>
+          </div>
+          <div id="chart-indicators" class="chart-indicators"></div>
+        </article>
+
+        <!-- Manual Trade Panel -->
+        <article class="trade-panel card">
+          <div class="card-head">
+            <h2>Manual Trade</h2>
+            <span class="card-meta">Direct execution</span>
+          </div>
+          <form id="trade-form" class="trade-form">
+            <div class="form-group">
+              <label for="trade-symbol">Symbol</label>
+              <input id="trade-symbol" type="text" placeholder="AAPL" value="AAPL" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label for="trade-qty">Quantity (shares)</label>
+              <input id="trade-qty" type="number" min="1" max="10000" value="10" />
+            </div>
+            <div class="trade-buttons">
+              <button type="button" id="btn-buy" class="btn-trade btn-buy">BUY</button>
+              <button type="button" id="btn-sell" class="btn-trade btn-sell">SELL</button>
+            </div>
+            <div id="trade-status" class="trade-status"></div>
+            <div id="trade-result" class="trade-result"></div>
+          </form>
+
+          <!-- Quick Signal Generator -->
+          <div class="signal-quick">
+            <div class="card-head" style="margin-top:20px">
+              <h3>AI Signal</h3>
+            </div>
+            <div class="form-group">
+              <label for="signal-symbol">Symbol</label>
+              <input id="signal-symbol" type="text" placeholder="AAPL" value="AAPL" autocomplete="off" />
+            </div>
+            <button type="button" id="btn-generate-signal" class="btn-secondary" style="width:100%">
+              Generate Signal
+            </button>
+            <div id="signal-result" class="signal-result"></div>
+          </div>
+        </article>
+      </section>
+
+      <!-- Worker Status Panel -->
+      <section class="worker-panel card">
+        <div class="card-head">
+          <h2>Auto-Trade Worker</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="worker-running-badge" class="mode-badge mode-paper">IDLE</span>
+            <button id="btn-worker-run" class="btn-secondary">Run Now</button>
+          </div>
+        </div>
+        <div class="worker-info">
+          <div class="worker-field"><span class="field-label">Last Run</span><span id="worker-last-run">—</span></div>
+          <div class="worker-field"><span class="field-label">Next Run</span><span id="worker-next-run">—</span></div>
+          <div class="worker-field"><span class="field-label">Watching</span><span id="worker-symbols">—</span></div>
+          <div class="worker-field"><span class="field-label">Last Error</span><span id="worker-error">—</span></div>
+        </div>
+      </section>
+
+      <section class="metrics-grid">
+        <article class="metric-card">
+          <span class="metric-label">Signals</span>
+          <strong class="metric-value" id="metric-signals">0</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Policy</span>
+          <strong class="metric-value" id="metric-policy">0/0/0</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Orders</span>
+          <strong class="metric-value" id="metric-orders">0/0</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Fills</span>
+          <strong class="metric-value" id="metric-fills">0</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Exposure</span>
+          <strong class="metric-value" id="metric-exposure">$0.00</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">PnL</span>
+          <strong class="metric-value" id="metric-pnl">$0.00 / $0.00</strong>
+        </article>
+      </section>
+
+      <section class="filter-bar card">
+        <div class="filter-group">
+          <label for="symbol-filter">Symbol / ID</label>
+          <input id="symbol-filter" type="search" placeholder="AAPL, REJECT, signal id" />
+        </div>
+        <div class="filter-group">
+          <label for="state-filter">Workflow State</label>
+          <select id="state-filter">
+            <option value="ALL">All</option>
+            <option value="ACCEPTED">Accepted</option>
+            <option value="REJECTED">Rejected</option>
+            <option value="APPROVE">Approve</option>
+            <option value="REVIEW">Review</option>
+            <option value="REJECT">Reject</option>
+            <option value="PENDING">Pending</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label for="limit-filter">Recent Records</label>
+          <select id="limit-filter">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="25">25</option>
+            <option value="ALL">All</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="drilldown card">
+        <div class="card-head">
+          <h2>Lifecycle Drill-down</h2>
+          <span class="card-meta" id="lifecycles-count">0</span>
+        </div>
+        <div class="drilldown-layout">
+          <div id="lifecycles" class="lifecycle-list"></div>
+          <div id="lifecycle-detail" class="lifecycle-detail"></div>
+        </div>
+      </section>
+
+      <!-- Research Panel -->
+      <section class="research-panel card">
+        <div class="card-head">
+          <h2>AI Research</h2>
+          <span class="card-meta" id="research-count">0 symbols</span>
+        </div>
+        <div id="research-grid" class="research-grid"></div>
+      </section>
+
       <section class="grid">
         <article class="card">
-          <h2>Latest Signals</h2>
-          <pre id="signals">[]</pre>
+          <div class="card-head">
+            <h2>Latest Signals</h2>
+            <span class="card-meta" id="signals-count">0</span>
+          </div>
+          <div id="signals" class="panel-body"></div>
         </article>
         <article class="card">
-          <h2>Policy Decisions</h2>
-          <pre id="policy-decisions">[]</pre>
+          <div class="card-head">
+            <h2>Policy Decisions</h2>
+            <span class="card-meta" id="policy-decisions-count">0</span>
+          </div>
+          <div id="policy-decisions" class="panel-body"></div>
         </article>
         <article class="card">
-          <h2>Orders</h2>
-          <pre id="orders">[]</pre>
+          <div class="card-head">
+            <h2>Orders</h2>
+            <span class="card-meta" id="orders-count">0</span>
+          </div>
+          <div id="orders" class="panel-body"></div>
         </article>
         <article class="card">
-          <h2>Fills</h2>
-          <pre id="fills">[]</pre>
+          <div class="card-head">
+            <h2>Fills</h2>
+            <span class="card-meta" id="fills-count">0</span>
+          </div>
+          <div id="fills" class="panel-body"></div>
         </article>
         <article class="card">
-          <h2>Positions</h2>
-          <pre id="positions">[]</pre>
+          <div class="card-head">
+            <h2>Positions</h2>
+            <span class="card-meta" id="positions-count">0</span>
+          </div>
+          <div id="positions" class="panel-body"></div>
         </article>
         <article class="card">
-          <h2>Rejection Reasons</h2>
-          <pre id="rejections">[]</pre>
+          <div class="card-head">
+            <h2>Rejection Reasons</h2>
+            <span class="card-meta" id="rejections-count">0</span>
+          </div>
+          <div id="rejections" class="panel-body"></div>
         </article>
       </section>
     </main>
 
-    <script src="./mvp.js"></script>
+    <script>
+      window.TRADE_PILOT_CONFIG = {
+        strategyBaseUrl: "http://localhost:8003",
+        policyBaseUrl: "http://localhost:8001",
+        executionBaseUrl: "http://localhost:8002",
+        portfolioBaseUrl: "http://localhost:8004",
+        researchBaseUrl: "http://localhost:8005",
+      };
+    </script>
+    <script type="module" src="./mvp.js"></script>
   </body>
 </html>
