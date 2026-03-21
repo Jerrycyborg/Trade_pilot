@@ -6,16 +6,19 @@
     <title>Trade Pilot Dashboard</title>
     <link rel="stylesheet" href="./styles.css" />
     <script>
+      // All API calls go through nginx reverse proxy (/api/<service>/) so
+      // HTTPS mixed-content is never an issue regardless of where you access from.
+      const _base = window.location.origin;
       window.TRADE_PILOT_CONFIG = {
-        strategyBaseUrl: window.location.origin.replace(/:\d+$/, ':8003'),
-        policyBaseUrl: window.location.origin.replace(/:\d+$/, ':8001'),
-        executionBaseUrl: window.location.origin.replace(/:\d+$/, ':8002'),
-        portfolioBaseUrl: window.location.origin.replace(/:\d+$/, ':8004'),
-        researchBaseUrl: window.location.origin.replace(/:\d+$/, ':8005'),
-        orchestratorBaseUrl: window.location.origin.replace(/:\d+$/, ':8007'),
-        approvalBaseUrl: window.location.origin.replace(/:\d+$/, ':8010'),
-        auditBaseUrl: window.location.origin.replace(/:\d+$/, ':8006'),
-        sentimentBaseUrl: window.location.origin.replace(/:\d+$/, ':8008'),
+        strategyBaseUrl:     _base + '/api/strategy',
+        policyBaseUrl:       _base + '/api/policy',
+        executionBaseUrl:    _base + '/api/execution',
+        portfolioBaseUrl:    _base + '/api/portfolio',
+        researchBaseUrl:     _base + '/api/research',
+        orchestratorBaseUrl: _base + '/api/orchestrator',
+        approvalBaseUrl:     _base + '/api/approval',
+        auditBaseUrl:        _base + '/api/audit',
+        sentimentBaseUrl:    _base + '/api/sentiment',
         internalKey: "f9b76fe1b704a220d66e5c4687a3f6f7fbadb59064a0471e19dcc5b8302140c5",
         adminKey: "b756bc36eef8a5d90f8117e778dd494a5fae740bf4dfa88d74ea44da428abac4",
       };

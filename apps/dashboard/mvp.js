@@ -1,15 +1,18 @@
 import { buildDashboardView, buildMetrics, mergeRefreshResults } from "./dashboard_core.mjs";
 
 const RAW_CONFIG = {
-  strategyBaseUrl: "http://localhost:8003",
-  policyBaseUrl: "http://localhost:8001",
-  executionBaseUrl: "http://localhost:8002",
-  portfolioBaseUrl: "http://localhost:8004",
-  researchBaseUrl: "http://localhost:8005",
+  // Defaults for local dev — overridden by window.TRADE_PILOT_CONFIG in production
+  strategyBaseUrl:     "http://localhost:8003",
+  policyBaseUrl:       "http://localhost:8001",
+  executionBaseUrl:    "http://localhost:8002",
+  portfolioBaseUrl:    "http://localhost:8004",
+  researchBaseUrl:     "http://localhost:8005",
   orchestratorBaseUrl: "http://localhost:8007",
-  approvalBaseUrl: "http://localhost:8010",
-  auditBaseUrl: "http://localhost:8006",
-  sentimentBaseUrl: "http://localhost:8008",
+  approvalBaseUrl:     "http://localhost:8010",
+  auditBaseUrl:        "http://localhost:8006",
+  sentimentBaseUrl:    "http://localhost:8008",
+  internalKey:         "",
+  adminKey:            "",
   internalKey: "",
   adminKey: "",
   ...window.TRADE_PILOT_CONFIG,
