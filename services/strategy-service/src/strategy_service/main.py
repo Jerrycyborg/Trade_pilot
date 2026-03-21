@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 class SignalGenerationRequest(BaseModel):
-    symbol: str = "AAPL"
+    symbol: str | None = "AAPL"
+    symbols: list[str] | None = None
     use_ai: Optional[bool] = None  # None = auto-detect from ANTHROPIC_API_KEY
 
 
@@ -52,13 +53,15 @@ if settings.worker_enabled:
 @app.post("/v1/signals/generate", response_model=SignalCandidate)
 async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
     """Generate a trading signal. Uses AI pipeline when ANTHROPIC_API_KEY is set."""
+    symbols = [symbol.strip().upper() for symbol in (request.symbols or []) if symbol and symbol.strip()]
+    target_symbol = symbols[0] if symbols else (request.symbol or "AAPL").strip().upper()
     should_use_ai = request.use_ai if request.use_ai is not None else settings.use_ai
 
     if should_use_ai:
         pipeline = AISignalPipeline()
-        signal = await pipeline.generate(request.symbol)
+        signal = await pipeline.generate(target_symbol)
     else:
-        signal = _build_deterministic_signal(request.symbol)
+        signal = _build_deterministic_signal(target_symbol)
 
     _persist_signal(signal)
     return signal

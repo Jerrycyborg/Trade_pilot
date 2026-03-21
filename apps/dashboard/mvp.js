@@ -1,6 +1,6 @@
 import { buildDashboardView, buildMetrics, mergeRefreshResults } from "./dashboard_core.mjs";
 
-const CONFIG = {
+const RAW_CONFIG = {
   strategyBaseUrl: "http://localhost:8003",
   policyBaseUrl: "http://localhost:8001",
   executionBaseUrl: "http://localhost:8002",
@@ -8,8 +8,33 @@ const CONFIG = {
   researchBaseUrl: "http://localhost:8005",
   orchestratorBaseUrl: "http://localhost:8007",
   approvalBaseUrl: "http://localhost:8010",
+  auditBaseUrl: "http://localhost:8006",
   sentimentBaseUrl: "http://localhost:8008",
+  internalKey: "",
+  adminKey: "",
   ...window.TRADE_PILOT_CONFIG,
+};
+
+function resolveProxyBaseUrl(baseUrl, proxyPath) {
+  const viaLocalNginx =
+    window.location.protocol === "https:" && window.location.port === "8443";
+  if (!viaLocalNginx) {
+    return baseUrl;
+  }
+  return `${window.location.origin}${proxyPath}`;
+}
+
+const CONFIG = {
+  ...RAW_CONFIG,
+  strategyBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.strategyBaseUrl, "/api/strategy"),
+  policyBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.policyBaseUrl, "/api/policy"),
+  executionBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.executionBaseUrl, "/api/execution"),
+  portfolioBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.portfolioBaseUrl, "/api/portfolio"),
+  researchBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.researchBaseUrl, "/api/research"),
+  orchestratorBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.orchestratorBaseUrl, "/api/orchestrator"),
+  approvalBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.approvalBaseUrl, "/api/approval"),
+  auditBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.auditBaseUrl, "/api/audit"),
+  sentimentBaseUrl: resolveProxyBaseUrl(RAW_CONFIG.sentimentBaseUrl, "/api/sentiment"),
 };
 
 const DATA_SOURCES = {
@@ -25,6 +50,7 @@ const DATA_SOURCES = {
   orchestratorCycle: `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/cycle/last`,
   validation: `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/validate`,
   approvals: `${CONFIG.approvalBaseUrl}/v1/approvals/pending`,
+  watchlist: `${CONFIG.strategyBaseUrl}/v1/strategy/watchlist/etoro`,
 };
 
 const filters = {
@@ -42,9 +68,35 @@ let latestData = {
 };
 let selectedLifecycleId = null;
 const policyBaselineCap = 500;
+let watchlistState = {
+  myWatchlist: { label: "My Watchlist", items: [] },
+  recentInvested: { label: "Recently Invested", items: [] },
+  activeTab: "myWatchlist",
+  error: "",
+};
+const watchlistSignalResults = new Map();
 
-async function readJson(label, url) {
-  const response = await fetch(url, { cache: "no-store" });
+function buildAuthHeaders(extraHeaders = {}, { includeAdmin = false } = {}) {
+  const headers = new Headers(extraHeaders);
+  if (CONFIG.internalKey) {
+    headers.set("X-Internal-Key", CONFIG.internalKey);
+  }
+  if (includeAdmin && CONFIG.adminKey) {
+    headers.set("X-Admin-Key", CONFIG.adminKey);
+  }
+  return headers;
+}
+
+async function readJson(label, url, options = {}) {
+  const headers = buildAuthHeaders(options.headers, {
+    includeAdmin: Boolean(options.adminAuth),
+  });
+  const { adminAuth, ...fetchOptions } = options;
+  const response = await fetch(url, {
+    cache: "no-store",
+    ...fetchOptions,
+    headers,
+  });
   if (!response.ok) {
     throw new Error(`${label} returned ${response.status} from ${url}`);
   }
@@ -403,7 +455,10 @@ function formatCurrency(value) {
 
 async function fetchAuditSummary() {
   try {
-    const res = await fetch("http://localhost:8006/v1/audit/summary");
+    const res = await fetch(`${CONFIG.auditBaseUrl}/v1/audit/summary`, {
+      cache: "no-store",
+      headers: buildAuthHeaders(),
+    });
     if (!res.ok) return;
     const data = await res.json();
     const bar = document.getElementById("audit-stats-bar");
@@ -417,6 +472,143 @@ async function fetchAuditSummary() {
     `;
   } catch (e) {
     console.warn("Audit summary unavailable", e);
+  }
+}
+
+function normalizeWatchlistResponse(payload) {
+  const watchlists = Array.isArray(payload?.watchlists) ? payload.watchlists : [];
+  const findByName = (...patterns) =>
+    watchlists.find((row) => patterns.some((pattern) => row.name?.toLowerCase().includes(pattern)));
+
+  const fallbackPrimary = watchlists[0] ?? { name: "My Watchlist", items: [] };
+  const fallbackSecondary = watchlists[1] ?? { name: "Recently Invested", items: [] };
+  const myWatchlist = findByName("my watchlist", "watchlist") ?? fallbackPrimary;
+  const recentInvested = findByName("recently invested", "invested", "portfolio") ?? fallbackSecondary;
+
+  return {
+    myWatchlist: {
+      label: myWatchlist.name || "My Watchlist",
+      items: Array.isArray(myWatchlist.items) ? myWatchlist.items : [],
+    },
+    recentInvested: {
+      label: recentInvested.name || "Recently Invested",
+      items: Array.isArray(recentInvested.items) ? recentInvested.items : [],
+    },
+    error: payload?.error || "",
+  };
+}
+
+function renderWatchlistPanel() {
+  const root = document.getElementById("watchlist-content");
+  const count = document.getElementById("watchlist-count");
+  if (!root || !count) {
+    return;
+  }
+
+  const activeKey = watchlistState.activeTab;
+  const activeWatchlist = watchlistState[activeKey];
+  const items = Array.isArray(activeWatchlist?.items) ? activeWatchlist.items : [];
+  count.textContent = `${items.length} item${items.length === 1 ? "" : "s"}`;
+
+  document.querySelectorAll("[data-watchlist-tab]").forEach((button) => {
+    const isActive = button.dataset.watchlistTab === activeKey;
+    button.classList.toggle("mode-live", isActive);
+    button.classList.toggle("mode-paper", !isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
+
+  if (watchlistState.error) {
+    root.innerHTML = `<div class="empty-state empty-state-error">${escapeHtml(watchlistState.error)}</div>`;
+    return;
+  }
+
+  if (!items.length) {
+    root.innerHTML = `<div class="empty-state">No watchlist items available.</div>`;
+    return;
+  }
+
+  root.innerHTML = items
+    .map((item) => {
+      const symbol = String(item.symbol || "").toUpperCase();
+      const result = watchlistSignalResults.get(symbol);
+      return `
+        <section class="item-card">
+          <div class="item-top">
+            <div>
+              <strong>${escapeHtml(symbol)}</strong>
+              <div class="subtle-line">${escapeHtml(item.name || item.display_name || "Unknown instrument")}</div>
+            </div>
+            <button class="btn-secondary" data-watchlist-signal="${escapeHtml(symbol)}">Generate Signal</button>
+          </div>
+          <div id="watchlist-signal-${escapeHtml(symbol).replaceAll("/", "-")}" class="signal-result">
+            ${result ? result : ""}
+          </div>
+        </section>
+      `;
+    })
+    .join("");
+
+  root.querySelectorAll("[data-watchlist-signal]").forEach((button) => {
+    button.addEventListener("click", () => generateWatchlistSignal(button.dataset.watchlistSignal));
+  });
+}
+
+async function refreshWatchlist() {
+  try {
+    const payload = await readJson("watchlist", DATA_SOURCES.watchlist);
+    watchlistState = {
+      ...watchlistState,
+      ...normalizeWatchlistResponse(payload),
+    };
+  } catch (error) {
+    watchlistState = {
+      ...watchlistState,
+      error: String(error.message || error),
+    };
+  }
+  renderWatchlistPanel();
+}
+
+async function generateWatchlistSignal(symbol) {
+  const signalContainerId = `watchlist-signal-${String(symbol).replaceAll("/", "-")}`;
+  const resultEl = document.getElementById(signalContainerId);
+  if (!resultEl) {
+    return;
+  }
+  resultEl.innerHTML = `<p class="signal-loading">Generating signal for ${escapeHtml(symbol)}...</p>`;
+
+  try {
+    const signal = await readJson("signal", `${CONFIG.strategyBaseUrl}/v1/signals/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: [symbol] }),
+    });
+    const actionClass =
+      signal.candidate_action === "BUY"
+        ? "badge-good"
+        : signal.candidate_action === "SELL"
+          ? "badge-bad"
+          : "badge-neutral";
+    resultEl.innerHTML = `
+      <div class="signal-card">
+        <div class="item-top">
+          <strong>${escapeHtml(signal.symbol || symbol)}</strong>
+          <span class="badge ${actionClass}">${escapeHtml(signal.candidate_action || "UNKNOWN")}</span>
+        </div>
+        <dl class="kv-grid">
+          <div><dt>Confidence</dt><dd>${signal.confidence !== undefined ? formatPct(signal.confidence) : "n/a"}</dd></div>
+          <div><dt>Size</dt><dd>${signal.size_pct !== undefined ? formatPct(signal.size_pct) : "n/a"}</dd></div>
+          <div><dt>Risk</dt><dd>${escapeHtml(signal.risk_score || "n/a")}</dd></div>
+          <div><dt>Model</dt><dd>${escapeHtml(signal.model_version || "—")}</dd></div>
+        </dl>
+      </div>
+    `;
+    watchlistSignalResults.set(symbol, resultEl.innerHTML);
+    setTimeout(refresh, 500);
+  } catch (error) {
+    const message = escapeHtml(String(error.message || error));
+    resultEl.innerHTML = `<p class="trade-error">${message}</p>`;
+    watchlistSignalResults.set(symbol, resultEl.innerHTML);
   }
 }
 
@@ -712,14 +904,17 @@ attachChartHandlers();
 attachWorkerRunHandler();
 attachOrchestratorHandlers();
 attachValidationHandler();
+attachWatchlistHandlers();
 document.getElementById("refresh").addEventListener("click", refresh);
 refresh();
 fetchAuditSummary();
+refreshWatchlist();
 loadTicker();
 
 // Auto-refresh ticker every 60 seconds
 setInterval(loadTicker, 60_000);
 setInterval(fetchAuditSummary, 60_000);
+setInterval(refreshWatchlist, 60_000);
 
 // ---------------------------------------------------------------------------
 // Ticker bar
@@ -916,7 +1111,7 @@ async function submitTrade(side) {
   try {
     const response = await fetch(`${CONFIG.strategyBaseUrl}/v1/trade/manual`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ symbol, qty, side, order_type: "MARKET" }),
       cache: "no-store",
     });
@@ -996,15 +1191,6 @@ async function generateQuickSignal() {
   }
 }
 
-// Override readJson to support optional fetch options (e.g. POST for signal generation)
-async function readJson(label, url, options) {
-  const response = await fetch(url, { cache: "no-store", ...options });
-  if (!response.ok) {
-    throw new Error(`${label} returned ${response.status} from ${url}`);
-  }
-  return response.json();
-}
-
 // ---------------------------------------------------------------------------
 // Worker run button
 // ---------------------------------------------------------------------------
@@ -1041,11 +1227,21 @@ function attachOrchestratorHandlers() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ active: !current.kill_switch }),
+        adminAuth: true,
       });
       setTimeout(refresh, 500);
     } catch (err) {
       document.getElementById("status").textContent = `Kill switch toggle failed: ${String(err)}`;
     }
+  });
+}
+
+function attachWatchlistHandlers() {
+  document.querySelectorAll("[data-watchlist-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      watchlistState.activeTab = button.dataset.watchlistTab;
+      renderWatchlistPanel();
+    });
   });
 }
 

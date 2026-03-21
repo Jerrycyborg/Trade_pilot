@@ -84,6 +84,8 @@ def merged_policy_config() -> dict[str, object]:
         "POLICY_KILL_SWITCH", str(baseline.get("kill_switch", False))
     ).lower() == "true"
     # Allow tests/CI to disable trading hours via env var
+    if os.getenv("POLICY_WEEKLY_CAP_USD"):
+        baseline["weekly_notional_cap_usd"] = float(os.getenv("POLICY_WEEKLY_CAP_USD"))
     if os.getenv("POLICY_DISABLE_TRADING_HOURS", "false").lower() == "true":
         th = dict(baseline.get("trading_hours", {}))
         th["enabled"] = False

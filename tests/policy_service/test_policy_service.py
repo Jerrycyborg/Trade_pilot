@@ -7,6 +7,7 @@ def _main(tmp_path: Path):
     import os
 
     os.environ.setdefault("POLICY_DISABLE_TRADING_HOURS", "true")
+    os.environ.setdefault("POLICY_WEEKLY_CAP_USD", "999999")
     db_file = tmp_path / "policy.db"
     import policy_service.config as config
     import policy_service.database as database
