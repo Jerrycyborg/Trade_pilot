@@ -1,0 +1,29 @@
+weekly_notional_cap_usd: 50000
+max_position_size_pct: 5.0
+max_daily_drawdown_pct: 3.0
+max_concurrent_positions: 10
+kill_switch: false
+trading_mode: demo
+symbol_allowlist:
+  - SPY
+  - QQQ
+  - IWM
+  - TLT
+  - GLD
+  - BND
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - NVDA
+  - META
+trading_hours:
+  enabled: true
+  start: "09:30"
+  end: "16:00"
+  timezone: "America/New_York"
+  days: [Mon, Tue, Wed, Thu, Fri]
+approval_tiers:
+  tier1_alert_threshold_usd: 200
+  tier2_soft_timeout_minutes: 15
+  tier3_hard_approval_required_usd: 500

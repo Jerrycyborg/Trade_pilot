@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 
 
 def _client(tmp_path: Path) -> TestClient:
+    import os
+    os.environ.setdefault("POLICY_DISABLE_TRADING_HOURS", "true")
     db_file = tmp_path / "policy.db"
     import policy_service.config as config
     import policy_service.database as database

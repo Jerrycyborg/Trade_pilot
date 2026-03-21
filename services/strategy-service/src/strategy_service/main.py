@@ -50,6 +50,11 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "service": "strategy-service"}
+
+
 @app.post("/v1/signals/generate", response_model=SignalCandidate)
 async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
     """Generate a trading signal. Uses AI pipeline when ANTHROPIC_API_KEY is set."""
@@ -69,14 +74,28 @@ async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
 def list_signals(
     limit: int = Query(default=20, ge=1, le=100),
     symbol: str | None = None,
+    acted_on: bool | None = None,
 ) -> list[SignalCandidate]:
     """Return persisted signals ordered newest-first."""
     with SessionLocal() as session:
         statement = select(SignalRecord)
         if symbol:
             statement = statement.where(SignalRecord.symbol == symbol.upper())
+        if acted_on is not None:
+            statement = statement.where(SignalRecord.acted_on == acted_on)
         rows = session.scalars(statement.order_by(SignalRecord.ts.desc()).limit(limit)).all()
     return [_to_candidate(row) for row in rows]
+
+
+@app.post("/v1/signals/{signal_id}/act")
+def mark_signal_acted(signal_id: str) -> dict[str, object]:
+    with SessionLocal() as session:
+        row = session.scalar(select(SignalRecord).where(SignalRecord.signal_id == signal_id))
+        if not row:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        row.acted_on = True
+        session.commit()
+    return {"signal_id": signal_id, "acted_on": True}
 
 
 @app.get("/v1/strategy/watchlist")
@@ -333,6 +352,7 @@ def _persist_signal(signal: SignalCandidate) -> None:
                 risk_score=signal.risk_score,
                 ta_summary_json=ta_json,
                 research_summary=signal.research_summary,
+                acted_on=signal.acted_on,
             )
         )
         session.commit()
@@ -359,4 +379,5 @@ def _to_candidate(row: SignalRecord) -> SignalCandidate:
         risk_score=row.risk_score or "MEDIUM",
         ta_summary=ta_summary,
         research_summary=row.research_summary,
+        acted_on=row.acted_on,
     )

@@ -8,9 +8,14 @@ dependencies = [
   "contracts",
   "market_data",
   "brokers",
+  "audit-logger",
+  "autonomy-orchestrator",
   "execution-service",
+  "notification-service",
   "portfolio-service",
   "policy-service",
+  "approval-gateway",
+  "sentiment-aggregator",
   "strategy-service",
   "research-service",
 ]
@@ -27,9 +32,14 @@ members = [
   "libs/contracts",
   "libs/market_data",
   "libs/brokers",
+  "services/audit-logger",
+  "services/autonomy-orchestrator",
   "services/execution-service",
+  "services/notification-service",
   "services/portfolio-service",
   "services/policy-service",
+  "services/approval-gateway",
+  "services/sentiment-aggregator",
   "services/strategy-service",
   "services/research-service",
 ]
@@ -38,9 +48,14 @@ members = [
 contracts = { workspace = true }
 market_data = { workspace = true }
 brokers = { workspace = true }
+audit-logger = { workspace = true }
+autonomy-orchestrator = { workspace = true }
 execution-service = { workspace = true }
+notification-service = { workspace = true }
 portfolio-service = { workspace = true }
 policy-service = { workspace = true }
+approval-gateway = { workspace = true }
+sentiment-aggregator = { workspace = true }
 strategy-service = { workspace = true }
 research-service = { workspace = true }
 

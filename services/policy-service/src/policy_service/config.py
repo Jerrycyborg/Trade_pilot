@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,40 @@ class PolicySettings:
     alpaca_paper: bool = field(
         default_factory=lambda: os.getenv("ALPACA_PAPER", "true").lower() == "true"
     )
+    audit_logger_url: str = field(
+        default_factory=lambda: os.getenv("AUDIT_LOGGER_URL", "http://localhost:8006")
+    )
+    policy_config_path: Path = field(
+        default_factory=lambda: Path(os.getenv("POLICY_BASELINE_PATH", ROOT / "config" / "policy-baseline.yaml"))
+    )
 
 
 settings = PolicySettings()
+
+
+def load_policy_baseline() -> dict[str, object]:
+    if not settings.policy_config_path.exists():
+        return {}
+    return yaml.safe_load(settings.policy_config_path.read_text(encoding="utf-8")) or {}
+
+
+def merged_policy_config() -> dict[str, object]:
+    baseline = load_policy_baseline()
+    baseline["max_position_size_pct"] = float(
+        os.getenv("POLICY_MAX_SIZE_PCT", str(baseline.get("max_position_size_pct", settings.max_size_pct * 100)))
+    )
+    baseline["max_daily_drawdown_pct"] = float(
+        os.getenv(
+            "POLICY_MAX_DAILY_DRAWDOWN_PCT",
+            str(baseline.get("max_daily_drawdown_pct", settings.max_daily_drawdown_pct * 100)),
+        )
+    )
+    baseline["kill_switch"] = os.getenv(
+        "POLICY_KILL_SWITCH", str(baseline.get("kill_switch", False))
+    ).lower() == "true"
+    # Allow tests/CI to disable trading hours via env var
+    if os.getenv("POLICY_DISABLE_TRADING_HOURS", "false").lower() == "true":
+        th = dict(baseline.get("trading_hours", {}))
+        th["enabled"] = False
+        baseline["trading_hours"] = th
+    return baseline

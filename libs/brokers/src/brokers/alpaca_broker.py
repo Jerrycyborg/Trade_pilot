@@ -6,7 +6,7 @@ import logging
 import time
 from uuid import uuid4
 
-from contracts import AccountInfo, ExecutionOrderRequest, OrderStatus
+from contracts import AccountInfo, BrokerPosition, ExecutionOrderRequest, OrderStatus
 
 from .base import BrokerResult
 
@@ -35,6 +35,9 @@ class AlpacaBroker:
         )
 
     def submit(self, request: ExecutionOrderRequest) -> BrokerResult:
+        return self.place_order(request)
+
+    def place_order(self, request: ExecutionOrderRequest) -> BrokerResult:
         try:
             return self._do_submit(request)
         except Exception as exc:
@@ -102,3 +105,34 @@ class AlpacaBroker:
                 cash=0.0,
                 mode="paper" if self._paper else "live",
             )
+
+    def cancel_order(self, order_id: str) -> bool:
+        try:
+            self._client.cancel_order_by_id(order_id)
+            return True
+        except Exception as exc:
+            logger.warning("AlpacaBroker.cancel_order failed: %s", exc)
+            return False
+
+    def get_positions(self) -> list[BrokerPosition]:
+        try:
+            return [
+                BrokerPosition(
+                    symbol=position.symbol,
+                    qty=float(position.qty),
+                    market_value=float(position.market_value),
+                    average_price=float(position.avg_entry_price),
+                    unrealized_pnl=float(position.unrealized_pl),
+                )
+                for position in self._client.get_all_positions()
+            ]
+        except Exception as exc:
+            logger.warning("AlpacaBroker.get_positions failed: %s", exc)
+            return []
+
+    def get_order_history(self) -> list[dict[str, object]]:
+        try:
+            return [order.model_dump() for order in self._client.get_orders()]
+        except Exception as exc:
+            logger.warning("AlpacaBroker.get_order_history failed: %s", exc)
+            return []

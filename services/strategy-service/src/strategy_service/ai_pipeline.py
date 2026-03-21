@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import httpx
 
-from contracts import ResearchReport, SignalCandidate, TechnicalSummaryContract
+from contracts import ResearchReport, SentimentScore, SignalCandidate, TechnicalSummaryContract
 from market_data import MarketDataSettings, build_ta_summary, get_fetcher
 from market_data.fetcher import DataUnavailableError
 
@@ -65,6 +65,7 @@ class AISignalPipeline:
 
         # 2. Fetch research report (best-effort, 5s timeout)
         research = await self._get_research(symbol)
+        sentiment = await self._get_sentiment(symbol)
 
         # 3. Build Claude prompt and get signal
         ai_result = await self._call_claude(symbol, ta_summary, research)
@@ -75,7 +76,15 @@ class AISignalPipeline:
 
         # Apply research confidence modifier
         modifier = research.confidence_modifier if research else 0.0
-        confidence = max(0.0, min(0.95, raw_confidence + modifier))
+        technical_confidence = max(0.0, min(0.95, raw_confidence + modifier))
+        confidence = technical_confidence
+        if sentiment:
+            sentiment_component = max(0.0, min(1.0, (sentiment.score + 1.0) / 2.0))
+            weight = max(0.0, min(1.0, settings.sentiment_weight))
+            confidence = max(
+                0.0,
+                min(0.95, ((1.0 - weight) * technical_confidence) + (weight * sentiment_component)),
+            )
 
         size_pct = _SIZE_BY_RISK.get(risk_score, 0.015)
 
@@ -186,6 +195,16 @@ class AISignalPipeline:
                 text += block.text
 
         return _parse_json(text)
+
+    async def _get_sentiment(self, symbol: str) -> Optional[SentimentScore]:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"{settings.sentiment_service_url}/v1/sentiment/{symbol.upper()}")
+                if resp.status_code == 200:
+                    return SentimentScore.model_validate(resp.json())
+        except Exception as exc:
+            logger.debug("Sentiment fetch failed for %s: %s", symbol, exc)
+        return None
 
 
 def _parse_json(text: str) -> dict:

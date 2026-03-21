@@ -20,7 +20,9 @@
         </div>
         <div class="controls">
           <button id="refresh">Refresh</button>
+          <button id="kill-switch-toggle" class="btn-sell">Toggle Kill Switch</button>
           <span id="mode-badge" class="mode-badge mode-paper">PAPER</span>
+          <span id="trade-mode-indicator" class="mode-badge mode-paper">DEMO</span>
           <p id="status">Idle</p>
           <dl class="service-list">
             <div><dt>Strategy</dt><dd id="strategy-url"></dd></div>
@@ -28,9 +30,23 @@
             <div><dt>Execution</dt><dd id="execution-url"></dd></div>
             <div><dt>Portfolio</dt><dd id="portfolio-url"></dd></div>
             <div><dt>Research</dt><dd id="research-url"></dd></div>
+            <div><dt>Orchestrator</dt><dd id="orchestrator-url"></dd></div>
           </dl>
         </div>
       </header>
+
+      <section class="worker-panel card">
+        <div class="card-head">
+          <h2>Autonomy Orchestrator</h2>
+          <span id="orchestrator-running-badge" class="mode-badge mode-paper">PAUSED</span>
+        </div>
+        <div class="worker-info">
+          <div class="worker-field"><span class="field-label">Last Cycle</span><span id="orchestrator-last-cycle">—</span></div>
+          <div class="worker-field"><span class="field-label">Trades Today</span><span id="orchestrator-trades-today">0</span></div>
+          <div class="worker-field"><span class="field-label">Weekly Spend</span><span id="orchestrator-weekly-spend">$0.00</span></div>
+          <div class="worker-field"><span class="field-label">Weekly Cap</span><span id="orchestrator-weekly-cap">$500.00</span></div>
+        </div>
+      </section>
 
       <!-- Live Price Ticker Bar -->
       <section class="ticker-bar" id="ticker-bar">
@@ -173,6 +189,23 @@
         <article class="metric-card">
           <span class="metric-label">PnL</span>
           <strong class="metric-value" id="metric-pnl">$0.00 / $0.00</strong>
+        </article>
+      </section>
+
+      <section class="grid-two">
+        <article class="card">
+          <div class="card-head">
+            <h2>Pending Approvals</h2>
+            <span id="approvals-count" class="card-meta">0 items</span>
+          </div>
+          <div id="pending-approvals" class="panel-body"></div>
+        </article>
+        <article class="card">
+          <div class="card-head">
+            <h2>Last Cycle Summary</h2>
+            <span class="card-meta">Autonomy loop</span>
+          </div>
+          <div id="orchestrator-cycle-summary" class="panel-body"></div>
         </article>
       </section>
 

@@ -6,6 +6,9 @@ const CONFIG = {
   executionBaseUrl: "http://localhost:8002",
   portfolioBaseUrl: "http://localhost:8004",
   researchBaseUrl: "http://localhost:8005",
+  orchestratorBaseUrl: "http://localhost:8007",
+  approvalBaseUrl: "http://localhost:8010",
+  sentimentBaseUrl: "http://localhost:8008",
   ...window.TRADE_PILOT_CONFIG,
 };
 
@@ -18,6 +21,9 @@ const DATA_SOURCES = {
   account: `${CONFIG.executionBaseUrl}/v1/account`,
   workerStatus: `${CONFIG.strategyBaseUrl}/v1/worker/status`,
   research: `${CONFIG.researchBaseUrl}/v1/research/reports`,
+  orchestratorStatus: `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/status`,
+  orchestratorCycle: `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/cycle/last`,
+  approvals: `${CONFIG.approvalBaseUrl}/v1/approvals/pending`,
 };
 
 const filters = {
@@ -34,6 +40,7 @@ let latestData = {
   positions: [],
 };
 let selectedLifecycleId = null;
+const policyBaselineCap = 500;
 
 async function readJson(label, url) {
   const response = await fetch(url, { cache: "no-store" });
@@ -433,6 +440,71 @@ function renderWorkerStatus(status) {
     status.last_run_error || "—";
 }
 
+function renderOrchestratorStatus(orchestratorStatus) {
+  if (!orchestratorStatus) return;
+  const badge = document.getElementById("orchestrator-running-badge");
+  badge.textContent = orchestratorStatus.running ? "RUNNING" : "PAUSED";
+  badge.className = `mode-badge ${orchestratorStatus.running ? "mode-live" : "mode-paper"}`;
+  document.getElementById("orchestrator-last-cycle").textContent =
+    orchestratorStatus.last_cycle_time ? formatTime(orchestratorStatus.last_cycle_time) : "Never";
+  document.getElementById("orchestrator-trades-today").textContent =
+    String(orchestratorStatus.trades_today ?? 0);
+  document.getElementById("orchestrator-weekly-spend").textContent =
+    formatCurrency(orchestratorStatus.weekly_notional_used ?? 0);
+  document.getElementById("orchestrator-weekly-cap").textContent =
+    formatCurrency(orchestratorStatus.weekly_notional_cap_usd ?? policyBaselineCap);
+  const indicator = document.getElementById("trade-mode-indicator");
+  const mode = String(orchestratorStatus.trading_mode || "demo").toLowerCase();
+  indicator.textContent = mode.toUpperCase();
+  indicator.className = `mode-badge ${mode === "live" ? "mode-live" : "mode-paper"}`;
+}
+
+function renderPendingApprovals(rows) {
+  const root = document.getElementById("pending-approvals");
+  document.getElementById("approvals-count").textContent = `${rows.length} item${rows.length === 1 ? "" : "s"}`;
+  if (!rows.length) {
+    root.innerHTML = `<div class="empty-state">No pending approvals.</div>`;
+    return;
+  }
+  root.innerHTML = rows.map((row) => `
+    <section class="item-card">
+      <div class="item-top">
+        <strong>${escapeHtml(row.symbol)}</strong>
+        ${badge(row.status)}
+      </div>
+      <dl class="kv-grid">
+        <div><dt>Action</dt><dd>${badge(row.action)}</dd></div>
+        <div><dt>Tier</dt><dd>${escapeHtml(row.tier)}</dd></div>
+        <div><dt>Amount</dt><dd>${formatCurrency(row.amount_usd)}</dd></div>
+        <div><dt>Created</dt><dd>${escapeHtml(formatTime(row.created_at))}</dd></div>
+      </dl>
+      <p class="reason-line">${escapeHtml(row.reason || "approval required")}</p>
+    </section>
+  `).join("");
+}
+
+function renderCycleSummary(summary) {
+  const root = document.getElementById("orchestrator-cycle-summary");
+  if (!summary || !Object.keys(summary).length) {
+    root.innerHTML = `<div class="empty-state">No cycle summary yet.</div>`;
+    return;
+  }
+  root.innerHTML = `
+    <section class="item-card">
+      <div class="item-top">
+        <strong>${escapeHtml(summary.status || "unknown")}</strong>
+        ${badge("CYCLE")}
+      </div>
+      <dl class="kv-grid">
+        <div><dt>Signals</dt><dd>${escapeHtml(summary.signals ?? 0)}</dd></div>
+        <div><dt>Approved</dt><dd>${escapeHtml(summary.approved ?? 0)}</dd></div>
+        <div><dt>Review</dt><dd>${escapeHtml(summary.review ?? 0)}</dd></div>
+        <div><dt>Executed</dt><dd>${escapeHtml(summary.executed ?? 0)}</dd></div>
+      </dl>
+    </section>
+  `;
+}
+
 function renderResearch(reports) {
   const grid = document.getElementById("research-grid");
   const countEl = document.getElementById("research-count");
@@ -527,6 +599,9 @@ async function refresh() {
       readJson("account", DATA_SOURCES.account),
       readJson("worker status", DATA_SOURCES.workerStatus),
       readJson("research", DATA_SOURCES.research),
+      readJson("orchestrator status", DATA_SOURCES.orchestratorStatus),
+      readJson("orchestrator cycle", DATA_SOURCES.orchestratorCycle),
+      readJson("approvals", DATA_SOURCES.approvals),
   ]);
   const { data, errors } = mergeRefreshResults({
     signals: settled[0],
@@ -549,6 +624,15 @@ async function refresh() {
   if (settled[7].status === "fulfilled") {
     renderResearch(settled[7].value);
   }
+  if (settled[8].status === "fulfilled") {
+    renderOrchestratorStatus(settled[8].value);
+  }
+  if (settled[9].status === "fulfilled") {
+    renderCycleSummary(settled[9].value);
+  }
+  if (settled[10].status === "fulfilled") {
+    renderPendingApprovals(settled[10].value);
+  }
 
   if (errors.length) {
     status.textContent = `Partial refresh: ${errors.join(" | ")}`;
@@ -563,10 +647,12 @@ document.getElementById("policy-url").textContent = CONFIG.policyBaseUrl;
 document.getElementById("execution-url").textContent = CONFIG.executionBaseUrl;
 document.getElementById("portfolio-url").textContent = CONFIG.portfolioBaseUrl;
 document.getElementById("research-url").textContent = CONFIG.researchBaseUrl;
+document.getElementById("orchestrator-url").textContent = CONFIG.orchestratorBaseUrl;
 attachFilterHandlers();
 attachTradeHandlers();
 attachChartHandlers();
 attachWorkerRunHandler();
+attachOrchestratorHandlers();
 document.getElementById("refresh").addEventListener("click", refresh);
 refresh();
 loadTicker();
@@ -583,19 +669,21 @@ async function loadTicker() {
   const syms = watchlist.join(",");
   try {
     const quotes = await readJson("quotes", `${CONFIG.strategyBaseUrl}/v1/market/quotes?symbols=${encodeURIComponent(syms)}`);
-    renderTicker(quotes);
+    const sentiment = await readJson("sentiment", `${CONFIG.sentimentBaseUrl}/v1/sentiment/batch?symbols=${encodeURIComponent(syms)}`);
+    renderTicker(quotes, sentiment);
   } catch {
     document.getElementById("ticker-items").innerHTML =
       `<span class="ticker-loading">Prices unavailable — set ALPACA_API_KEY for live data</span>`;
   }
 }
 
-function renderTicker(quotes) {
+function renderTicker(quotes, sentimentRows = []) {
   const items = document.getElementById("ticker-items");
   if (!quotes || !quotes.length) {
     items.innerHTML = `<span class="ticker-loading">No price data</span>`;
     return;
   }
+  const sentimentMap = new Map(sentimentRows.map((row) => [row.symbol, row]));
   items.innerHTML = quotes.map((q) => {
     if (q.price === null) {
       return `<span class="ticker-item ticker-neutral"><strong>${escapeHtml(q.symbol)}</strong> <span>—</span></span>`;
@@ -603,10 +691,12 @@ function renderTicker(quotes) {
     const dir = q.change_pct >= 0 ? "ticker-up" : "ticker-down";
     const arrow = q.change_pct >= 0 ? "▲" : "▼";
     const chg = Math.abs(q.change_pct).toFixed(2);
+    const sentiment = sentimentMap.get(q.symbol);
+    const sentimentText = sentiment ? ` · S ${(sentiment.score >= 0 ? "+" : "")}${Number(sentiment.score).toFixed(2)}` : "";
     return `<span class="ticker-item ${dir}">
       <strong>${escapeHtml(q.symbol)}</strong>
       <span>$${Number(q.price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 4})}</span>
-      <span class="ticker-change">${arrow} ${chg}%</span>
+      <span class="ticker-change">${arrow} ${chg}%${escapeHtml(sentimentText)}</span>
     </span>`;
   }).join('<span class="ticker-sep">·</span>');
 }
@@ -880,4 +970,20 @@ function attachWorkerRunHandler() {
   });
 
   document.getElementById("btn-generate-signal").addEventListener("click", generateQuickSignal);
+}
+
+function attachOrchestratorHandlers() {
+  document.getElementById("kill-switch-toggle").addEventListener("click", async () => {
+    try {
+      const current = await readJson("orchestrator status", DATA_SOURCES.orchestratorStatus);
+      await readJson("kill switch", `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/kill-switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: !current.kill_switch }),
+      });
+      setTimeout(refresh, 500);
+    } catch (err) {
+      document.getElementById("status").textContent = `Kill switch toggle failed: ${String(err)}`;
+    }
+  });
 }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from contracts import AccountInfo, ExecutionOrderRequest, OrderStatus
+from contracts import AccountInfo, BrokerPosition, ExecutionOrderRequest, OrderStatus
 
 from .base import BrokerResult
 
@@ -19,6 +19,9 @@ class PaperBroker:
         self._max_qty = max_qty
 
     def submit(self, request: ExecutionOrderRequest) -> BrokerResult:
+        return self.place_order(request)
+
+    def place_order(self, request: ExecutionOrderRequest) -> BrokerResult:
         if request.symbol.upper() == "REJECT":
             return BrokerResult(
                 status=OrderStatus.REJECTED,
@@ -39,6 +42,12 @@ class PaperBroker:
             fill_price=_DEFAULT_FILL_PRICE,
         )
 
+    def cancel_order(self, order_id: str) -> bool:
+        return True
+
+    def get_positions(self) -> list[BrokerPosition]:
+        return []
+
     def get_account(self) -> AccountInfo:
         return AccountInfo(
             buying_power=100_000.0,
@@ -46,3 +55,6 @@ class PaperBroker:
             cash=100_000.0,
             mode="paper",
         )
+
+    def get_order_history(self) -> list[dict[str, object]]:
+        return []

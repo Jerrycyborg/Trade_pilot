@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol
 
-from contracts import AccountInfo, ExecutionOrderRequest, OrderStatus
+from contracts import AccountInfo, BrokerPosition, ExecutionOrderRequest, OrderStatus
 
 
 @dataclass(frozen=True)
@@ -14,3 +14,12 @@ class BrokerResult:
     external_order_id: str
     fill_price: Optional[float] = None
     rejection_reason: Optional[str] = None
+
+
+class BaseBroker(Protocol):
+    def place_order(self, request: ExecutionOrderRequest) -> BrokerResult: ...
+    def submit(self, request: ExecutionOrderRequest) -> BrokerResult: ...
+    def cancel_order(self, order_id: str) -> bool: ...
+    def get_positions(self) -> list[BrokerPosition]: ...
+    def get_account(self) -> AccountInfo: ...
+    def get_order_history(self) -> list[dict[str, object]]: ...

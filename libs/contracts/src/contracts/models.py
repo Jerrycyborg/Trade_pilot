@@ -76,6 +76,18 @@ class AccountInfo(BaseModel):
     mode: str  # "paper" | "live"
 
 
+class BrokerPosition(BaseModel):
+    """Broker-native position snapshot used by execution integrations."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    qty: float
+    market_value: float = 0.0
+    average_price: float = 0.0
+    unrealized_pnl: float = 0.0
+
+
 # ---------------------------------------------------------------------------
 # Worker / scheduler contracts
 # ---------------------------------------------------------------------------
@@ -91,6 +103,74 @@ class WorkerStatus(BaseModel):
     symbols_watched: list[str] = Field(default_factory=list)
     is_running: bool = False
     last_run_error: Optional[str] = None
+
+
+class AuditEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    event_id: Optional[str] = None
+    event_type: str
+    symbol: Optional[str] = None
+    signal_id: Optional[str] = None
+    decision: Optional[str] = None
+    reasoning: str = ""
+    metadata: dict[str, object] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class AuditLogResponse(AuditEvent):
+    event_id: str
+
+
+class RiskAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved: bool
+    reason: str
+    adjusted_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
+    tier: int = Field(ge=1, le=3, default=1)
+
+
+class SentimentScore(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str
+    score: float = Field(ge=-1.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    sources_used: list[str] = Field(default_factory=list)
+    cached_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class NotificationEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    tier: int = Field(ge=1, le=3)
+    symbol: Optional[str] = None
+    action: str
+    amount_usd: float = Field(ge=0.0)
+    reason: str = ""
+    signal_id: Optional[str] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    signal_id: str
+    symbol: str
+    action: str
+    amount_usd: float = Field(ge=0.0)
+    tier: int = Field(ge=1, le=3)
+    reason: str = ""
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ApprovalResponse(ApprovalRequest):
+    approval_id: str
+    status: str
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
 
 
 class OrderStatus(str, Enum):
@@ -119,6 +199,7 @@ class SignalCandidate(BaseModel):
     risk_score: str = "MEDIUM"
     ta_summary: Optional[TechnicalSummaryContract] = None
     research_summary: Optional[str] = None
+    acted_on: bool = False
 
 
 class MarketContext(BaseModel):
@@ -160,6 +241,7 @@ class PolicyDecision(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     approved_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
     policy_version: str = "risk_policy_v1"
+    tier: int = Field(ge=1, le=3, default=1)
 
 
 class PolicyEvaluationRecordResponse(BaseModel):

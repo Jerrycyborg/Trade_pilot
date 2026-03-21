@@ -35,6 +35,11 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "service": "policy-service"}
+
+
 @app.post("/v1/policy/evaluate", response_model=PolicyDecision)
 def evaluate(request: PolicyEvaluationRequest) -> PolicyDecision:
     """Evaluate a signal against deterministic policy rules."""

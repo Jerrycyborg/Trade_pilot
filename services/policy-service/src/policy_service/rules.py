@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import httpx
 from contracts import PolicyDecision, PolicyEvaluationRequest
 
-from .config import settings
+from .config import merged_policy_config, settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ def _alpaca_market_open() -> bool:
 def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, list[str]]:
     """Evaluate hard reject and review rules with risk-tier routing."""
 
+    config = merged_policy_config()
     risk_score = getattr(request, "risk_score", "MEDIUM")
 
     # ------------------------------------------------------------------
@@ -68,7 +71,8 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
 
     if request.market_context.data_age_seconds > settings.max_data_age_seconds:
         hard_reasons.append("stale_data")
-    if request.size_pct > settings.max_size_pct:
+    max_size_pct = float(config.get("max_position_size_pct", settings.max_size_pct * 100)) / 100.0
+    if request.size_pct >= max_size_pct:
         hard_reasons.append("max_size_exceeded")
     if request.market_context.liquidity_score < settings.min_liquidity_score:
         hard_reasons.append("liquidity_too_low")
@@ -82,10 +86,22 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
 
     if request.market_context.event_blackout_active:
         hard_reasons.append("event_blackout")
-    if not request.market_context.symbol_allowed:
+    allowlist = {str(symbol).upper() for symbol in config.get("symbol_allowlist", [])}
+    if config.get("kill_switch"):
+        hard_reasons.append("kill_switch_active")
+    if allowlist and request.symbol.upper() not in allowlist:
         hard_reasons.append("symbol_not_allowed")
-    if request.portfolio_context.daily_drawdown_pct >= settings.max_daily_drawdown_pct:
+    elif not request.market_context.symbol_allowed:
+        hard_reasons.append("symbol_not_allowed")
+    if not _within_trading_hours(config):
+        hard_reasons.append("outside_trading_hours")
+    if request.portfolio_context.daily_drawdown_pct >= float(config.get("max_daily_drawdown_pct", settings.max_daily_drawdown_pct * 100)) / 100.0:
         hard_reasons.append("daily_drawdown_limit")
+    weekly_cap = float(config.get("weekly_notional_cap_usd", 0.0))
+    weekly_spend = _weekly_spend()
+    proposed_notional = request.size_pct * 100_000.0
+    if weekly_spend + proposed_notional > weekly_cap:
+        hard_reasons.append("weekly_notional_cap_exceeded")
 
     if hard_reasons:
         return (
@@ -94,11 +110,13 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
                 decision="REJECT",
                 reasons=hard_reasons,
                 approved_size_pct=0.0,
+                tier=3,
             ),
             hard_reasons,
         )
 
-    approved_size_pct = min(request.size_pct, settings.max_size_pct)
+    approved_size_pct = min(request.size_pct, max_size_pct)
+    tier = _decision_tier(config, approved_size_pct * 100_000.0)
 
     # ------------------------------------------------------------------
     # Risk-tier fast path: LOW → skip confidence floor, auto-approve
@@ -111,6 +129,7 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
                 decision="APPROVE",
                 reasons=[reason],
                 approved_size_pct=approved_size_pct,
+                tier=tier,
             ),
             [reason],
         )
@@ -128,6 +147,7 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
                 decision="REVIEW",
                 reasons=review_reasons,
                 approved_size_pct=approved_size_pct,
+                tier=tier,
             ),
             review_reasons,
         )
@@ -138,6 +158,51 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
             decision="APPROVE",
             reasons=[],
             approved_size_pct=approved_size_pct,
+            tier=tier,
         ),
         [],
     )
+
+
+def _within_trading_hours(config: dict[str, object]) -> bool:
+    trading_hours = dict(config.get("trading_hours", {}))
+    if not trading_hours or not trading_hours.get("enabled", True):
+        return True
+    try:
+        import zoneinfo
+
+        zone = zoneinfo.ZoneInfo(str(trading_hours.get("timezone", "America/New_York")))
+    except Exception:
+        return True
+    now = datetime.now(zone)
+    if now.strftime("%a") not in trading_hours.get("days", ["Mon", "Tue", "Wed", "Thu", "Fri"]):
+        return False
+    start_hour, start_minute = [int(part) for part in str(trading_hours.get("start", "09:30")).split(":")]
+    end_hour, end_minute = [int(part) for part in str(trading_hours.get("end", "16:00")).split(":")]
+    start = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+    return start <= now <= end
+
+
+def _weekly_spend() -> float:
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    try:
+        response = httpx.get(
+            f"{settings.audit_logger_url}/v1/audit/logs",
+            params={"event_type": "trade.executed", "since": since, "limit": 1000},
+            timeout=3.0,
+        )
+        response.raise_for_status()
+        return sum(float(row.get("metadata", {}).get("amount_usd", 0.0)) for row in response.json())
+    except Exception as exc:
+        logger.debug("Weekly spend lookup failed: %s", exc)
+        return 0.0
+
+
+def _decision_tier(config: dict[str, object], amount_usd: float) -> int:
+    thresholds = dict(config.get("approval_tiers", {}))
+    if amount_usd >= float(thresholds.get("tier3_hard_approval_required_usd", 500)):
+        return 3
+    if amount_usd >= float(thresholds.get("tier1_alert_threshold_usd", 200)):
+        return 2
+    return 1

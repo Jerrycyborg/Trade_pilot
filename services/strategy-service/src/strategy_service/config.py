@@ -50,6 +50,12 @@ class StrategySettings:
     portfolio_service_url: str = field(
         default_factory=lambda: os.getenv("PORTFOLIO_SERVICE_URL", "http://localhost:8004")
     )
+    sentiment_service_url: str = field(
+        default_factory=lambda: os.getenv("SENTIMENT_SERVICE_URL", "http://localhost:8008")
+    )
+    sentiment_weight: float = field(
+        default_factory=lambda: float(os.getenv("SENTIMENT_WEIGHT", "0.3"))
+    )
 
     @property
     def watchlist(self) -> list[str]:

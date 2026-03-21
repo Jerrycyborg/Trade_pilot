@@ -38,6 +38,11 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "service": "execution-service"}
+
+
 @app.post("/v1/orders", response_model=ExecutionOrderResponse)
 def create_order(
     request: ExecutionOrderRequest, idempotency_key: str = Header(..., alias="Idempotency-Key")

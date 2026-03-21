@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from typing import Optional
 
-from sqlalchemy import DateTime, Float, String, Text
+from sqlalchemy import Boolean, DateTime, Float, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -31,3 +31,4 @@ class SignalRecord(Base):
     risk_score: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, default="MEDIUM")
     ta_summary_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     research_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    acted_on: Mapped[bool] = mapped_column(Boolean, default=False)
