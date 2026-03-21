@@ -56,6 +56,18 @@ class StrategySettings:
     sentiment_weight: float = field(
         default_factory=lambda: float(os.getenv("SENTIMENT_WEIGHT", "0.3"))
     )
+    stop_loss_pct: float = field(
+        default_factory=lambda: float(os.getenv("STOP_LOSS_PCT", "0.03"))
+    )
+    take_profit_pct: float = field(
+        default_factory=lambda: float(os.getenv("TAKE_PROFIT_PCT", "0.06"))
+    )
+    max_hold_hours: int = field(
+        default_factory=lambda: int(os.getenv("MAX_HOLD_HOURS", "48"))
+    )
+    volume_confirm_enabled: bool = field(
+        default_factory=lambda: os.getenv("VOLUME_CONFIRM_ENABLED", "true").lower() == "true"
+    )
 
     @property
     def watchlist(self) -> list[str]:

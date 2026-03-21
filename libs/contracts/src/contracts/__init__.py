@@ -1,5 +1,6 @@
 """Shared contracts for Trade Pilot services."""
 
+from .auth import verify_admin_key, verify_internal_key
 from .models import (
     AccountInfo,
     ApprovalRequest,
@@ -7,6 +8,8 @@ from .models import (
     AuditEvent,
     AuditLogResponse,
     BrokerPosition,
+    CandidateAction,
+    ClosePositionRequest,
     ExecutionEvent,
     ExecutionFill,
     ExecutionOrderRequest,
@@ -32,6 +35,8 @@ from .models import (
     TechnicalSummaryContract,
     WorkerStatus,
 )
+from .rate_limit import TokenBucket, rate_limit_write
+from .sanitize import sanitize_symbol, validate_positive_amount
 
 __all__ = [
     "AccountInfo",
@@ -40,6 +45,8 @@ __all__ = [
     "AuditEvent",
     "AuditLogResponse",
     "BrokerPosition",
+    "CandidateAction",
+    "ClosePositionRequest",
     "ExecutionOrderRequest",
     "ExecutionOrderResponse",
     "ExecutionEvent",
@@ -63,5 +70,11 @@ __all__ = [
     "SentimentScore",
     "SignalCandidate",
     "TechnicalSummaryContract",
+    "TokenBucket",
     "WorkerStatus",
+    "rate_limit_write",
+    "sanitize_symbol",
+    "validate_positive_amount",
+    "verify_admin_key",
+    "verify_internal_key",
 ]

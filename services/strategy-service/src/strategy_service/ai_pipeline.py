@@ -199,12 +199,18 @@ class AISignalPipeline:
     async def _get_sentiment(self, symbol: str) -> Optional[SentimentScore]:
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{settings.sentiment_service_url}/v1/sentiment/{symbol.upper()}")
+                resp = await client.get(
+                    f"{settings.sentiment_service_url}/v1/sentiment/{symbol.upper()}"
+                )
                 if resp.status_code == 200:
                     return SentimentScore.model_validate(resp.json())
-        except Exception as exc:
-            logger.debug("Sentiment fetch failed for %s: %s", symbol, exc)
-        return None
+        except httpx.HTTPError:
+            logger.warning("sentiment service unreachable, using sentiment_weight=0")
+            return SentimentScore(symbol=symbol.upper(), score=0.0, confidence=0.0)
+        except Exception:
+            logger.warning("sentiment service unreachable, using sentiment_weight=0")
+            return SentimentScore(symbol=symbol.upper(), score=0.0, confidence=0.0)
+        return SentimentScore(symbol=symbol.upper(), score=0.0, confidence=0.0)
 
 
 def _parse_json(text: str) -> dict:

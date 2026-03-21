@@ -23,6 +23,7 @@ const DATA_SOURCES = {
   research: `${CONFIG.researchBaseUrl}/v1/research/reports`,
   orchestratorStatus: `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/status`,
   orchestratorCycle: `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/cycle/last`,
+  validation: `${CONFIG.orchestratorBaseUrl}/v1/orchestrator/validate`,
   approvals: `${CONFIG.approvalBaseUrl}/v1/approvals/pending`,
 };
 
@@ -400,6 +401,25 @@ function formatCurrency(value) {
   return `$${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+async function fetchAuditSummary() {
+  try {
+    const res = await fetch("http://localhost:8006/v1/audit/summary");
+    if (!res.ok) return;
+    const data = await res.json();
+    const bar = document.getElementById("audit-stats-bar");
+    if (!bar) return;
+    bar.innerHTML = `
+      <span>Trades: <b>${data.total_trades}</b></span>
+      <span>Approved Today: <b>${data.approved_today}</b></span>
+      <span>Rejected Today: <b>${data.rejected_today}</b></span>
+      <span>Weekly Spend: <b>$${(data.weekly_spend || 0).toFixed(2)}</b></span>
+      <span>Top Symbols: <b>${(data.top_symbols_traded || []).join(", ") || "none"}</b></span>
+    `;
+  } catch (e) {
+    console.warn("Audit summary unavailable", e);
+  }
+}
+
 function renderWallet(account) {
   if (!account) return;
   const mode = (account.mode || "paper").toLowerCase();
@@ -505,6 +525,38 @@ function renderCycleSummary(summary) {
   `;
 }
 
+function renderValidation(result) {
+  const summary = document.getElementById("validation-summary");
+  const root = document.getElementById("validation-results");
+  if (!result) {
+    summary.textContent = "No validation run yet.";
+    root.innerHTML = `<div class="empty-state">Run validation to inspect the policy allowlist.</div>`;
+    return;
+  }
+
+  const total = (result.valid || []).length + (result.invalid || []).length + (result.unknown || []).length;
+  summary.textContent = `${total} symbols checked · ${(result.valid || []).length} valid · ${(result.invalid || []).length} invalid · ${(result.unknown || []).length} unknown`;
+
+  const rows = [
+    ...(result.valid || []).map((symbol) => ({ symbol, status: "VALID" })),
+    ...(result.invalid || []).map((symbol) => ({ symbol, status: "INVALID" })),
+    ...(result.unknown || []).map((symbol) => ({ symbol, status: "UNKNOWN" })),
+  ];
+  if (!rows.length) {
+    root.innerHTML = `<div class="empty-state">No allowlist symbols configured.</div>`;
+    return;
+  }
+
+  root.innerHTML = rows.map((row) => `
+    <section class="item-card">
+      <div class="item-top">
+        <strong>${escapeHtml(row.symbol)}</strong>
+        ${badge(row.status)}
+      </div>
+    </section>
+  `).join("");
+}
+
 function renderResearch(reports) {
   const grid = document.getElementById("research-grid");
   const countEl = document.getElementById("research-count");
@@ -602,6 +654,7 @@ async function refresh() {
       readJson("orchestrator status", DATA_SOURCES.orchestratorStatus),
       readJson("orchestrator cycle", DATA_SOURCES.orchestratorCycle),
       readJson("approvals", DATA_SOURCES.approvals),
+      readJson("validation", DATA_SOURCES.validation, { method: "POST" }),
   ]);
   const { data, errors } = mergeRefreshResults({
     signals: settled[0],
@@ -633,13 +686,18 @@ async function refresh() {
   if (settled[10].status === "fulfilled") {
     renderPendingApprovals(settled[10].value);
   }
+  if (settled[11].status === "fulfilled") {
+    renderValidation(settled[11].value);
+  }
 
   if (errors.length) {
     status.textContent = `Partial refresh: ${errors.join(" | ")}`;
+    await fetchAuditSummary();
     return;
   }
 
   status.textContent = `Last refresh: ${new Date().toLocaleTimeString()}`;
+  await fetchAuditSummary();
 }
 
 document.getElementById("strategy-url").textContent = CONFIG.strategyBaseUrl;
@@ -653,12 +711,15 @@ attachTradeHandlers();
 attachChartHandlers();
 attachWorkerRunHandler();
 attachOrchestratorHandlers();
+attachValidationHandler();
 document.getElementById("refresh").addEventListener("click", refresh);
 refresh();
+fetchAuditSummary();
 loadTicker();
 
 // Auto-refresh ticker every 60 seconds
 setInterval(loadTicker, 60_000);
+setInterval(fetchAuditSummary, 60_000);
 
 // ---------------------------------------------------------------------------
 // Ticker bar
@@ -984,6 +1045,24 @@ function attachOrchestratorHandlers() {
       setTimeout(refresh, 500);
     } catch (err) {
       document.getElementById("status").textContent = `Kill switch toggle failed: ${String(err)}`;
+    }
+  });
+}
+
+function attachValidationHandler() {
+  document.getElementById("run-validation").addEventListener("click", async () => {
+    const button = document.getElementById("run-validation");
+    button.disabled = true;
+    button.textContent = "Running...";
+    try {
+      const result = await readJson("validation", DATA_SOURCES.validation, { method: "POST" });
+      renderValidation(result);
+      document.getElementById("status").textContent = "Validation complete";
+    } catch (err) {
+      document.getElementById("status").textContent = `Validation failed: ${String(err)}`;
+    } finally {
+      button.disabled = false;
+      button.textContent = "Run Validation";
     }
   });
 }

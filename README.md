@@ -1,218 +1,131 @@
 ![Trade Pilot banner](assets/trade-pilot-banner.svg)
 
-# Trade Pilot
+# Trade_pilot — Autonomous Trading Platform
 
-Production-minded AI trading stack: strategy proposes → policy approves → execution fills → portfolio reconciles. The current workspace adds autonomous orchestration, eToro execution support, audit logging, sentiment, notifications, approvals, and live-mode gating on top of the existing milestone stack.
-
-Suggested GitHub description:
-`AI-driven trading stack with Claude-powered signals, eToro execution, autonomous orchestration, live charts, and fill-driven portfolio reconciliation.`
-
-Suggested GitHub topics:
-`ai-trading`, `algorithmic-trading`, `fastapi`, `python`, `alpaca`, `anthropic`, `claude`, `portfolio-management`, `risk-management`
+Production-minded AI trading stack: strategy proposes, policy approves, execution fills, and portfolio reconciles. This repo includes autonomous orchestration, approvals, notifications, sentiment, audit logging, and dashboard controls on top of the core trading services.
 
 ## Architecture
 
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                    Autonomy Orchestrator :8007                  │
+│        scheduler → signal fetch → risk → policy → execute      │
+└──────┬──────────────┬────────────────┬───────────────┬──────────┘
+       │              │                │               │
+       ▼              ▼                ▼               ▼
+  Risk Engine    Policy Gate      Execution        Audit Logger
+  (sizing,       (hard rules,     Service :8002    :8006
+   drawdown,      sector conc,    (broker order)   (append-only)
+   PDT, sector)   event block)         │
+                       │               ▼
+                       │         Broker (eToro/Paper)
+                       │
+              ┌────────┴─────────┐
+              ▼                  ▼
+     Notification :8009    Approval Gateway :8010
+     (webhook, tiered)     (PENDING/APPROVE/REJECT)
+
+── External Data ──────────────────────────────────────────────────
+  Strategy Service :8003   (signals, TA, ADX, patterns)
+  Portfolio Service :8004  (positions, NAV)
+  Research Service :8005   (AI research summaries)
+  Sentiment Aggregator :8008 (NewsAPI, AlphaVantage)
+  Dashboard :8080          (kill switch UI, approvals, stats)
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                        Trade Pilot                            │
-│                                                               │
-│  research-service ──► strategy-service ──► policy-service    │
-│       (Claude)          (AI signals)       (risk rules)      │
-│                                │                              │
-│                         execution-service                     │
-│                         (eToro / paper)                       │
-│                                │                              │
-│                        portfolio-service                      │
-│                        (fill-driven PnL)                      │
-│                                │                              │
-│     audit · orchestrator · sentiment · approval · notify      │
-│                                                               │
-│                     dashboard (port 8080)                     │
-│              charts · ticker · manual trades · AI research    │
-└───────────────────────────────────────────────────────────────┘
-```
 
-**Core flow:**
-1. Research service fetches web news + fundamentals via Claude with `web_search` tool
-2. Strategy service generates AI signals (Claude Haiku for TA analysis) with risk scoring (LOW / MEDIUM / HIGH)
-3. Policy service approves / reviews / rejects based on risk tier and hard rules
-4. Execution service places orders via eToro demo/live or paper broker fallback
-5. Portfolio service derives positions and PnL from fills only (ADR-002)
-6. Autonomy orchestrator can run the end-to-end loop on a configurable schedule
-
-**ADR boundaries preserved:**
-- ADR-001: Only execution-service places orders
-- ADR-002: Portfolio state derived exclusively from fills
-
-## Services
+## Service Port Map
 
 | Service | Port | Purpose |
-|---|---|---|
-| `libs/contracts` | — | Shared Pydantic contracts |
-| `libs/market_data` | — | OHLCV fetching + technical indicators (RSI, MACD, Bollinger, EMA) |
-| `libs/brokers` | — | eToro, Alpaca, and Paper brokers behind a common interface |
-| `services/research-service` | 8005 | Claude + web search per-symbol research with 30-min cache |
-| `services/strategy-service` | 8003 | AI signal generation, market data API, trade worker/scheduler |
-| `services/policy-service` | 8001 | Risk-tier routing + hard reject rules |
-| `services/execution-service` | 8002 | Order placement, fills, idempotency, account balance |
-| `services/portfolio-service` | 8004 | Positions, snapshots, PnL reconciliation |
-| `services/audit-logger` | 8006 | Append-only audit event store |
-| `services/autonomy-orchestrator` | 8007 | Autonomous decision loop + kill/live mode controls |
-| `services/sentiment-aggregator` | 8008 | News + social sentiment scoring |
-| `services/notification-service` | 8009 | Webhook notifications + pending queue |
-| `services/approval-gateway` | 8010 | Human approval workflow for review trades |
-| `apps/dashboard` | 8080 | Live charts, ticker bar, manual trades, AI research |
+|---------|------|---------|
+| policy-service | 8001 | Policy evaluation (hard rules gate) |
+| execution-service | 8002 | Order routing to broker |
+| strategy-service | 8003 | Signal generation (TA, ADX, patterns, volume) |
+| portfolio-service | 8004 | Position tracking and NAV |
+| research-service | 8005 | AI-powered research summaries |
+| audit-logger | 8006 | Append-only audit trail (SQLite) |
+| autonomy-orchestrator | 8007 | Main loop scheduler and decision engine |
+| sentiment-aggregator | 8008 | News/sentiment scoring |
+| notification-service | 8009 | Webhook notifications (tiered) |
+| approval-gateway | 8010 | Human approval flow (PENDING/APPROVE/REJECT) |
+| dashboard | 8080 | Web UI (kill switch, approvals, stats bar) |
 
-## Quick Start
+## Environment Variables
 
-### Prerequisites
-- Python 3.11+
-- `uv` package manager
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `INTERNAL_API_KEY` | Yes (prod) | Shared secret for service-to-service auth |
+| `ADMIN_API_KEY` | Yes (prod) | Extra key for kill switch / live mode endpoints |
+| `ETORO_API_KEY` | Yes | eToro public API key |
+| `ETORO_USER_KEY` | Yes | eToro user key |
+| `ETORO_DEMO` | No | Set `true` for eToro demo account (default true) |
+| `ANTHROPIC_API_KEY` | Yes | For AI research summaries |
+| `NEWSAPI_KEY` | No | NewsAPI.org key for sentiment |
+| `ALPHAVANTAGE_KEY` | No | AlphaVantage key for sentiment |
+| `WEBHOOK_URL` | No | Slack/Discord/custom webhook for notifications |
+| `BROKER` | No | `etoro` or `paper` (default paper) |
+| `WORKER_ENABLED` | No | `true` to enable strategy worker polling |
+| `ORCHESTRATOR_INTERVAL_MINUTES` | No | Cycle interval (default 5) |
+| `STOP_LOSS_PCT` | No | Stop loss % (default 0.03 = 3%) |
+| `TAKE_PROFIT_PCT` | No | Take profit % (default 0.06 = 6%) |
+| `MAX_HOLD_HOURS` | No | Max position hold time in hours (default 48) |
+| `VOLUME_CONFIRM_ENABLED` | No | Require above-avg volume for BUY (default true) |
+| `STRATEGY_WATCHLIST` | No | Comma-separated symbols to trade |
 
-### 1. Install
-```bash
-uv sync --all-packages --group dev
-```
+## Getting eToro API Keys
 
-### 2. Configure (optional — all have safe defaults)
+1. Log into your eToro account at etoro.com
+2. Go to Settings → API (or developer.etoro.com)
+3. Create an API key pair — copy the public key and user key
+4. Set `ETORO_API_KEY` and `ETORO_USER_KEY` in your `.env`
+5. Keep `ETORO_DEMO=true` until you are ready for live trading
+
+## Running in Demo Mode
+
 ```bash
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env — at minimum set ANTHROPIC_API_KEY and ETORO_API_KEY/USER_KEY
+# Leave ETORO_DEMO=true and BROKER=paper (or etoro with demo=true)
+
+# Install dependencies
+uv sync
+
+# Start all services (each in its own terminal or use a process manager)
+uv run uvicorn policy_service.main:app --port 8001
+uv run uvicorn execution_service.main:app --port 8002
+uv run uvicorn strategy_service.main:app --port 8003
+uv run uvicorn portfolio_service.main:app --port 8004
+uv run uvicorn research_service.main:app --port 8005
+uv run uvicorn audit_logger.main:app --port 8006
+uv run uvicorn autonomy_orchestrator.main:app --port 8007
+uv run uvicorn sentiment_aggregator.main:app --port 8008
+uv run uvicorn notification_service.main:app --port 8009
+uv run uvicorn approval_gateway.main:app --port 8010
+
+# Open dashboard
+open apps/dashboard/index.html
 ```
 
-Key environment variables:
-```bash
-ANTHROPIC_API_KEY=sk-ant-...     # enables AI signals + web research
-BROKER=etoro
-ETORO_API_KEY=your_public_api_key
-ETORO_USER_KEY=your_user_key
-ETORO_DEMO=true
-NEWSAPI_KEY=optional
-ALPHAVANTAGE_KEY=optional
-WEBHOOK_URL=optional
-WORKER_ENABLED=true              # enables 15-min auto-trade loop
-ORCHESTRATOR_INTERVAL_MINUTES=5
-SENTIMENT_WEIGHT=0.3
-STRATEGY_WATCHLIST=AAPL,MSFT,GOOGL,BTC/USD,ETH/USD
-```
+## Enabling Live Mode (Step-by-Step)
 
-### 3. Start all services
-```bash
-# Terminal 1-5 (or use a process manager)
-make run-research     # port 8005
-make run-strategy     # port 8003
-make run-policy       # port 8001
-make run-execution    # port 8002
-make run-portfolio    # port 8004
-make run-audit        # port 8006
-make run-orchestrator # port 8007
-make run-sentiment    # port 8008
-make run-notification # port 8009
-make run-approval     # port 8010
+⚠️ Only proceed after at least 30 days of demo/paper trading with no policy violations.
 
-# Dashboard
-python3 -m http.server 8080 --directory apps/dashboard
-```
+1. Set `ETORO_DEMO=false` and `BROKER=etoro` in `.env`
+2. Set `ADMIN_API_KEY` to a strong random secret in `.env`
+3. Restart all services
+4. Verify kill switch is OFF in the dashboard
+5. Set weekly cap in `config/policy-baseline.yaml` (`weekly_notional_cap_usd`)
+6. Call the live-mode endpoint with admin credentials:
+   ```bash
+   curl -X POST http://localhost:8007/v1/orchestrator/live-mode \
+     -H "X-Internal-Key: $INTERNAL_API_KEY" \
+     -H "X-Admin-Key: $ADMIN_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"enable": true, "confirmation": "I CONFIRM LIVE TRADING"}'
+   ```
+7. Monitor the first 10 trades manually via the dashboard
 
-Then open **http://localhost:8080**
-
-### 4. Without API keys (zero-config mode)
-All services work without any API keys:
-- Signals use deterministic hash algorithm (Milestone 1 fallback)
-- Market data uses Yahoo Finance (free)
-- Orders go through PaperBroker ($100k simulated balance)
-- Research returns neutral stubs
-
-## Dashboard Features
-
-- **Live Ticker Bar** — real-time prices with % change (Yahoo Finance / Alpaca)
-- **Price Chart** — TradingView Lightweight Charts candlestick + EMA-20/50 overlays
-- **Technical Indicators** — RSI, MACD, Bollinger Bands shown below chart
-- **Manual Trade Panel** — BUY / SELL form → policy check → execution
-- **AI Signal Generator** — generate and preview signals per symbol
-- **Wallet Panel** — buying power, equity, cash + PAPER/LIVE mode badge
-- **Worker Status** — last/next run, "Run Now" button
-- **AI Research Panel** — per-symbol sentiment, headlines, risk factors
-- **Lifecycle Drill-down** — full signal → policy → order → fill → position chain
-
-## Development
+## Running Tests
 
 ```bash
-make lint       # ruff check
-make test       # pytest (37 passing, 7 skipped for live services)
-make setup      # uv sync all packages
+uv run pytest tests/ -x -q --ignore=tests/integration
 ```
-
-Service-specific make targets:
-```bash
-make run-research
-make run-strategy
-make run-policy
-make run-execution
-make run-portfolio
-make run-audit
-make run-orchestrator
-make run-sentiment
-make run-notification
-make run-approval
-```
-
-## Repository Layout
-
-```text
-libs/
-  contracts/          Shared Pydantic models (SignalCandidate, FillRecord, etc.)
-  market_data/        OHLCV + technical indicators library
-  brokers/            eToroBroker + AlpacaBroker + PaperBroker
-
-services/
-  research-service/   Claude web research (port 8005)
-  strategy-service/   AI signals + market data API + trade worker (port 8003)
-  policy-service/     Risk-tier routing + hard rules (port 8001)
-  execution-service/  Order placement + fills + account (port 8002)
-  portfolio-service/  Positions + PnL reconciliation (port 8004)
-  audit-logger/       Append-only audit events (port 8006)
-  autonomy-orchestrator/ Autonomous trade loop (port 8007)
-  sentiment-aggregator/ News + social sentiment (port 8008)
-  notification-service/ Notifications + webhook fanout (port 8009)
-  approval-gateway/   Human review flow (port 8010)
-
-apps/
-  dashboard/          Live trading dashboard (serve on port 8080)
-
-tests/
-.ai/handoff/          AAHP task briefs, summaries, ADRs, checksums
-```
-
-## AAHP Handoff
-
-Multi-agent handoff structure for maintainability:
-```bash
-python3 tools/aahp.py validate-manifest
-python3 tools/aahp.py generate-checksums
-```
-
-## Status
-
-**Milestone 2 (complete):**
-- Claude-powered AI signal generation with TA + fundamental research
-- Alpaca Markets broker integration (paper + live toggle)
-- Real OHLCV market data via Alpaca / Yahoo Finance fallback
-- Technical indicators: RSI, MACD, Bollinger Bands, EMA
-- Research service: Claude + `web_search_20250305` tool, 30-min cache
-- Risk-tier policy routing (LOW auto-approve, HIGH auto-reject)
-- Automated trade worker with APScheduler (15-min intervals)
-- Live ticker bar, price charts, manual trade UI
-- Wallet panel with real Alpaca account balance
-
-**Milestone 1 (complete):**
-- Shared contracts, service boundaries, paper broker
-- Fill-driven portfolio reconciliation with PnL
-- Execution events audit stream
-- Refresh-based operator dashboard
-
-**Out of scope:**
-- Options or margin logic
-- Real-time WebSocket streaming
-- Authentication / multi-user
-- Advanced order types (stop-loss, trailing stop)

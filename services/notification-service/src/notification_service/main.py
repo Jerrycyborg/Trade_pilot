@@ -4,7 +4,8 @@ from collections import deque
 
 import httpx
 from contracts import NotificationEvent
-from fastapi import FastAPI
+from contracts.auth import verify_internal_key
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
@@ -28,7 +29,7 @@ def health() -> dict[str, str]:
 
 
 @app.post("/v1/notify")
-async def notify(event: NotificationEvent) -> dict[str, object]:
+async def notify(event: NotificationEvent, _: None = Depends(verify_internal_key)) -> dict[str, object]:
     payload = event.model_dump(mode="json")
     _history.appendleft(payload)
     if event.tier >= 2:

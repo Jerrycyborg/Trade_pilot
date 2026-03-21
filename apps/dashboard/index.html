@@ -9,6 +9,7 @@
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
+    <div id="audit-stats-bar" style="background:#1a1a2e;color:#eee;padding:8px 16px;display:flex;gap:24px;font-size:13px;flex-wrap:wrap;margin-bottom:8px;"></div>
     <main class="page">
       <header class="hero">
         <div>
@@ -46,6 +47,15 @@
           <div class="worker-field"><span class="field-label">Weekly Spend</span><span id="orchestrator-weekly-spend">$0.00</span></div>
           <div class="worker-field"><span class="field-label">Weekly Cap</span><span id="orchestrator-weekly-cap">$500.00</span></div>
         </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Pre-flight Check</h2>
+          <button id="run-validation" class="btn-secondary">Run Validation</button>
+        </div>
+        <div id="validation-summary" class="subtle-line">No validation run yet.</div>
+        <div id="validation-results" class="panel-body"></div>
       </section>
 
       <!-- Live Price Ticker Bar -->

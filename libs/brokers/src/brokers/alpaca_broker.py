@@ -37,7 +37,12 @@ class AlpacaBroker:
     def submit(self, request: ExecutionOrderRequest) -> BrokerResult:
         return self.place_order(request)
 
-    def place_order(self, request: ExecutionOrderRequest) -> BrokerResult:
+    def place_order(
+        self,
+        request: ExecutionOrderRequest,
+        stop_loss_rate: float | None = None,
+        take_profit_rate: float | None = None,
+    ) -> BrokerResult:
         try:
             return self._do_submit(request)
         except Exception as exc:
@@ -136,3 +141,12 @@ class AlpacaBroker:
         except Exception as exc:
             logger.warning("AlpacaBroker.get_order_history failed: %s", exc)
             return []
+
+    def close_position(
+        self,
+        position_id: str,
+        instrument_id: int,
+        units: float | None = None,
+    ) -> bool:
+        logger.warning("AlpacaBroker.close_position is not implemented")
+        return False

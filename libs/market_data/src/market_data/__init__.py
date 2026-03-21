@@ -2,7 +2,7 @@
 
 from .config import MarketDataSettings
 from .fetcher import get_fetcher
-from .indicators import build_ta_summary
+from .indicators import build_ta_summary, compute_adx, detect_patterns
 from .models import OHLCVBar, TASummary, TechnicalIndicators
 
 __all__ = [
@@ -11,5 +11,7 @@ __all__ = [
     "TASummary",
     "TechnicalIndicators",
     "build_ta_summary",
+    "compute_adx",
+    "detect_patterns",
     "get_fetcher",
 ]

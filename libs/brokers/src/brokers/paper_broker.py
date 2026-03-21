@@ -21,7 +21,12 @@ class PaperBroker:
     def submit(self, request: ExecutionOrderRequest) -> BrokerResult:
         return self.place_order(request)
 
-    def place_order(self, request: ExecutionOrderRequest) -> BrokerResult:
+    def place_order(
+        self,
+        request: ExecutionOrderRequest,
+        stop_loss_rate: float | None = None,
+        take_profit_rate: float | None = None,
+    ) -> BrokerResult:
         if request.symbol.upper() == "REJECT":
             return BrokerResult(
                 status=OrderStatus.REJECTED,
@@ -58,3 +63,11 @@ class PaperBroker:
 
     def get_order_history(self) -> list[dict[str, object]]:
         return []
+
+    def close_position(
+        self,
+        position_id: str,
+        instrument_id: int,
+        units: float | None = None,
+    ) -> bool:
+        return False

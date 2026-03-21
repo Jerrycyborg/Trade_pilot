@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from contracts import SignalCandidate, TechnicalSummaryContract, WorkerStatus
+from contracts import CandidateAction, SignalCandidate, TechnicalSummaryContract, WorkerStatus
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from market_data import MarketDataSettings, build_ta_summary, get_fetcher
@@ -69,6 +69,7 @@ def list_signals(
     limit: int = Query(default=20, ge=1, le=100),
     symbol: str | None = None,
     acted_on: bool | None = None,
+    candidate_action: CandidateAction | None = None,
 ) -> list[SignalCandidate]:
     """Return persisted signals ordered newest-first."""
     with SessionLocal() as session:
@@ -77,6 +78,8 @@ def list_signals(
             statement = statement.where(SignalRecord.symbol == symbol.upper())
         if acted_on is not None:
             statement = statement.where(SignalRecord.acted_on == acted_on)
+        if candidate_action is not None:
+            statement = statement.where(SignalRecord.candidate_action == candidate_action.value)
         rows = session.scalars(statement.order_by(SignalRecord.ts.desc()).limit(limit)).all()
     return [_to_candidate(row) for row in rows]
 
@@ -245,6 +248,12 @@ def get_quotes(symbols: str = Query(description="Comma-separated symbols")) -> l
         except DataUnavailableError:
             results.append({"symbol": sym, "price": None, "change_pct": None, "direction": "neutral"})
     return results
+
+
+@app.get("/v1/market/events/{symbol}")
+def get_market_events(symbol: str) -> dict:
+    """Stub: returns no events. Wire in real data source when available."""
+    return {"symbol": symbol.upper(), "has_event": False, "event_date": None}
 
 
 # ---------------------------------------------------------------------------

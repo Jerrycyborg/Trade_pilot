@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "libs" / "contracts" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "brokers" / "src"))
+sys.path.insert(0, str(ROOT / "libs" / "market_data" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "audit-logger" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "autonomy-orchestrator" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "approval-gateway" / "src"))

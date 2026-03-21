@@ -36,6 +36,8 @@ class TASummary(BaseModel):
     as_of: datetime
     bars_count: int
     indicators: TechnicalIndicators
+    adx: float = 25.0
+    patterns: list[str] = []
     signal_tags: list[str] = Field(default_factory=list)
     trend_direction: str = "neutral"  # "bullish" | "bearish" | "neutral"
     data_source: str = "unknown"

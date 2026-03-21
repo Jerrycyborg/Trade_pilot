@@ -4,6 +4,14 @@ from contracts import RiskAssessment, SignalCandidate
 
 from .policy_config import is_market_hours
 
+SECTOR_MAP: dict[str, str] = {
+    "SPY": "equity_index", "QQQ": "equity_index", "IWM": "equity_index",
+    "TLT": "bonds", "BND": "bonds", "SHY": "bonds",
+    "GLD": "commodities",
+    "AAPL": "tech", "MSFT": "tech", "GOOGL": "tech",
+    "AMZN": "tech", "NVDA": "tech", "META": "tech",
+}
+
 
 def evaluate_risk(
     signal: SignalCandidate,
@@ -36,6 +44,18 @@ def evaluate_risk(
     current_drawdown = float(portfolio_state.get("daily_drawdown_pct", 0.0))
     if current_drawdown > float(config.get("max_daily_drawdown_pct", 3.0)) / 100.0:
         return RiskAssessment(approved=False, reason="daily_drawdown_limit", adjusted_size_pct=0.0, tier=3)
+
+    # Sector concentration check
+    max_sector = int(config.get("max_sector_concentration", 2))
+    symbol_sector = SECTOR_MAP.get(signal.symbol.upper(), "other")
+    if symbol_sector != "other":
+        existing_positions = portfolio_state.get("positions", [])
+        sector_count = sum(
+            1 for pos in existing_positions
+            if SECTOR_MAP.get((pos.get("symbol") or "").upper(), "other") == symbol_sector
+        )
+        if sector_count >= max_sector:
+            return RiskAssessment(approved=False, reason=f"sector_concentration_limit ({symbol_sector})", adjusted_size_pct=0.0, tier=1)
 
     tier = 1
     proposed_amount = float(portfolio_state.get("buying_power", 100_000.0)) * adjusted_size_pct

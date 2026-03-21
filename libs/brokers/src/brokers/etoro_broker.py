@@ -24,9 +24,18 @@ class EtoroBroker:
         self._instrument_cache: dict[str, int] = {}
 
     def submit(self, request: ExecutionOrderRequest) -> BrokerResult:
-        return self.place_order(request)
+        return self.place_order(
+            request,
+            stop_loss_rate=request.stop_loss_rate,
+            take_profit_rate=request.take_profit_rate,
+        )
 
-    def place_order(self, request: ExecutionOrderRequest) -> BrokerResult:
+    def place_order(
+        self,
+        request: ExecutionOrderRequest,
+        stop_loss_rate: float | None = None,
+        take_profit_rate: float | None = None,
+    ) -> BrokerResult:
         try:
             instrument_id = self._resolve_instrument_id(request.symbol)
             payload = {
@@ -34,9 +43,15 @@ class EtoroBroker:
                 "IsBuy": request.side.upper() == "BUY",
                 "Leverage": 1,
                 "Amount": float(request.qty),
-                "StopLossRate": 0.0,
-                "TakeProfitRate": 0.0,
             }
+            if stop_loss_rate is None:
+                payload["IsNoStopLoss"] = True
+            else:
+                payload["StopLossRate"] = float(stop_loss_rate)
+            if take_profit_rate is None:
+                payload["IsNoTakeProfit"] = True
+            else:
+                payload["TakeProfitRate"] = float(take_profit_rate)
             response = self._request(
                 "POST",
                 f"/trading/execution/{self._execution_prefix()}market-open-orders/by-amount",
@@ -115,12 +130,17 @@ class EtoroBroker:
             logger.error("EtoroBroker.get_account failed: %s", exc)
             return AccountInfo(buying_power=0.0, equity=0.0, cash=0.0, mode="paper" if self._demo else "live")
 
-    def close_position(self, position_id: str, instrument_id: int, units_to_deduct: float | None = None) -> bool:
+    def close_position(
+        self,
+        position_id: str,
+        instrument_id: int,
+        units: float | None = None,
+    ) -> bool:
         """Close an open position by positionId. units_to_deduct=None = full close."""
         try:
             payload: dict[str, object] = {"InstrumentId": instrument_id}
-            if units_to_deduct is not None:
-                payload["UnitsToDeduct"] = units_to_deduct
+            if units is not None:
+                payload["UnitsToDeduct"] = units
             self._request(
                 "POST",
                 f"/trading/execution/{self._execution_prefix()}market-close-orders/positions/{position_id}",
@@ -171,6 +191,9 @@ class EtoroBroker:
                 self._instrument_cache[normalized] = instrument_id
                 return instrument_id
         raise ValueError(f"instrument_not_found:{normalized}")
+
+    def resolve_instrument_id(self, symbol: str) -> int:
+        return self._resolve_instrument_id(symbol)
 
     def _execution_prefix(self) -> str:
         return "demo/" if self._demo else ""

@@ -182,6 +182,13 @@ class OrderStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class CandidateAction(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
+    EXIT = "EXIT"
+
+
 class SignalCandidate(BaseModel):
     # Relaxed to "ignore" to allow forward-compatible field additions
     model_config = ConfigDict(extra="ignore")
@@ -189,7 +196,7 @@ class SignalCandidate(BaseModel):
     signal_id: str
     symbol: str
     ts: datetime
-    candidate_action: str
+    candidate_action: CandidateAction
     confidence: float = Field(ge=0.0, le=1.0)
     size_pct: float = Field(gt=0.0, le=1.0)
     horizon: str = "intraday"
@@ -224,7 +231,7 @@ class PolicyEvaluationRequest(BaseModel):
 
     signal_id: str
     symbol: str
-    candidate_action: str
+    candidate_action: CandidateAction
     confidence: float = Field(ge=0.0, le=1.0)
     size_pct: float = Field(gt=0.0, le=1.0)
     market_context: MarketContext
@@ -265,6 +272,17 @@ class ExecutionOrderRequest(BaseModel):
     qty: int = Field(gt=0)
     order_type: str
     time_in_force: str = "DAY"
+    stop_loss_rate: float | None = None
+    take_profit_rate: float | None = None
+
+
+class ClosePositionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    position_id: str
+    signal_id: str
+    units: float | None = None
 
 
 class ExecutionOrderResponse(BaseModel):

@@ -1,10 +1,12 @@
 from pathlib import Path
+from uuid import uuid4
 
-from fastapi.testclient import TestClient
+from brokers import PaperBroker
+from contracts import ExecutionOrderRequest
 
 
-def _client(tmp_path: Path) -> TestClient:
-    db_file = tmp_path / "execution.db"
+def _setup():
+    db_file = Path("/tmp") / f"execution-{uuid4()}.db"
     import execution_service.config as config
     import execution_service.database as database
     import execution_service.main as main
@@ -19,7 +21,8 @@ def _client(tmp_path: Path) -> TestClient:
     database.Base.metadata.create_all(bind=database.engine)
     main.engine = database.engine
     main.SessionLocal = database.SessionLocal
-    return TestClient(main.app)
+    main.broker = PaperBroker()
+    return main
 
 
 def _request(**overrides: object) -> dict[str, object]:
@@ -35,43 +38,37 @@ def _request(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def test_duplicate_submission_same_payload(tmp_path: Path) -> None:
-    client = _client(tmp_path)
-    headers = {"Idempotency-Key": "idem-1"}
-    first = client.post("/v1/orders", json=_request(), headers=headers)
-    second = client.post("/v1/orders", json=_request(), headers=headers)
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert first.json()["order_id"] == second.json()["order_id"]
+def test_duplicate_submission_same_payload() -> None:
+    main = _setup()
+    first = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-1")
+    second = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-1")
+    assert first.order_id == second.order_id
 
 
-def test_duplicate_submission_different_payload(tmp_path: Path) -> None:
-    client = _client(tmp_path)
-    headers = {"Idempotency-Key": "idem-2"}
-    first = client.post("/v1/orders", json=_request(), headers=headers)
-    second = client.post("/v1/orders", json=_request(qty=11), headers=headers)
-    assert first.status_code == 200
-    assert second.status_code == 409
+def test_duplicate_submission_different_payload() -> None:
+    import pytest
+    from fastapi import HTTPException
+
+    main = _setup()
+    first = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-2")
+    assert first.status == "ACCEPTED"
+    with pytest.raises(HTTPException) as exc:
+        main.create_order(ExecutionOrderRequest(**_request(qty=11)), idempotency_key="idem-2")
+    assert exc.value.status_code == 409
 
 
-def test_valid_order_accepted(tmp_path: Path) -> None:
-    client = _client(tmp_path)
-    response = client.post("/v1/orders", json=_request(), headers={"Idempotency-Key": "idem-3"})
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "ACCEPTED"
-    lookup = client.get(f"/v1/orders/{body['order_id']}")
-    assert lookup.status_code == 200
-    assert lookup.json()["order_id"] == body["order_id"]
+def test_valid_order_accepted() -> None:
+    main = _setup()
+    response = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-3")
+    assert response.status == "ACCEPTED"
+    lookup = main.get_order(response.order_id)
+    assert lookup.order_id == response.order_id
 
 
-def test_duplicate_submission_same_payload_does_not_create_extra_events(tmp_path: Path) -> None:
-    client = _client(tmp_path)
-    headers = {"Idempotency-Key": "idem-5"}
-    first = client.post("/v1/orders", json=_request(), headers=headers)
-    second = client.post("/v1/orders", json=_request(), headers=headers)
-    assert first.status_code == 200
-    assert second.status_code == 200
+def test_duplicate_submission_same_payload_does_not_create_extra_events() -> None:
+    main = _setup()
+    first = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-5")
+    second = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-5")
 
     import execution_service.database as database
     import execution_service.models as models
@@ -81,7 +78,7 @@ def test_duplicate_submission_same_payload_does_not_create_extra_events(tmp_path
         order_count = session.scalar(select(func.count()).select_from(models.OrderRecord))
         event_count = session.scalar(select(func.count()).select_from(models.ExecutionEventRecord))
         stored_order = session.scalar(
-            select(models.OrderRecord).where(models.OrderRecord.order_id == first.json()["order_id"])
+            select(models.OrderRecord).where(models.OrderRecord.order_id == first.order_id)
         )
 
     assert order_count == 1
@@ -91,43 +88,54 @@ def test_duplicate_submission_same_payload_does_not_create_extra_events(tmp_path
     assert stored_order.external_order_id
 
 
-def test_rejected_order_path(tmp_path: Path) -> None:
-    client = _client(tmp_path)
-    response = client.post(
-        "/v1/orders",
-        json=_request(symbol="REJECT"),
-        headers={"Idempotency-Key": "idem-4"},
+def test_rejected_order_path() -> None:
+    main = _setup()
+    response = main.create_order(
+        ExecutionOrderRequest(**_request(symbol="REJECT")),
+        idempotency_key="idem-4",
     )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "REJECTED"
-    assert body["rejection_reason"] == "symbol_rejected"
+    assert response.status == "REJECTED"
+    assert response.rejection_reason == "symbol_rejected"
 
 
-def test_list_orders_returns_newest_first_and_filters(tmp_path: Path) -> None:
-    client = _client(tmp_path)
-    accepted = client.post(
-        "/v1/orders", json=_request(signal_id="sig-1", symbol="AAPL"), headers={"Idempotency-Key": "idem-6"}
+def test_list_orders_returns_newest_first_and_filters() -> None:
+    main = _setup()
+    accepted = main.create_order(
+        ExecutionOrderRequest(**_request(signal_id="sig-1", symbol="AAPL")),
+        idempotency_key="idem-6",
     )
-    rejected = client.post(
-        "/v1/orders",
-        json=_request(signal_id="sig-2", symbol="REJECT"),
-        headers={"Idempotency-Key": "idem-7"},
+    rejected = main.create_order(
+        ExecutionOrderRequest(**_request(signal_id="sig-2", symbol="REJECT")),
+        idempotency_key="idem-7",
     )
 
-    assert accepted.status_code == 200
-    assert rejected.status_code == 200
+    listed = main.list_orders(limit=2)
+    assert len(listed) == 2
+    assert listed[0].order_id == rejected.order_id
+    assert listed[1].order_id == accepted.order_id
 
-    listed = client.get("/v1/orders", params={"limit": 2})
-    assert listed.status_code == 200
-    body = listed.json()
-    assert len(body) == 2
-    assert body[0]["order_id"] == rejected.json()["order_id"]
-    assert body[1]["order_id"] == accepted.json()["order_id"]
+    filtered = main.list_orders(limit=20, status="rejected", symbol="reject")
+    assert len(filtered) == 1
+    assert filtered[0].order_id == rejected.order_id
+    assert filtered[0].rejection_reason == "symbol_rejected"
 
-    filtered = client.get("/v1/orders", params={"status": "rejected", "symbol": "reject"})
-    assert filtered.status_code == 200
-    filtered_body = filtered.json()
-    assert len(filtered_body) == 1
-    assert filtered_body[0]["order_id"] == rejected.json()["order_id"]
-    assert filtered_body[0]["rejection_reason"] == "symbol_rejected"
+
+def test_close_order_endpoint_calls_broker_wrapper(monkeypatch) -> None:
+    main = _setup()
+    captured = {}
+
+    def fake_close_position(*, position_id: str, symbol: str, units=None) -> bool:
+        captured["position_id"] = position_id
+        captured["symbol"] = symbol
+        captured["units"] = units
+        return True
+
+    import execution_service.main as main
+
+    monkeypatch.setattr(main, "close_position", fake_close_position)
+
+    response = main.close_order(
+        main.ClosePositionRequest(symbol="AAPL", position_id="pos-1", signal_id="sig-exit"),
+    )
+    assert response["status"] == "closed"
+    assert captured == {"position_id": "pos-1", "symbol": "AAPL", "units": None}

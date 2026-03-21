@@ -105,6 +105,98 @@ def compute_bollinger(
     return upper, middle, lower
 
 
+def compute_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
+    """Compute Average Directional Index. Returns 25.0 (neutral) if insufficient data."""
+    if len(highs) < period + 2 or len(lows) < period + 2 or len(closes) < period + 2:
+        return 25.0
+
+    tr_list: list[float] = []
+    plus_dm_list: list[float] = []
+    minus_dm_list: list[float] = []
+
+    for i in range(1, len(closes)):
+        high, low, prev_close = highs[i], lows[i], closes[i - 1]
+        prev_high, prev_low = highs[i - 1], lows[i - 1]
+
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_list.append(tr)
+
+        up_move = high - prev_high
+        down_move = prev_low - low
+        plus_dm = up_move if (up_move > down_move and up_move > 0) else 0.0
+        minus_dm = down_move if (down_move > up_move and down_move > 0) else 0.0
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+
+    if len(tr_list) < period:
+        return 25.0
+
+    # Wilder smoothing
+    atr = sum(tr_list[:period])
+    plus_di_smooth = sum(plus_dm_list[:period])
+    minus_di_smooth = sum(minus_dm_list[:period])
+
+    dx_list: list[float] = []
+    for i in range(period, len(tr_list)):
+        atr = atr - atr / period + tr_list[i]
+        plus_di_smooth = plus_di_smooth - plus_di_smooth / period + plus_dm_list[i]
+        minus_di_smooth = minus_di_smooth - minus_di_smooth / period + minus_dm_list[i]
+
+        plus_di = 100.0 * plus_di_smooth / atr if atr > 0 else 0.0
+        minus_di = 100.0 * minus_di_smooth / atr if atr > 0 else 0.0
+        di_sum = plus_di + minus_di
+        dx = 100.0 * abs(plus_di - minus_di) / di_sum if di_sum > 0 else 0.0
+        dx_list.append(dx)
+
+    if not dx_list:
+        return 25.0
+
+    # ADX = Wilder-smoothed DX
+    adx = sum(dx_list[:period]) / period if len(dx_list) >= period else sum(dx_list) / len(dx_list)
+    for dx in dx_list[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
+
+
+def detect_patterns(opens: list[float], highs: list[float], lows: list[float], closes: list[float]) -> list[str]:
+    """Detect candlestick patterns. Returns list of pattern names present in the last 2 bars."""
+    patterns: list[str] = []
+    if len(opens) < 2 or len(highs) < 2 or len(lows) < 2 or len(closes) < 2:
+        return patterns
+
+    # Current bar (index -1)
+    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
+    body = abs(c - o)
+    candle_range = h - l if h != l else 1e-9
+    upper_shadow = h - max(o, c)
+    lower_shadow = min(o, c) - l
+
+    # Doji: body <= 10% of range
+    if body <= 0.1 * candle_range:
+        patterns.append("doji")
+
+    # Hammer: small body at top, long lower shadow (>= 2x body), small upper shadow
+    if lower_shadow >= 2 * body and upper_shadow <= body and body > 0:
+        patterns.append("hammer")
+
+    # Shooting star: small body at bottom, long upper shadow (>= 2x body), small lower shadow
+    if upper_shadow >= 2 * body and lower_shadow <= body and body > 0:
+        patterns.append("shooting_star")
+
+    # Previous bar
+    po, ph, pl, pc = opens[-2], highs[-2], lows[-2], closes[-2]
+
+    # Bullish engulfing: prev bar bearish, current bar bullish and engulfs prior body
+    if pc < po and c > o and c >= po and o <= pc:
+        patterns.append("bullish_engulfing")
+
+    # Bearish engulfing: prev bar bullish, current bar bearish and engulfs prior body
+    if pc > po and c < o and c <= po and o >= pc:
+        patterns.append("bearish_engulfing")
+
+    return patterns
+
+
 def _bb_position(price: float, upper: float, lower: float) -> float:
     """Position of price within Bollinger Bands [0=lower, 1=upper]."""
     band_width = upper - lower
@@ -173,12 +265,17 @@ def build_ta_summary(symbol: str, bars: list[OHLCVBar], data_source: str = "unkn
             as_of=datetime.now(timezone.utc),
             bars_count=0,
             indicators=TechnicalIndicators(),
+            adx=25.0,
+            patterns=[],
             signal_tags=[],
             trend_direction="neutral",
             data_source=data_source,
             current_price=None,
         )
 
+    opens = [b.open for b in bars]
+    highs = [b.high for b in bars]
+    lows = [b.low for b in bars]
     closes = [b.close for b in bars]
     current_price = closes[-1]
     as_of = bars[-1].timestamp
@@ -188,6 +285,8 @@ def build_ta_summary(symbol: str, bars: list[OHLCVBar], data_source: str = "unkn
     bb_upper, bb_middle, bb_lower = compute_bollinger(closes)
     ema_20 = compute_ema(closes, 20)
     ema_50 = compute_ema(closes, 50)
+    adx = compute_adx(highs, lows, closes)
+    patterns = detect_patterns(opens, highs, lows, closes)
     bb_pos = _bb_position(current_price, bb_upper, bb_lower)
 
     indicators = TechnicalIndicators(
@@ -211,6 +310,8 @@ def build_ta_summary(symbol: str, bars: list[OHLCVBar], data_source: str = "unkn
         as_of=as_of,
         bars_count=len(bars),
         indicators=indicators,
+        adx=round(adx, 4),
+        patterns=patterns,
         signal_tags=tags,
         trend_direction=trend,
         data_source=data_source,

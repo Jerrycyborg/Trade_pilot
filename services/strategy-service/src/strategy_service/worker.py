@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from uuid import uuid4
 
 import httpx
+from market_data import MarketDataSettings, build_ta_summary, get_fetcher
 
 from contracts import (
+    CandidateAction,
     ExecutionOrderRequest,
     MarketContext,
     PolicyEvaluationRequest,
     PortfolioContext,
     SignalCandidate,
+    TechnicalSummaryContract,
 )
 
 from .ai_pipeline import AISignalPipeline, _build_deterministic_signal
@@ -46,6 +50,9 @@ class WorkerRunResult:
 class TradeWorker:
     """Runs one full pipeline cycle: research → signals → policy → execution."""
 
+    def __init__(self) -> None:
+        self._fetcher = get_fetcher(MarketDataSettings())
+
     async def run_cycle(self) -> dict:
         worker_state.is_running = True
         worker_state.last_run_at = datetime.now(timezone.utc)
@@ -55,7 +62,10 @@ class TradeWorker:
             # 1. Pre-warm research cache for all watchlist symbols
             await self._warm_research_cache(settings.watchlist)
 
-            # 2. Process each symbol
+            # 2. Emit any exit signals for current open positions
+            result.signals_generated += await self._generate_exit_signals()
+
+            # 3. Process each symbol
             for symbol in settings.watchlist:
                 try:
                     await self._process_symbol(symbol, result)
@@ -103,6 +113,20 @@ class TradeWorker:
             signal = await pipeline.generate(symbol)
         else:
             signal = _build_deterministic_signal(symbol)
+
+        ta, bars = self._get_market_snapshot(symbol)
+        if signal.candidate_action == "BUY":
+            adx = getattr(ta, "adx", 25.0) if ta is not None else 25.0
+            if adx < 20.0:
+                logger.debug("regime: ranging (adx=%s), suppressing trend signal", round(adx, 4))
+                signal.candidate_action = CandidateAction.HOLD
+            elif settings.volume_confirm_enabled and bars:
+                volumes = [float(getattr(bar, "volume", 0.0) or 0.0) for bar in bars]
+                current_volume = volumes[-1] if volumes else None
+                avg_volume = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else None
+                if current_volume is not None and avg_volume is not None and current_volume <= avg_volume:
+                    logger.debug("volume_confirm: below avg, suppressing BUY")
+                    signal.candidate_action = CandidateAction.HOLD
 
         result.signals_generated += 1
 
@@ -165,6 +189,138 @@ class TradeWorker:
         if submitted:
             result.orders_submitted += 1
             logger.info("Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action)
+
+    async def _generate_exit_signals(self) -> int:
+        positions = await self._get_open_positions()
+        emitted = 0
+        for position in positions:
+            exit_signal = self._build_exit_signal(position)
+            if exit_signal is None:
+                continue
+            if await self._signal_exists(exit_signal.symbol, exit_signal.candidate_action):
+                continue
+            await self._persist_signal(exit_signal)
+            emitted += 1
+        return emitted
+
+    async def _get_open_positions(self) -> list[dict[str, object]]:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{settings.portfolio_service_url}/v1/portfolio/positions")
+                if resp.status_code == 200:
+                    return [row for row in resp.json() if int(row.get("net_qty", 0)) != 0]
+        except Exception as exc:
+            logger.debug("Could not fetch open positions for exit checks: %s", exc)
+        return []
+
+    def _build_exit_signal(self, position: dict[str, object]) -> SignalCandidate | None:
+        symbol = str(position.get("symbol", "")).upper()
+        if not symbol:
+            return None
+
+        ta = self._get_ta_snapshot(symbol)
+        if ta is None:
+            return None
+
+        entry_price = float(position.get("average_cost", 0.0))
+        current_price = float(ta.current_price)
+        qty = int(position.get("net_qty", 0))
+        opened_at = _parse_datetime(position.get("opened_at")) or _parse_datetime(position.get("updated_at"))
+        max_hold = timedelta(hours=settings.max_hold_hours)
+
+        reasons: list[str] = []
+        if entry_price > 0 and current_price < entry_price * (1 - settings.stop_loss_pct):
+            reasons.append("stop_loss_hit")
+        if entry_price > 0 and current_price > entry_price * (1 + settings.take_profit_pct):
+            reasons.append("take_profit_hit")
+        if qty > 0 and ta.indicators.rsi_14 > 70:
+            reasons.append("signal_reversal")
+        if qty < 0 and ta.indicators.rsi_14 < 30:
+            reasons.append("signal_reversal")
+        if opened_at and datetime.now(timezone.utc) - opened_at > max_hold:
+            reasons.append("max_hold_time")
+
+        if not reasons:
+            return None
+
+        return SignalCandidate(
+            signal_id=str(uuid4()),
+            symbol=symbol,
+            ts=datetime.now(timezone.utc),
+            candidate_action=CandidateAction.EXIT,
+            confidence=0.95,
+            size_pct=1.0,
+            horizon="swing",
+            source="strategy-service",
+            model_version="strategy-exit-v1",
+            risk_score="LOW",
+            ta_summary=TechnicalSummaryContract(
+                symbol=symbol,
+                trend_direction=ta.trend_direction,
+                signal_tags=ta.signal_tags,
+                rsi_14=ta.indicators.rsi_14,
+                macd_histogram=ta.indicators.macd_histogram,
+                bb_position=ta.indicators.bb_position,
+                data_source=ta.data_source,
+                as_of=ta.as_of,
+            ),
+            research_summary=", ".join(reasons),
+        )
+
+    def _get_market_snapshot(self, symbol: str):
+        try:
+            bars = self._fetcher.fetch(symbol, period_days=60)
+        except Exception as exc:
+            logger.debug("TA fetch failed for %s during exit checks: %s", symbol, exc)
+            return None, []
+        if not bars:
+            return None, []
+        return build_ta_summary(symbol, bars, data_source=type(self._fetcher).__name__), bars
+
+    def _get_ta_snapshot(self, symbol: str):
+        ta, _ = self._get_market_snapshot(symbol)
+        return ta
+
+    async def _signal_exists(self, symbol: str, action: CandidateAction) -> bool:
+        from sqlalchemy import select
+
+        from .database import SessionLocal
+        from .models import SignalRecord
+
+        with SessionLocal() as session:
+            existing = session.scalar(
+                select(SignalRecord).where(
+                    SignalRecord.symbol == symbol,
+                    SignalRecord.candidate_action == action.value,
+                    SignalRecord.acted_on.is_(False),
+                )
+            )
+        return existing is not None
+
+    async def _persist_signal(self, signal: SignalCandidate) -> None:
+        from .database import SessionLocal
+        from .models import SignalRecord
+
+        ta_json = signal.ta_summary.model_dump_json() if signal.ta_summary else None
+        with SessionLocal() as session:
+            session.add(
+                SignalRecord(
+                    signal_id=signal.signal_id,
+                    symbol=signal.symbol,
+                    ts=signal.ts,
+                    candidate_action=signal.candidate_action.value,
+                    confidence=signal.confidence,
+                    size_pct=signal.size_pct,
+                    horizon=signal.horizon,
+                    source=signal.source,
+                    model_version=signal.model_version,
+                    risk_score=signal.risk_score,
+                    ta_summary_json=ta_json,
+                    research_summary=signal.research_summary,
+                    acted_on=False,
+                )
+            )
+            session.commit()
 
     async def _get_buying_power(self) -> float:
         try:
@@ -233,3 +389,15 @@ def _compute_qty(size_pct: float, buying_power: float, signal: SignalCandidate) 
         return 1
     qty = int(dollar_amount / current_price)
     return max(1, qty)
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

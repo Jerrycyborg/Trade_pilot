@@ -7,13 +7,22 @@ import json
 import logging
 from uuid import uuid4
 
-from contracts import AccountInfo, ExecutionEvent, ExecutionOrderRequest, ExecutionOrderResponse, FillRecord
-from fastapi import FastAPI, Header, HTTPException, Query
+from contracts import (
+    AccountInfo,
+    ClosePositionRequest,
+    ExecutionEvent,
+    ExecutionOrderRequest,
+    ExecutionOrderResponse,
+    FillRecord,
+)
+from contracts.auth import verify_internal_key
+from contracts.sanitize import sanitize_symbol, validate_positive_amount
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .broker import broker
+from .broker import broker, close_position, resolve_instrument_id
 from .database import Base, SessionLocal, engine
 from .logging_utils import log_event
 from .models import ExecutionEventRecord, FillRecord as FillRecordModel, OrderRecord
@@ -39,10 +48,13 @@ def health() -> dict[str, str]:
 
 @app.post("/v1/orders", response_model=ExecutionOrderResponse)
 def create_order(
-    request: ExecutionOrderRequest, idempotency_key: str = Header(..., alias="Idempotency-Key")
+    request: ExecutionOrderRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    _: None = Depends(verify_internal_key),
 ) -> ExecutionOrderResponse:
     """Submit an order through the paper broker with idempotency protection."""
 
+    request.symbol = sanitize_symbol(request.symbol)
     payload_hash = _hash_payload(request)
     with SessionLocal() as session:
         existing = session.scalar(
@@ -53,7 +65,11 @@ def create_order(
                 raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
             return _to_response(existing)
 
-        broker_result = broker.submit(request)
+        broker_result = broker.place_order(
+            request,
+            stop_loss_rate=request.stop_loss_rate,
+            take_profit_rate=request.take_profit_rate,
+        )
         order = OrderRecord(
             order_id=str(uuid4()),
             signal_id=request.signal_id,
@@ -111,6 +127,42 @@ def create_order(
     return response
 
 
+@app.post("/v1/orders/close")
+def close_order(request: ClosePositionRequest, _: None = Depends(verify_internal_key)) -> dict[str, object]:
+    request.symbol = sanitize_symbol(request.symbol)
+    try:
+        closed = close_position(
+            position_id=request.position_id,
+            symbol=request.symbol,
+            units=request.units,
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    if not closed:
+        raise HTTPException(status_code=502, detail="position_close_failed")
+    return {
+        "status": "closed",
+        "symbol": request.symbol,
+        "position_id": request.position_id,
+        "signal_id": request.signal_id,
+    }
+
+
+@app.get("/v1/instruments/{symbol}/validate")
+def validate_instrument(symbol: str) -> dict[str, object]:
+    symbol = sanitize_symbol(symbol)
+    try:
+        instrument_id = resolve_instrument_id(symbol)
+    except NotImplementedError:
+        return {"symbol": symbol.upper(), "status": "unknown"}
+    except ValueError:
+        return {"symbol": symbol.upper(), "status": "invalid"}
+    return {"symbol": symbol.upper(), "status": "valid", "instrument_id": instrument_id}
+
+
 @app.get("/v1/orders/{order_id}", response_model=ExecutionOrderResponse)
 def get_order(order_id: str) -> ExecutionOrderResponse:
     """Fetch an order by ID."""
@@ -133,7 +185,8 @@ def list_orders(
     with SessionLocal() as session:
         statement = select(OrderRecord)
         if symbol:
-            statement = statement.where(OrderRecord.symbol == symbol.upper())
+            symbol = sanitize_symbol(symbol)
+            statement = statement.where(OrderRecord.symbol == symbol)
         if status:
             statement = statement.where(OrderRecord.status == status.upper())
         orders = session.scalars(statement.order_by(OrderRecord.created_at.desc()).limit(limit)).all()

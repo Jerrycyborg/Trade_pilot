@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from contracts import AuditEvent, AuditLogResponse
-from fastapi import FastAPI, HTTPException, Query
+from contracts.auth import verify_internal_key
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
@@ -30,7 +31,7 @@ def health() -> dict[str, str]:
 
 
 @app.post("/v1/audit/log", response_model=AuditLogResponse)
-def create_log(event: AuditEvent) -> AuditLogResponse:
+def create_log(event: AuditEvent, _: None = Depends(verify_internal_key)) -> AuditLogResponse:
     event_id = event.event_id or str(uuid4())
     record = AuditEventRecord(
         event_id=event_id,
@@ -75,6 +76,49 @@ def get_log(event_id: str) -> AuditLogResponse:
     if not row:
         raise HTTPException(status_code=404, detail="Audit event not found")
     return _to_response(row)
+
+
+@app.get("/v1/audit/summary")
+def get_summary() -> dict:
+    from collections import Counter
+
+    def _as_utc(value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=today_start.weekday())
+
+    with SessionLocal() as session:
+        all_rows = session.scalars(select(AuditEventRecord)).all()
+
+        total_trades = sum(1 for r in all_rows if r.event_type in ("order.submitted", "signal.approved"))
+        approved_today = sum(
+            1 for r in all_rows if r.event_type == "signal.approved" and _as_utc(r.timestamp) >= today_start
+        )
+        rejected_today = sum(
+            1 for r in all_rows if r.event_type == "signal.rejected" and _as_utc(r.timestamp) >= today_start
+        )
+
+        weekly_spend = 0.0
+        for r in all_rows:
+            if r.event_type == "order.submitted" and _as_utc(r.timestamp) >= week_start:
+                try:
+                    meta = json.loads(r.metadata_json or "{}")
+                    weekly_spend += float(meta.get("notional_usd", 0))
+                except Exception:
+                    pass
+
+        symbol_counts = Counter(r.symbol for r in all_rows if r.symbol and r.event_type in ("order.submitted", "signal.approved"))
+        top_symbols = [s for s, _ in symbol_counts.most_common(5)]
+
+    return {
+        "total_trades": total_trades,
+        "approved_today": approved_today,
+        "rejected_today": rejected_today,
+        "weekly_spend": round(weekly_spend, 2),
+        "win_rate": None,
+        "top_symbols_traded": top_symbols,
+    }
 
 
 def _to_response(row: AuditEventRecord) -> AuditLogResponse:

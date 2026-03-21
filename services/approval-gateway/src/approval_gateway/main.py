@@ -6,7 +6,10 @@ from uuid import uuid4
 
 import yaml
 from contracts import ApprovalRequest, ApprovalResponse
-from fastapi import FastAPI, HTTPException, Query
+from contracts.auth import verify_internal_key
+from contracts.rate_limit import rate_limit_write
+from contracts.sanitize import sanitize_symbol, validate_positive_amount
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
@@ -32,22 +35,31 @@ def health() -> dict[str, str]:
 
 
 @app.post("/v1/approvals", response_model=ApprovalResponse)
-def create_approval(request: ApprovalRequest) -> ApprovalResponse:
+def create_approval(
+    approval_request: ApprovalRequest,
+    request: Request,
+    _: None = Depends(verify_internal_key),
+    _rl: None = Depends(rate_limit_write),
+) -> ApprovalResponse:
+    approval_request.symbol = sanitize_symbol(approval_request.symbol)
+    approval_request.amount_usd = validate_positive_amount(
+        approval_request.amount_usd, "amount_usd"
+    )
     timeout_minutes = _tier2_timeout_minutes()
     expires_at = (
         datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
-        if request.tier == 2
+        if approval_request.tier == 2
         else None
     )
     record = ApprovalRecord(
         approval_id=str(uuid4()),
-        signal_id=request.signal_id,
-        symbol=request.symbol.upper(),
-        action=request.action.upper(),
-        amount_usd=request.amount_usd,
-        tier=request.tier,
-        reason=request.reason,
-        metadata_json=json.dumps(request.metadata),
+        signal_id=approval_request.signal_id,
+        symbol=approval_request.symbol.upper(),
+        action=approval_request.action.upper(),
+        amount_usd=approval_request.amount_usd,
+        tier=approval_request.tier,
+        reason=approval_request.reason,
+        metadata_json=json.dumps(approval_request.metadata),
         status="PENDING",
         expires_at=expires_at,
     )
@@ -79,12 +91,22 @@ def get_approval(approval_id: str) -> ApprovalResponse:
 
 
 @app.post("/v1/approvals/{approval_id}/approve", response_model=ApprovalResponse)
-def approve(approval_id: str) -> ApprovalResponse:
+def approve(
+    approval_id: str,
+    request: Request,
+    _: None = Depends(verify_internal_key),
+    _rl: None = Depends(rate_limit_write),
+) -> ApprovalResponse:
     return _transition(approval_id, "APPROVED")
 
 
 @app.post("/v1/approvals/{approval_id}/reject", response_model=ApprovalResponse)
-def reject(approval_id: str) -> ApprovalResponse:
+def reject(
+    approval_id: str,
+    request: Request,
+    _: None = Depends(verify_internal_key),
+    _rl: None = Depends(rate_limit_write),
+) -> ApprovalResponse:
     return _transition(approval_id, "REJECTED")
 
 

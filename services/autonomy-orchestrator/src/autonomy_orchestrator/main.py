@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -8,13 +10,25 @@ import asyncio
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contracts import ApprovalRequest, AuditEvent, NotificationEvent, PolicyEvaluationRequest, SignalCandidate
-from fastapi import FastAPI, HTTPException, Request
+from contracts.auth import verify_admin_key, verify_internal_key
+from contracts.rate_limit import rate_limit_write
+from contracts.sanitize import sanitize_symbol
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .config import settings
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
 from .risk_engine import evaluate_risk
+
+logger = logging.getLogger(__name__)
+
+
+def _internal_headers() -> dict[str, str]:
+    import os
+
+    key = os.environ.get("INTERNAL_API_KEY", "")
+    return {"X-Internal-Key": key} if key else {}
 
 
 class OrchestratorState:
@@ -24,6 +38,8 @@ class OrchestratorState:
     trades_today: int = 0
     weekly_notional_used: float = 0.0
     scheduler: AsyncIOScheduler | None = None
+    allowlist_validation_ran: bool = False
+    last_validation: dict[str, list[str]] = {"valid": [], "invalid": [], "unknown": []}
 
 
 state = OrchestratorState()
@@ -67,7 +83,46 @@ def _start_scheduler() -> None:
     state.scheduler = scheduler
 
 
-app = FastAPI(title="autonomy-orchestrator", version="0.1.0")
+async def _check_dependency(name: str, url: str) -> dict[str, object]:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{url}/health")
+            if resp.status_code == 200:
+                return {"name": name, "status": "ok", "url": url}
+            return {"name": name, "status": "degraded", "url": url, "code": resp.status_code}
+    except Exception as exc:
+        return {"name": name, "status": "down", "url": url, "error": str(exc)}
+
+
+async def _startup_health_check() -> None:
+    deps = [
+        ("strategy-service", settings.strategy_service_url),
+        ("policy-service", settings.policy_service_url),
+        ("execution-service", settings.execution_service_url),
+        ("portfolio-service", settings.portfolio_service_url),
+        ("audit-logger", settings.audit_logger_url),
+    ]
+    results = await asyncio.gather(*[_check_dependency(n, u) for n, u in deps])
+    for result in results:
+        if result["status"] == "ok":
+            logger.info("Dependency %s: OK", result["name"])
+        else:
+            logger.warning(
+                "Dependency %s: %s (%s)",
+                result["name"],
+                result["status"],
+                result.get("error", result.get("code", "")),
+            )
+
+
+@asynccontextmanager
+async def lifespan(app_: FastAPI):
+    await _startup_health_check()
+    _start_scheduler()
+    yield
+
+
+app = FastAPI(title="autonomy-orchestrator", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -75,8 +130,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_start_scheduler()
 
 
 @app.get("/health")
@@ -103,14 +156,51 @@ def last_cycle() -> dict[str, object]:
     return state.last_cycle_summary
 
 
+@app.get("/v1/orchestrator/health/deps")
+async def health_deps() -> list[dict[str, object]]:
+    """Returns per-dependency health status."""
+    deps = [
+        ("strategy-service", settings.strategy_service_url),
+        ("policy-service", settings.policy_service_url),
+        ("execution-service", settings.execution_service_url),
+        ("portfolio-service", settings.portfolio_service_url),
+        ("audit-logger", settings.audit_logger_url),
+    ]
+    results = await asyncio.gather(*[_check_dependency(n, u) for n, u in deps])
+    return list(results)
+
+
+@app.post("/v1/orchestrator/validate")
+async def validate_allowlist(_: None = Depends(verify_internal_key)) -> dict[str, list[str]]:
+    result = await _validate_allowlist_symbols()
+    await _audit(
+        AuditEvent(
+            event_type="orchestrator.validation",
+            decision="CHECKED",
+            reasoning="allowlist validation",
+            metadata=result,
+        )
+    )
+    return result
+
+
 @app.post("/v1/orchestrator/kill-switch")
-def toggle_kill_switch(request: KillSwitchRequest) -> dict[str, object]:
+def toggle_kill_switch(
+    request: KillSwitchRequest,
+    _: None = Depends(verify_admin_key),
+    _rl: None = Depends(rate_limit_write),
+) -> dict[str, object]:
     config = update_policy_config(settings.policy_config_path, {"kill_switch": request.active})
     return {"kill_switch": config.get("kill_switch", False)}
 
 
 @app.post("/v1/orchestrator/live-mode")
-async def live_mode(request: LiveModeRequest, raw_request: Request) -> dict[str, object]:
+async def live_mode(
+    request: LiveModeRequest,
+    raw_request: Request,
+    _: None = Depends(verify_admin_key),
+    _rl: None = Depends(rate_limit_write),
+) -> dict[str, object]:
     config = load_policy_config(settings.policy_config_path)
     if request.enable:
         if request.confirmation != "I CONFIRM LIVE TRADING":
@@ -155,8 +245,15 @@ async def run_cycle() -> dict[str, object]:
     weekly_spend = await _weekly_spend_safe()
     state.weekly_notional_used = weekly_spend
     try:
+        if not state.allowlist_validation_ran:
+            validation = await _validate_allowlist_symbols()
+            state.allowlist_validation_ran = True
+            if validation["invalid"] or validation["unknown"]:
+                for bucket in ("invalid", "unknown"):
+                    for symbol in validation[bucket]:
+                        logger.warning("Allowlist validation %s: %s", bucket, symbol)
         await _process_approvals()
-        signals = await _pending_signals()
+        signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
         portfolio_state = await _portfolio_state()
         for signal in signals:
             summary["signals"] += 1
@@ -221,6 +318,21 @@ async def run_cycle() -> dict[str, object]:
                         metadata={"tier": risk.tier},
                     )
                 )
+        closed = await _process_exit_signals()
+        summary["closed"] = closed
+        summary["executed"] += closed
+        if config.get("close_positions_eod", False):
+            now_utc = datetime.now(timezone.utc)
+            # 19:30-19:45 UTC = approx 15:30-15:45 ET (during EDT)
+            if now_utc.hour == 19 and 30 <= now_utc.minute <= 45:
+                logger.warning("EOD position closure triggered")
+                summary["executed"] += await _process_exit_signals()
+    except RuntimeError as exc:
+        summary["status"] = "halted"
+        summary["reason"] = str(exc)
+        state.last_cycle_summary = summary
+        state.running = False
+        return summary
     finally:
         summary["completed_at"] = datetime.now(timezone.utc)
         state.last_cycle_summary = summary
@@ -238,15 +350,52 @@ async def run_cycle() -> dict[str, object]:
 
 async def _pending_signals() -> list[SignalCandidate]:
     async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(f"{settings.strategy_service_url}/v1/signals", params={"limit": 50, "acted_on": "false"})
+        response = await client.get(
+            f"{settings.strategy_service_url}/v1/signals",
+            params={"limit": 50, "acted_on": "false"},
+            headers=_internal_headers(),
+        )
         response.raise_for_status()
-    return [SignalCandidate.model_validate(item) for item in response.json()]
+    signals: list[SignalCandidate] = []
+    for item in response.json():
+        try:
+            item["symbol"] = sanitize_symbol(str(item.get("symbol", "")))
+        except Exception:
+            logger.warning("Skipping malformed signal symbol: %r", item.get("symbol"))
+            continue
+        signals.append(SignalCandidate.model_validate(item))
+    return signals
+
+
+async def _pending_exit_signals() -> list[SignalCandidate]:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(
+            f"{settings.strategy_service_url}/v1/signals",
+            params={"limit": 50, "acted_on": "false", "candidate_action": "EXIT"},
+            headers=_internal_headers(),
+        )
+        response.raise_for_status()
+    signals: list[SignalCandidate] = []
+    for item in response.json():
+        try:
+            item["symbol"] = sanitize_symbol(str(item.get("symbol", "")))
+        except Exception:
+            logger.warning("Skipping malformed signal symbol: %r", item.get("symbol"))
+            continue
+        signals.append(SignalCandidate.model_validate(item))
+    return signals
 
 
 async def _portfolio_state() -> dict[str, object]:
     async with httpx.AsyncClient(timeout=5.0) as client:
-        positions_resp = await client.get(f"{settings.portfolio_service_url}/v1/portfolio/positions")
-        account_resp = await client.get(f"{settings.execution_service_url}/v1/account")
+        positions_resp = await client.get(
+            f"{settings.portfolio_service_url}/v1/portfolio/positions",
+            headers=_internal_headers(),
+        )
+        account_resp = await client.get(
+            f"{settings.execution_service_url}/v1/account",
+            headers=_internal_headers(),
+        )
     positions = positions_resp.json() if positions_resp.status_code == 200 else []
     account = account_resp.json() if account_resp.status_code == 200 else {"buying_power": 100_000.0}
     return {
@@ -276,19 +425,29 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
         },
         risk_score=signal.risk_score,
     )
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            f"{settings.policy_service_url}/v1/policy/evaluate",
-            json=request.model_dump(mode="json"),
-        )
-        response.raise_for_status()
-        return response.json()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{settings.policy_service_url}/v1/policy/evaluate",
+                json=request.model_dump(mode="json"),
+                headers=_internal_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+    except Exception as exc:
+        logger.critical("Policy service unreachable: %s — halting cycle (fail closed)", exc)
+        raise RuntimeError(f"Policy service unreachable: {exc}") from exc
 
 
 async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
     buying_power = float(portfolio_state.get("buying_power", 100_000.0))
     amount_usd = round(buying_power * risk.adjusted_size_pct, 2)
     qty = max(1, int(amount_usd / 100.0))
+    current_price = await _get_quote_price(signal.symbol)
+    stop_loss_pct = float(config.get("stop_loss_pct", 0.03))
+    take_profit_pct = float(config.get("take_profit_pct", 0.06))
+    stop_loss_rate = current_price * (1 - stop_loss_pct) if current_price is not None else None
+    take_profit_rate = current_price * (1 + take_profit_pct) if current_price is not None else None
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(
             f"{settings.execution_service_url}/v1/orders",
@@ -299,8 +458,13 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
                 "qty": qty,
                 "order_type": "MARKET",
                 "time_in_force": "DAY",
+                "stop_loss_rate": stop_loss_rate,
+                "take_profit_rate": take_profit_rate,
             },
-            headers={"Idempotency-Key": f"orchestrator-{signal.signal_id}"},
+            headers={
+                "Idempotency-Key": f"orchestrator-{signal.signal_id}",
+                **_internal_headers(),
+            },
         )
         response.raise_for_status()
         body = response.json()
@@ -320,8 +484,15 @@ async def _approval(signal: SignalCandidate, risk, policy: dict[str, object]) ->
         reason="; ".join(policy.get("reasons", []) or [risk.reason]),
         metadata={"policy": policy, "signal": signal.model_dump(mode="json")},
     )
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(f"{settings.approval_gateway_url}/v1/approvals", json=approval.model_dump(mode="json"))
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.approval_gateway_url}/v1/approvals",
+                json=approval.model_dump(mode="json"),
+                headers=_internal_headers(),
+            )
+    except Exception as exc:
+        logger.error("Approval gateway unreachable: %s — signal rejected (fail safe)", exc)
 
 
 async def _notify(signal: SignalCandidate, risk, policy: dict[str, object]) -> None:
@@ -334,15 +505,30 @@ async def _notify(signal: SignalCandidate, risk, policy: dict[str, object]) -> N
         signal_id=signal.signal_id,
     )
     async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(f"{settings.notification_service_url}/v1/notify", json=event.model_dump(mode="json"))
+        await client.post(
+            f"{settings.notification_service_url}/v1/notify",
+            json=event.model_dump(mode="json"),
+            headers=_internal_headers(),
+        )
 
 
 async def _process_approvals() -> None:
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(f"{settings.approval_gateway_url}/v1/approvals/pending", params={"status": "APPROVED"})
-        if response.status_code != 200:
-            return
-        approved_rows = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{settings.approval_gateway_url}/v1/approvals/pending",
+                params={"status": "APPROVED"},
+                headers=_internal_headers(),
+            )
+            if response.status_code != 200:
+                return
+            approved_rows = response.json()
+    except Exception as exc:
+        logger.error(
+            "Approval gateway unreachable: %s — treating all pending approvals as REJECTED (fail safe)",
+            exc,
+        )
+        return
     config = load_policy_config(settings.policy_config_path)
     # Re-check kill switch before executing any deferred approvals
     if config.get("kill_switch"):
@@ -389,7 +575,10 @@ async def _process_approvals() -> None:
 
 async def _mark_signal_acted(signal_id: str) -> None:
     async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(f"{settings.strategy_service_url}/v1/signals/{signal_id}/act")
+        await client.post(
+            f"{settings.strategy_service_url}/v1/signals/{signal_id}/act",
+            headers=_internal_headers(),
+        )
 
 
 async def _weekly_spend() -> float:
@@ -398,6 +587,7 @@ async def _weekly_spend() -> float:
         response = await client.get(
             f"{settings.audit_logger_url}/v1/audit/logs",
             params={"event_type": "trade.executed", "since": since, "limit": 1000},
+            headers=_internal_headers(),
         )
         if response.status_code != 200:
             return 0.0
@@ -415,5 +605,110 @@ async def _weekly_spend_safe() -> float:
 
 
 async def _audit(event: AuditEvent) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.audit_logger_url}/v1/audit/log",
+                json=event.model_dump(mode="json"),
+                headers=_internal_headers(),
+            )
+    except Exception as exc:
+        logger.error(
+            "Audit logger unreachable, logging locally: %s | event=%s",
+            exc,
+            event.event_type,
+        )
+
+
+async def _process_exit_signals() -> int:
+    closed = 0
+    positions = await _portfolio_positions()
+    position_map = {str(row.get("symbol", "")).upper(): row for row in positions}
+    for signal in await _pending_exit_signals():
+        position = position_map.get(signal.symbol.upper())
+        if not position:
+            continue
+        position_id = str(position.get("position_id") or position.get("positionId") or signal.symbol)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{settings.execution_service_url}/v1/orders/close",
+                json={
+                    "symbol": signal.symbol,
+                    "position_id": position_id,
+                    "signal_id": signal.signal_id,
+                },
+                headers=_internal_headers(),
+            )
+        if response.status_code not in (200, 201):
+            continue
+        closed += 1
+        await _audit(
+            AuditEvent(
+                event_type="trade.closed",
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                decision="EXIT",
+                reasoning=signal.research_summary or "exit_signal_executed",
+                metadata={"position_id": position_id, "response": response.json()},
+            )
+        )
+        await _mark_signal_acted(signal.signal_id)
+    return closed
+
+
+async def _portfolio_positions() -> list[dict[str, object]]:
     async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(f"{settings.audit_logger_url}/v1/audit/log", json=event.model_dump(mode="json"))
+        response = await client.get(
+            f"{settings.portfolio_service_url}/v1/portfolio/positions",
+            headers=_internal_headers(),
+        )
+        if response.status_code != 200:
+            return []
+        return response.json()
+
+
+async def _get_quote_price(symbol: str) -> float | None:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{settings.strategy_service_url}/v1/market/quote/{symbol}",
+                headers=_internal_headers(),
+            )
+            if response.status_code == 200:
+                return float(response.json().get("price"))
+    except Exception:
+        return None
+    return None
+
+
+async def _validate_allowlist_symbols() -> dict[str, list[str]]:
+    config = load_policy_config(settings.policy_config_path)
+    symbols: list[str] = []
+    for raw_symbol in config.get("symbol_allowlist", []):
+        try:
+            symbols.append(sanitize_symbol(str(raw_symbol)))
+        except Exception:
+            logger.warning("Skipping malformed allowlist symbol: %r", raw_symbol)
+    result: dict[str, list[str]] = {"valid": [], "invalid": [], "unknown": []}
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for symbol in symbols:
+            try:
+                response = await client.get(
+                    f"{settings.execution_service_url}/v1/instruments/{symbol}/validate",
+                    headers=_internal_headers(),
+                )
+            except Exception:
+                result["unknown"].append(symbol)
+                continue
+            if response.status_code != 200:
+                result["unknown"].append(symbol)
+                continue
+            status = str(response.json().get("status", "unknown")).lower()
+            if status == "valid":
+                result["valid"].append(symbol)
+            elif status == "invalid":
+                result["invalid"].append(symbol)
+            else:
+                result["unknown"].append(symbol)
+    state.last_validation = result
+    return result
