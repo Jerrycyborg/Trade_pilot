@@ -105,6 +105,31 @@ def compute_bollinger(
     return upper, middle, lower
 
 
+def compute_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
+    """Wilder's ATR using rolling window. Returns mean(H-L) of last `period` bars if insufficient data."""
+    if len(highs) < 2 or len(lows) < 2 or len(closes) < 2:
+        return (highs[-1] - lows[-1]) if highs and lows else 0.0
+
+    tr_list: list[float] = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        tr_list.append(tr)
+
+    if len(tr_list) < period:
+        # fallback: mean of H-L over available bars
+        return sum(highs[i] - lows[i] for i in range(len(highs))) / len(highs)
+
+    # Wilder smoothing: seed with SMA of first `period` TR values
+    atr = sum(tr_list[:period]) / period
+    for tr in tr_list[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
 def compute_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
     """Compute Average Directional Index. Returns 25.0 (neutral) if insufficient data."""
     if len(highs) < period + 2 or len(lows) < period + 2 or len(closes) < period + 2:

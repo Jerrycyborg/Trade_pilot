@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .config import settings
+from .stop_loss_monitor import StopLossMonitor
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
 from .risk_engine import evaluate_risk
 
@@ -40,6 +41,7 @@ class OrchestratorState:
     scheduler: AsyncIOScheduler | None = None
     allowlist_validation_ran: bool = False
     last_validation: dict[str, list[str]] = {"valid": [], "invalid": [], "unknown": []}
+    stop_loss_monitor: StopLossMonitor | None = None
 
 
 state = OrchestratorState()
@@ -73,6 +75,23 @@ def _start_scheduler() -> None:
         trigger="interval",
         minutes=settings.orchestrator_interval_minutes,
         id="autonomy_orchestrator",
+        max_instances=1,
+    )
+
+    async def _stop_loss_job() -> None:
+        if state.stop_loss_monitor is None:
+            return
+        from market_data import get_fetcher, MarketDataSettings
+        fetcher = get_fetcher(MarketDataSettings())
+        triggered = await state.stop_loss_monitor.check_all(fetcher)
+        if triggered:
+            logger.info("StopLossMonitor triggered exits for: %s", triggered)
+
+    scheduler.add_job(
+        _stop_loss_job,
+        trigger="interval",
+        minutes=5,
+        id="stop_loss_check",
         max_instances=1,
     )
     try:
@@ -117,6 +136,11 @@ async def _startup_health_check() -> None:
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
+    import os
+    state.stop_loss_monitor = StopLossMonitor(
+        broker_url=settings.execution_service_url,
+        internal_key=os.environ.get("INTERNAL_API_KEY", ""),
+    )
     await _startup_health_check()
     _start_scheduler()
     yield

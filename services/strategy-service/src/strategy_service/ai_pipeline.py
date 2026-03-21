@@ -16,6 +16,7 @@ from market_data import MarketDataSettings, build_ta_summary, get_fetcher
 from market_data.fetcher import DataUnavailableError
 
 from .config import settings
+from .rule_engine import evaluate_rules
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,16 @@ class AISignalPipeline:
             logger.error("AISignalPipeline.generate failed for %s: %s", symbol, exc)
             if settings.fallback_to_deterministic:
                 logger.info("Falling back to deterministic signal for %s", symbol)
-                return _build_deterministic_signal(symbol)
+                ta = None
+                try:
+                    fetcher = get_fetcher(self._market_settings)
+                    bars = fetcher.fetch(symbol, period_days=self._market_settings.default_lookback_days)
+                    if bars:
+                        from market_data import build_ta_summary
+                        ta = build_ta_summary(symbol, bars)
+                except Exception:
+                    pass
+                return _build_deterministic_signal(symbol, ta)
             raise
 
     async def _do_generate(self, symbol: str) -> SignalCandidate:
@@ -66,6 +76,35 @@ class AISignalPipeline:
         # 2. Fetch research report (best-effort, 5s timeout)
         research = await self._get_research(symbol)
         sentiment = await self._get_sentiment(symbol)
+
+        # 2b. Pre-Claude deterministic check: if rule signal is high-confidence, skip Claude
+        if ta_summary is not None and getattr(settings, "prefer_deterministic", False):
+            rule_signal = evaluate_rules(ta_summary)
+            if rule_signal.confidence >= 0.75:
+                ta_contract_pre: Optional[TechnicalSummaryContract] = None
+                if ta_summary:
+                    ind_pre = ta_summary.indicators
+                    ta_contract_pre = TechnicalSummaryContract(
+                        symbol=symbol.upper(),
+                        trend_direction=ta_summary.trend_direction,
+                        signal_tags=ta_summary.signal_tags,
+                        rsi_14=ind_pre.rsi_14,
+                        macd_histogram=ind_pre.macd_histogram,
+                        bb_position=ind_pre.bb_position,
+                        data_source=ta_summary.data_source,
+                        as_of=ta_summary.as_of,
+                    )
+                return SignalCandidate(
+                    signal_id=str(uuid4()),
+                    symbol=symbol.upper(),
+                    ts=datetime.now(timezone.utc),
+                    candidate_action=rule_signal.action,
+                    confidence=rule_signal.confidence,
+                    size_pct=rule_signal.size_pct,
+                    model_version="strategy-rule-v1",
+                    risk_score=rule_signal.risk_score,
+                    ta_summary=ta_contract_pre,
+                )
 
         # 3. Build Claude prompt and get signal
         ai_result = await self._call_claude(symbol, ta_summary, research)
@@ -228,8 +267,21 @@ def _parse_json(text: str) -> dict:
     return {"action": "HOLD", "confidence": 0.5, "risk_score": "MEDIUM", "reasoning": "parse error"}
 
 
-def _build_deterministic_signal(symbol: str) -> SignalCandidate:
-    """Original deterministic hash-based signal (Milestone 1 fallback)."""
+def _build_deterministic_signal(symbol: str, ta_summary=None) -> SignalCandidate:
+    """Deterministic rule-based signal using EMA/RSI/MACD strategy."""
+    if ta_summary is not None:
+        rule_signal = evaluate_rules(ta_summary)
+        return SignalCandidate(
+            signal_id=str(uuid4()),
+            symbol=symbol.upper(),
+            ts=datetime.now(timezone.utc),
+            candidate_action=rule_signal.action,
+            confidence=rule_signal.confidence,
+            size_pct=rule_signal.size_pct,
+            model_version="strategy-rule-v1",
+            risk_score=rule_signal.risk_score,
+        )
+    # Fallback: hash-based when no TA data available
     basis = sum(ord(char) for char in symbol.upper())
     action = "BUY" if basis % 2 == 0 else "SELL"
     confidence = round(0.6 + (basis % 20) / 100, 2)

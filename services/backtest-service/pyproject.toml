@@ -1,16 +1,14 @@
 [project]
-name = "autonomy-orchestrator"
+name = "backtest-service"
 version = "0.1.0"
-description = "Autonomous trading orchestration service."
 requires-python = ">=3.11"
 dependencies = [
   "contracts",
-  "fastapi>=0.115.0",
-  "httpx>=0.27.0",
-  "uvicorn>=0.34.0",
-  "apscheduler>=3.10.0",
-  "pyyaml>=6.0.2",
   "market_data",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.34.0",
+  "pandas>=2.0.0",
+  "numpy>=1.26.0,<2.0",
 ]
 
 [build-system]
@@ -18,4 +16,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/autonomy_orchestrator"]
+packages = ["src/backtest_service"]

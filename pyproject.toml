@@ -18,12 +18,14 @@ dependencies = [
   "sentiment-aggregator",
   "strategy-service",
   "research-service",
+  "backtest-service",
 ]
 
 [dependency-groups]
 dev = [
   "httpx>=0.28.0",
   "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
   "ruff>=0.11.0",
 ]
 
@@ -42,6 +44,7 @@ members = [
   "services/sentiment-aggregator",
   "services/strategy-service",
   "services/research-service",
+  "services/backtest-service",
 ]
 
 [tool.uv.sources]
@@ -58,9 +61,11 @@ approval-gateway = { workspace = true }
 sentiment-aggregator = { workspace = true }
 strategy-service = { workspace = true }
 research-service = { workspace = true }
+backtest-service = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100

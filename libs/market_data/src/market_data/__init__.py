@@ -2,7 +2,8 @@
 
 from .config import MarketDataSettings
 from .fetcher import get_fetcher
-from .indicators import build_ta_summary, compute_adx, detect_patterns
+from .stream import AlpacaStreamFetcher
+from .indicators import build_ta_summary, compute_adx, compute_atr, detect_patterns
 from .models import OHLCVBar, TASummary, TechnicalIndicators
 
 __all__ = [
@@ -12,6 +13,8 @@ __all__ = [
     "TechnicalIndicators",
     "build_ta_summary",
     "compute_adx",
+    "compute_atr",
     "detect_patterns",
+    "AlpacaStreamFetcher",
     "get_fetcher",
 ]

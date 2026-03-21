@@ -1,0 +1,42 @@
+{
+  "task": "Add backtesting, risk management, real-time data, and focused strategy to Trade_pilot",
+  "from_role": "researcher",
+  "to_role": "architect",
+  "pipeline_step": 2,
+  "pipeline_total": 4,
+  "mode": "pipeline",
+  "state": {
+    "findings_path": ".ai/orchestrator/runs/2026-03-21-enhancement/01-researcher.md",
+    "recommended_direction": "Prioritise risk-layer extensions (stop-loss monitor + ATR-based sizing) first as they touch existing risk_engine.py with no new dependencies, then formalise the Dual-EMA Momentum + RSI strategy as a deterministic rule-based engine replacing the ad-hoc LLM fallback, then add Alpaca WebSocket streaming to market_data lib, and finally build a standalone backtest-service using vectorbt.",
+    "key_risks": [
+      "Look-ahead bias in backtesting if indicators are computed on full series rather than rolling window",
+      "eToro REST API may not support server-side stop-loss for all instruments — requires client-side monitoring loop",
+      "vectorbt numpy version conflict — must verify against uv.lock before adding dep",
+      "Alpaca WebSocket silent disconnects require robust reconnect logic",
+      "Symbol mapping mismatch between eToro and Alpaca/Polygon instrument IDs"
+    ],
+    "libraries": {
+      "backtest": "vectorbt",
+      "risk": "stdlib (extend existing risk_engine.py — no new dep)",
+      "data": "alpaca-py WebSocket (already present) + polygon-api-client (optional)",
+      "strategy": "built-in indicators (compute_ema, compute_rsi, compute_macd already in indicators.py)"
+    },
+    "implementation_order": [
+      "1. risk_engine.py: ATR-based sizing + stop_loss_monitor.py APScheduler task",
+      "2. strategy_service: formalise EMA(20/50)+RSI(14)+MACD deterministic strategy with ADX>25 filter",
+      "3. market_data/stream.py: AlpacaStreamFetcher WebSocket client with asyncio.Queue",
+      "4. services/backtest-service: new uv workspace service using vectorbt, driven by OHLCVBar models"
+    ],
+    "existing_assets_to_reuse": [
+      "libs/market_data/indicators.py — compute_rsi, compute_ema, compute_macd already correct",
+      "services/autonomy-orchestrator/risk_engine.py — extend, do not rewrite",
+      "libs/brokers/etoro_broker.py — no changes needed",
+      "tests/risk_engine/ — add new tests alongside existing 70 passing"
+    ]
+  },
+  "constraints": {
+    "scope": "Trade_pilot repo only — no new repos",
+    "non_goals": ["live trading changes", "eToro API changes", "UI/dashboard"],
+    "output_format": "markdown"
+  }
+}

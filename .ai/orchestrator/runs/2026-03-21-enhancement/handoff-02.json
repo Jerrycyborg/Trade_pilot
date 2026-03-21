@@ -1,0 +1,75 @@
+{
+  "task": "Add backtesting, risk management, real-time data, and focused strategy to Trade_pilot",
+  "step": 2,
+  "role": "architect",
+  "status": "complete",
+  "state": {
+    "recommended_direction": "Prioritise risk-layer extensions (stop-loss monitor + ATR-based sizing) first as they touch existing risk_engine.py with no new dependencies, then formalise the Dual-EMA Momentum + RSI strategy as a deterministic rule-based engine replacing the ad-hoc LLM fallback, then add Alpaca WebSocket streaming to market_data lib, and finally build a standalone backtest-service using vectorbt.",
+    "key_risks": [
+      "Look-ahead bias in backtesting if indicators computed on full series not rolling window",
+      "eToro REST API may not support server-side stop-loss — requires client-side monitoring loop",
+      "vectorbt numpy version conflict — verify against uv.lock before adding dep",
+      "Alpaca WebSocket silent disconnects require robust reconnect logic",
+      "Symbol mapping mismatch between eToro and Alpaca/Polygon instrument IDs"
+    ],
+    "libraries": {
+      "backtest": "vectorbt",
+      "risk": "extend existing risk_engine.py — no new dep",
+      "data": "alpaca-py WebSocket (already present)",
+      "strategy": "built-in indicators in indicators.py"
+    },
+    "implementation_order": [
+      "1. risk_engine.py: ATR-based sizing + stop_loss_monitor.py APScheduler task",
+      "2. strategy_service: formalise EMA(20/50)+RSI(14)+MACD deterministic strategy",
+      "3. market_data/stream.py: AlpacaStreamFetcher WebSocket client",
+      "4. services/backtest-service: new vectorbt-backed service"
+    ],
+    "existing_assets_to_reuse": [
+      "libs/market_data/src/market_data/indicators.py — compute_rsi, compute_ema, compute_macd",
+      "services/autonomy-orchestrator/src/autonomy_orchestrator/risk_engine.py — extend only",
+      "libs/brokers/etoro_broker.py — no changes",
+      "tests/risk_engine/ — add alongside existing tests"
+    ],
+    "plan_path": ".ai/orchestrator/runs/2026-03-21-enhancement/02-architect.md",
+    "touched_files": [
+      "libs/market_data/src/market_data/indicators.py",
+      "libs/market_data/src/market_data/__init__.py",
+      "services/autonomy-orchestrator/src/autonomy_orchestrator/risk_engine.py",
+      "services/autonomy-orchestrator/src/autonomy_orchestrator/main.py",
+      "services/autonomy-orchestrator/pyproject.toml",
+      "services/strategy-service/src/strategy_service/ai_pipeline.py",
+      "services/strategy-service/src/strategy_service/config.py",
+      "pyproject.toml"
+    ],
+    "new_files": [
+      "libs/market_data/src/market_data/stream.py",
+      "services/autonomy-orchestrator/src/autonomy_orchestrator/stop_loss_monitor.py",
+      "services/strategy-service/src/strategy_service/rule_engine.py",
+      "services/backtest-service/Dockerfile",
+      "services/backtest-service/pyproject.toml",
+      "services/backtest-service/src/backtest_service/__init__.py",
+      "services/backtest-service/src/backtest_service/config.py",
+      "services/backtest-service/src/backtest_service/models.py",
+      "services/backtest-service/src/backtest_service/engine.py",
+      "services/backtest-service/src/backtest_service/main.py",
+      "tests/risk_engine/test_stop_loss_monitor.py",
+      "tests/strategy_service/test_rule_engine.py",
+      "tests/market_data/test_alpaca_stream.py",
+      "services/backtest-service/tests/test_engine.py"
+    ],
+    "deferred": [
+      "Dashboard/UI for backtest results",
+      "eToro server-side stop-loss API",
+      "Multi-symbol backtesting / portfolio optimizer",
+      "Crypto symbol mapping (eToro vs Alpaca ID mismatch)",
+      "Live trading path changes",
+      "Polygon.io fallback for streaming",
+      "Persistent backtest result storage (DB)"
+    ]
+  },
+  "constraints": {
+    "scope": "Trade_pilot repo only",
+    "non_goals": ["live trading changes", "eToro API changes", "UI/dashboard"],
+    "output_format": "markdown"
+  }
+}

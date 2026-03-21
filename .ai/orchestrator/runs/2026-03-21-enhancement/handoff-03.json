@@ -1,0 +1,58 @@
+{
+  "pipeline": "Trade_pilot enhancement",
+  "step": "03-implementer",
+  "timestamp": "2026-03-21T23:00:00Z",
+  "state": {
+    "status": "complete",
+    "changes": [
+      "Added compute_atr() to libs/market_data/src/market_data/indicators.py (Wilder's ATR, rolling window)",
+      "Exported compute_atr and AlpacaStreamFetcher from market_data __init__.py",
+      "Updated risk_engine.py: added compute_atr_size_pct(), updated evaluate_risk() with price_bars param for ATR sizing",
+      "Added market_data dependency to autonomy-orchestrator pyproject.toml",
+      "Created stop_loss_monitor.py: StopLossRecord, StopLossMonitor with register/check_all/_trigger_exit",
+      "Updated main.py: StopLossMonitor instantiated in lifespan, APScheduler stop_loss_check job registered (5 min)",
+      "Created rule_engine.py: evaluate_rules(ta) -> RuleSignal with EMA/RSI/MACD/ADX logic",
+      "Updated ai_pipeline.py: _build_deterministic_signal() uses rule_engine; pre-Claude high-confidence bypass",
+      "Added prefer_deterministic setting to strategy-service config",
+      "Created stream.py: AlpacaStreamFetcher with asyncio.Queue-style buffer, exponential backoff reconnect",
+      "Created backtest-service: models, engine (no look-ahead), FastAPI app, tests",
+      "Added backtest-service to root workspace and uv.lock",
+      "Added pytest-asyncio to dev deps; asyncio_mode=auto in pytest config",
+      "Added 20 new tests across 4 test files"
+    ],
+    "test_results": "90 passed, 0 failed (new tests); 5 pre-existing integration failures unchanged",
+    "deferred": [
+      "vectorbt not added to backtest-service (numpy downgrade risk to workspace); pure Python engine used instead",
+      "stop_loss_monitor not wired into run_cycle() post-trade (requires ATR at order time — follow-up task)",
+      "backtest-service Dockerfile not created",
+      "backtest-service config.py not created (not required by architect plan)"
+    ]
+  },
+  "touched_files": [
+    "libs/market_data/src/market_data/indicators.py",
+    "libs/market_data/src/market_data/__init__.py",
+    "services/autonomy-orchestrator/src/autonomy_orchestrator/risk_engine.py",
+    "services/autonomy-orchestrator/src/autonomy_orchestrator/main.py",
+    "services/autonomy-orchestrator/pyproject.toml",
+    "services/strategy-service/src/strategy_service/ai_pipeline.py",
+    "services/strategy-service/src/strategy_service/config.py",
+    "pyproject.toml"
+  ],
+  "new_files": [
+    "libs/market_data/src/market_data/stream.py",
+    "services/autonomy-orchestrator/src/autonomy_orchestrator/stop_loss_monitor.py",
+    "services/strategy-service/src/strategy_service/rule_engine.py",
+    "services/backtest-service/pyproject.toml",
+    "services/backtest-service/src/backtest_service/__init__.py",
+    "services/backtest-service/src/backtest_service/models.py",
+    "services/backtest-service/src/backtest_service/engine.py",
+    "services/backtest-service/src/backtest_service/main.py",
+    "services/backtest-service/tests/__init__.py",
+    "services/backtest-service/tests/conftest.py",
+    "services/backtest-service/tests/test_engine.py",
+    "tests/risk_engine/test_stop_loss_monitor.py",
+    "tests/strategy_service/test_rule_engine.py",
+    "tests/market_data/test_alpaca_stream.py"
+  ],
+  "next_step": "04-verifier"
+}

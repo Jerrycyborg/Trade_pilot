@@ -68,6 +68,9 @@ class StrategySettings:
     volume_confirm_enabled: bool = field(
         default_factory=lambda: os.getenv("VOLUME_CONFIRM_ENABLED", "true").lower() == "true"
     )
+    prefer_deterministic: bool = field(
+        default_factory=lambda: os.getenv("PREFER_DETERMINISTIC", "false").lower() == "true"
+    )
 
     @property
     def watchlist(self) -> list[str]:
