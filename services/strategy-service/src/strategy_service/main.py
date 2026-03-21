@@ -101,6 +101,41 @@ def get_watchlist() -> dict:
     return {"symbols": settings.watchlist, "count": len(settings.watchlist)}
 
 
+
+@app.get("/v1/strategy/watchlist/etoro")
+async def etoro_watchlist() -> dict:
+    """Fetch and return the live eToro watchlist for this account."""
+    import os, uuid
+    import httpx
+    api_key = os.getenv("ETORO_API_KEY", "")
+    user_key = os.getenv("ETORO_USER_KEY", "")
+    if not api_key or not user_key:
+        return {"error": "eToro credentials not configured", "symbols": []}
+    headers = {
+        "x-api-key": api_key,
+        "x-user-key": user_key,
+        "x-request-id": str(uuid.uuid4()),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://public-api.etoro.com/api/v1/watchlists",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        watchlists = []
+        for wl in data.get("watchlists", []):
+            items = [
+                {"symbol": item["market"]["symbolName"], "name": item["market"]["displayName"]}
+                for item in wl.get("items", [])
+                if "market" in item
+            ]
+            watchlists.append({"name": wl["name"], "id": wl["watchlistId"], "items": items})
+        return {"watchlists": watchlists, "total": len(watchlists)}
+    except Exception as exc:
+        return {"error": str(exc), "symbols": []}
+
 @app.get("/v1/worker/status", response_model=WorkerStatus)
 def get_worker_status() -> WorkerStatus:
     """Return trade worker / scheduler state."""

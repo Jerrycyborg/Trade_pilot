@@ -13,7 +13,7 @@ from contracts import ApprovalRequest, AuditEvent, NotificationEvent, PolicyEval
 from contracts.auth import verify_admin_key, verify_internal_key
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -154,6 +154,18 @@ def status() -> dict[str, object]:
 @app.get("/v1/orchestrator/cycle/last")
 def last_cycle() -> dict[str, object]:
     return state.last_cycle_summary
+
+@app.post("/v1/orchestrator/cycle/trigger")
+async def trigger_cycle(x_internal_key: str = Header(...)) -> dict[str, object]:
+    """Manually trigger a cycle (bypasses market hours gate — for testing)."""
+    from .policy_config import load_policy_config
+    config = load_policy_config(settings.policy_config_path)
+    if config.get("kill_switch"):
+        return {"status": "halted", "reason": "kill_switch_active"}
+    if state.running:
+        return {"status": "busy", "reason": "cycle_already_running"}
+    return await run_cycle()
+
 
 
 @app.get("/v1/orchestrator/health/deps")

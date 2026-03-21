@@ -1,4 +1,4 @@
-weekly_notional_cap_usd: 50000
+weekly_notional_cap_usd: 500
 max_position_size_pct: 5.0
 max_daily_drawdown_pct: 3.0
 max_concurrent_positions: 10
@@ -9,18 +9,62 @@ kill_switch: false
 close_positions_eod: false
 trading_mode: demo
 symbol_allowlist:
-  - SPY
-  - QQQ
-  - IWM
-  - TLT
-  - GLD
-  - BND
   - AAPL
-  - MSFT
-  - GOOGL
+  - ADA
+  - AMD
+  - AMGN
   - AMZN
-  - NVDA
+  - ARM
+  - AVGO
+  - B
+  - BCH
+  - BETA
+  - BTC
+  - CDNA
+  - CIFR
+  - CRWD
+  - CXAI
+  - DOT
+  - EQT
+  - ETC
+  - ETH
+  - FRSH
+  - GOLD
+  - GOOG
+  - HPQ
+  - IBM
+  - IBRX
+  - INTC
+  - IONQ
+  - IONS
+  - JPM
+  - LTC
+  - LUMN
   - META
+  - MRK
+  - MSFT
+  - MU
+  - NUVL
+  - NVDA
+  - OIL
+  - OXY
+  - PFE
+  - QCOM
+  - QUBT
+  - REKR
+  - RR
+  - SES
+  - SIRI
+  - SLNO
+  - SOL
+  - SOUN
+  - TSLA
+  - TSM
+  - UPLD
+  - UPST
+  - XRP
+  - ZEC
+
 trading_hours:
   enabled: true
   start: "09:30"
