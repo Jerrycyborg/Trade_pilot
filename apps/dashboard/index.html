@@ -6,8 +6,7 @@
     <title>Trade Pilot Dashboard</title>
     <link rel="stylesheet" href="./styles.css" />
     <script>
-      // All API calls go through nginx reverse proxy (/api/<service>/) so
-      // HTTPS mixed-content is never an issue regardless of where you access from.
+      // Service URLs use nginx reverse proxy — no direct port access, no mixed content.
       const _base = window.location.origin;
       window.TRADE_PILOT_CONFIG = {
         strategyBaseUrl:     _base + '/api/strategy',
@@ -19,9 +18,15 @@
         approvalBaseUrl:     _base + '/api/approval',
         auditBaseUrl:        _base + '/api/audit',
         sentimentBaseUrl:    _base + '/api/sentiment',
-        internalKey: "f9b76fe1b704a220d66e5c4687a3f6f7fbadb59064a0471e19dcc5b8302140c5",
-        adminKey: "b756bc36eef8a5d90f8117e778dd494a5fae740bf4dfa88d74ea44da428abac4",
+        // Keys loaded at runtime from server-side config endpoint (not hardcoded here)
+        internalKey: "",
+        adminKey:    "",
       };
+      // Fetch keys from server-side config (nginx injects from env, never exposed in source)
+      fetch('/api/orchestrator/v1/orchestrator/client-config')
+        .then(r => r.ok ? r.json() : {})
+        .then(cfg => { Object.assign(window.TRADE_PILOT_CONFIG, cfg); })
+        .catch(() => {});
     </script>
     <!-- TradingView Lightweight Charts -->
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>

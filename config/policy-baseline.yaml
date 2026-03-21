@@ -9,68 +9,72 @@ kill_switch: false
 close_positions_eod: false
 trading_mode: demo
 symbol_allowlist:
-  - AAPL
-  - ADA
-  - AMD
-  - AMGN
-  - AMZN
-  - ARM
-  - AVGO
-  - B
-  - BCH
-  - BETA
-  - BTC
-  - CDNA
-  - CIFR
-  - CRWD
-  - CXAI
-  - DOT
-  - EQT
-  - ETC
-  - ETH
-  - FRSH
-  - GOLD
-  - GOOG
-  - HPQ
-  - IBM
-  - IBRX
-  - INTC
-  - IONQ
-  - IONS
-  - JPM
-  - LTC
-  - LUMN
-  - META
-  - MRK
-  - MSFT
-  - MU
-  - NUVL
-  - NVDA
-  - OIL
-  - OXY
-  - PFE
-  - QCOM
-  - QUBT
-  - REKR
-  - RR
-  - SES
-  - SIRI
-  - SLNO
-  - SOL
-  - SOUN
-  - TSLA
-  - TSM
-  - UPLD
-  - UPST
-  - XRP
-  - ZEC
-
+- AAPL
+- ADA
+- AMD
+- AMGN
+- AMZN
+- ARM
+- AVGO
+- B
+- BCH
+- BETA
+- BTC
+- CDNA
+- CIFR
+- CRWD
+- CXAI
+- DOT
+- EQT
+- ETC
+- ETH
+- FRSH
+- GOLD
+- GOOG
+- HPQ
+- IBM
+- IBRX
+- INTC
+- IONQ
+- IONS
+- JPM
+- LTC
+- LUMN
+- META
+- MRK
+- MSFT
+- MU
+- NUVL
+- NVDA
+- OIL
+- OXY
+- PFE
+- QCOM
+- QUBT
+- REKR
+- RR
+- SES
+- SIRI
+- SLNO
+- SOL
+- SOUN
+- TSLA
+- TSM
+- UPLD
+- UPST
+- XRP
+- ZEC
 trading_hours:
   enabled: true
-  start: "09:30"
-  end: "16:00"
-  timezone: "America/New_York"
-  days: [Mon, Tue, Wed, Thu, Fri]
+  start: 09:30
+  end: '16:00'
+  timezone: America/New_York
+  days:
+  - Mon
+  - Tue
+  - Wed
+  - Thu
+  - Fri
 approval_tiers:
   tier1_alert_threshold_usd: 200
   tier2_soft_timeout_minutes: 15

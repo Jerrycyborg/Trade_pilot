@@ -150,6 +150,27 @@ def status() -> dict[str, object]:
         "trading_mode": config.get("trading_mode", "demo"),
     }
 
+@app.get("/v1/orchestrator/client-config")
+async def client_config(request: Request) -> dict[str, str]:
+    """Return dashboard client keys. Only served to requests from localhost or LAN."""
+    import os
+    client_host = getattr(request.client, "host", "")
+    # Allow localhost and RFC-1918 private ranges only
+    allowed = (
+        client_host in ("127.0.0.1", "::1", "localhost") or
+        client_host.startswith("192.168.") or
+        client_host.startswith("10.") or
+        client_host.startswith("172.")
+    )
+    if not allowed:
+        raise HTTPException(status_code=403, detail="not allowed")
+    return {
+        "internalKey": os.getenv("INTERNAL_API_KEY", ""),
+        "adminKey":    os.getenv("ADMIN_API_KEY", ""),
+    }
+
+
+
 
 @app.get("/v1/orchestrator/cycle/last")
 def last_cycle() -> dict[str, object]:
