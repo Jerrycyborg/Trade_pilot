@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import asynccontextmanager
 from datetime import datetime
 from uuid import uuid4
 
@@ -14,13 +13,8 @@ from .database import Base, SessionLocal, engine
 from .models import AuditEventRecord
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
-
-
-app = FastAPI(title="audit-logger", version="0.1.0", lifespan=lifespan)
+Base.metadata.create_all(bind=engine)
+app = FastAPI(title="audit-logger", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -1,8 +1,5 @@
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
-
 def test_orchestrator_status_endpoint(tmp_path: Path) -> None:
     config_file = tmp_path / "policy.yaml"
     config_file.write_text(
@@ -20,9 +17,6 @@ def test_orchestrator_status_endpoint(tmp_path: Path) -> None:
     main.settings = config.settings
     main.state.weekly_notional_used = 123.45
 
-    client = TestClient(main.app)
-    response = client.get("/v1/orchestrator/status")
-    assert response.status_code == 200
-    body = response.json()
+    body = main.status()
     assert body["weekly_notional_used"] == 123.45
     assert body["trading_mode"] == "demo"

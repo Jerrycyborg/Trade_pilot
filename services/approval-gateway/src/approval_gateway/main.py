@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -16,13 +15,8 @@ from .database import Base, SessionLocal, engine
 from .models import ApprovalRecord
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
-
-
-app = FastAPI(title="approval-gateway", version="0.1.0", lifespan=lifespan)
+Base.metadata.create_all(bind=engine)
+app = FastAPI(title="approval-gateway", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

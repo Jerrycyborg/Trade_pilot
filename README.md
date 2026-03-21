@@ -2,10 +2,10 @@
 
 # Trade Pilot
 
-Production-minded AI trading stack: strategy proposes → policy approves → execution fills → portfolio reconciles. Milestone 2 adds real AI signal generation (Claude), live market data, Alpaca broker integration, web research, and an automated trade worker.
+Production-minded AI trading stack: strategy proposes → policy approves → execution fills → portfolio reconciles. The current workspace adds autonomous orchestration, eToro execution support, audit logging, sentiment, notifications, approvals, and live-mode gating on top of the existing milestone stack.
 
 Suggested GitHub description:
-`AI-driven trading stack with Claude-powered signals, Alpaca integration, live charts, manual trading UI, and fill-driven portfolio reconciliation.`
+`AI-driven trading stack with Claude-powered signals, eToro execution, autonomous orchestration, live charts, and fill-driven portfolio reconciliation.`
 
 Suggested GitHub topics:
 `ai-trading`, `algorithmic-trading`, `fastapi`, `python`, `alpaca`, `anthropic`, `claude`, `portfolio-management`, `risk-management`
@@ -20,10 +20,12 @@ Suggested GitHub topics:
 │       (Claude)          (AI signals)       (risk rules)      │
 │                                │                              │
 │                         execution-service                     │
-│                         (Alpaca / paper)                      │
+│                         (eToro / paper)                       │
 │                                │                              │
 │                        portfolio-service                      │
 │                        (fill-driven PnL)                      │
+│                                │                              │
+│     audit · orchestrator · sentiment · approval · notify      │
 │                                                               │
 │                     dashboard (port 8080)                     │
 │              charts · ticker · manual trades · AI research    │
@@ -34,9 +36,9 @@ Suggested GitHub topics:
 1. Research service fetches web news + fundamentals via Claude with `web_search` tool
 2. Strategy service generates AI signals (Claude Haiku for TA analysis) with risk scoring (LOW / MEDIUM / HIGH)
 3. Policy service approves / reviews / rejects based on risk tier and hard rules
-4. Execution service places orders via Alpaca (paper or live) or paper broker fallback
+4. Execution service places orders via eToro demo/live or paper broker fallback
 5. Portfolio service derives positions and PnL from fills only (ADR-002)
-6. Trade worker runs the full pipeline on a configurable schedule
+6. Autonomy orchestrator can run the end-to-end loop on a configurable schedule
 
 **ADR boundaries preserved:**
 - ADR-001: Only execution-service places orders
@@ -48,12 +50,17 @@ Suggested GitHub topics:
 |---|---|---|
 | `libs/contracts` | — | Shared Pydantic contracts |
 | `libs/market_data` | — | OHLCV fetching + technical indicators (RSI, MACD, Bollinger, EMA) |
-| `libs/brokers` | — | AlpacaBroker + PaperBroker behind common interface |
+| `libs/brokers` | — | eToro, Alpaca, and Paper brokers behind a common interface |
 | `services/research-service` | 8005 | Claude + web search per-symbol research with 30-min cache |
 | `services/strategy-service` | 8003 | AI signal generation, market data API, trade worker/scheduler |
 | `services/policy-service` | 8001 | Risk-tier routing + hard reject rules |
 | `services/execution-service` | 8002 | Order placement, fills, idempotency, account balance |
 | `services/portfolio-service` | 8004 | Positions, snapshots, PnL reconciliation |
+| `services/audit-logger` | 8006 | Append-only audit event store |
+| `services/autonomy-orchestrator` | 8007 | Autonomous decision loop + kill/live mode controls |
+| `services/sentiment-aggregator` | 8008 | News + social sentiment scoring |
+| `services/notification-service` | 8009 | Webhook notifications + pending queue |
+| `services/approval-gateway` | 8010 | Human approval workflow for review trades |
 | `apps/dashboard` | 8080 | Live charts, ticker bar, manual trades, AI research |
 
 ## Quick Start
@@ -76,10 +83,16 @@ cp .env.example .env
 Key environment variables:
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...     # enables AI signals + web research
-ALPACA_API_KEY=PK...             # enables real market data + trading
-ALPACA_SECRET_KEY=...
-ALPACA_PAPER=true                # paper trading (default; set false for live)
+BROKER=etoro
+ETORO_API_KEY=your_public_api_key
+ETORO_USER_KEY=your_user_key
+ETORO_DEMO=true
+NEWSAPI_KEY=optional
+ALPHAVANTAGE_KEY=optional
+WEBHOOK_URL=optional
 WORKER_ENABLED=true              # enables 15-min auto-trade loop
+ORCHESTRATOR_INTERVAL_MINUTES=5
+SENTIMENT_WEIGHT=0.3
 STRATEGY_WATCHLIST=AAPL,MSFT,GOOGL,BTC/USD,ETH/USD
 ```
 
@@ -91,6 +104,11 @@ make run-strategy     # port 8003
 make run-policy       # port 8001
 make run-execution    # port 8002
 make run-portfolio    # port 8004
+make run-audit        # port 8006
+make run-orchestrator # port 8007
+make run-sentiment    # port 8008
+make run-notification # port 8009
+make run-approval     # port 8010
 
 # Dashboard
 python3 -m http.server 8080 --directory apps/dashboard
@@ -132,6 +150,11 @@ make run-strategy
 make run-policy
 make run-execution
 make run-portfolio
+make run-audit
+make run-orchestrator
+make run-sentiment
+make run-notification
+make run-approval
 ```
 
 ## Repository Layout
@@ -140,7 +163,7 @@ make run-portfolio
 libs/
   contracts/          Shared Pydantic models (SignalCandidate, FillRecord, etc.)
   market_data/        OHLCV + technical indicators library
-  brokers/            AlpacaBroker + PaperBroker
+  brokers/            eToroBroker + AlpacaBroker + PaperBroker
 
 services/
   research-service/   Claude web research (port 8005)
@@ -148,6 +171,11 @@ services/
   policy-service/     Risk-tier routing + hard rules (port 8001)
   execution-service/  Order placement + fills + account (port 8002)
   portfolio-service/  Positions + PnL reconciliation (port 8004)
+  audit-logger/       Append-only audit events (port 8006)
+  autonomy-orchestrator/ Autonomous trade loop (port 8007)
+  sentiment-aggregator/ News + social sentiment (port 8008)
+  notification-service/ Notifications + webhook fanout (port 8009)
+  approval-gateway/   Human review flow (port 8010)
 
 apps/
   dashboard/          Live trading dashboard (serve on port 8080)

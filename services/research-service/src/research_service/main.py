@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
 from typing import Optional
 
 from contracts import ResearchReport
@@ -23,17 +22,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    if not settings.anthropic_api_key:
-        logger.warning(
-            "ANTHROPIC_API_KEY is not set. Research calls will return neutral stubs."
-        )
-    yield
-
-
-app = FastAPI(title="research-service", version="0.1.0", lifespan=lifespan)
+Base.metadata.create_all(bind=engine)
+if not settings.anthropic_api_key:
+    logger.warning("ANTHROPIC_API_KEY is not set. Research calls will return neutral stubs.")
+app = FastAPI(title="research-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

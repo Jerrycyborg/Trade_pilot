@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from contracts import PortfolioReconcileRequest, PortfolioReconcileResponse, PortfolioSnapshot, PositionRecord
@@ -21,13 +20,8 @@ from .reconcile import fill_from_execution, reconcile_portfolio
 logging.basicConfig(level=logging.INFO)
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
-
-
-app = FastAPI(title="portfolio-service", version="0.1.0", lifespan=lifespan)
+Base.metadata.create_all(bind=engine)
+app = FastAPI(title="portfolio-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

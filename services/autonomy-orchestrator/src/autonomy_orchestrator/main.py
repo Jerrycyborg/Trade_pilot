@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+import asyncio
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contracts import ApprovalRequest, AuditEvent, NotificationEvent, PolicyEvaluationRequest, SignalCandidate
@@ -38,8 +38,10 @@ class LiveModeRequest(BaseModel):
     confirmation: str = ""
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
+def _start_scheduler() -> None:
+    if state.scheduler is not None:
+        return
+
     scheduler = AsyncIOScheduler()
 
     async def run_job() -> None:
@@ -57,13 +59,15 @@ async def lifespan(_: FastAPI):
         id="autonomy_orchestrator",
         max_instances=1,
     )
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
     scheduler.start()
     state.scheduler = scheduler
-    yield
-    scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="autonomy-orchestrator", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="autonomy-orchestrator", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -71,6 +75,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_start_scheduler()
 
 
 @app.get("/health")

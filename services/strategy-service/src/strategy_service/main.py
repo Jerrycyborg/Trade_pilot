@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
 from typing import Optional
 
 from contracts import SignalCandidate, TechnicalSummaryContract, WorkerStatus
@@ -28,19 +27,8 @@ class SignalGenerationRequest(BaseModel):
     use_ai: Optional[bool] = None  # None = auto-detect from ANTHROPIC_API_KEY
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    if settings.worker_enabled:
-        from .scheduler import start_scheduler
-        start_scheduler(app)
-    yield
-    if settings.worker_enabled:
-        from .scheduler import stop_scheduler
-        stop_scheduler()
-
-
-app = FastAPI(title="strategy-service", version="0.2.0", lifespan=lifespan)
+Base.metadata.create_all(bind=engine)
+app = FastAPI(title="strategy-service", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,6 +41,12 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "strategy-service"}
+
+
+if settings.worker_enabled:
+    from .scheduler import start_scheduler
+
+    start_scheduler(app)
 
 
 @app.post("/v1/signals/generate", response_model=SignalCandidate)

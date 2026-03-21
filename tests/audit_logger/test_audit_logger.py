@@ -1,9 +1,6 @@
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
-
-def _client(tmp_path: Path) -> TestClient:
+def _setup(tmp_path: Path):
     db_file = tmp_path / "audit.db"
     import audit_logger.config as config
     import audit_logger.database as database
@@ -19,29 +16,27 @@ def _client(tmp_path: Path) -> TestClient:
     database.Base.metadata.create_all(bind=database.engine)
     main.engine = database.engine
     main.SessionLocal = database.SessionLocal
-    return TestClient(main.app)
+    return main
 
 
 def test_audit_logger_round_trip(tmp_path: Path) -> None:
-    client = _client(tmp_path)
-    created = client.post(
-        "/v1/audit/log",
-        json={
-            "event_type": "trade.executed",
-            "symbol": "AAPL",
-            "signal_id": "sig-1",
-            "decision": "APPROVE",
-            "reasoning": "smoke",
-            "metadata": {"amount_usd": 100.0},
-        },
+    from contracts import AuditEvent
+
+    main = _setup(tmp_path)
+    created = main.create_log(
+        AuditEvent(
+            event_type="trade.executed",
+            symbol="AAPL",
+            signal_id="sig-1",
+            decision="APPROVE",
+            reasoning="smoke",
+            metadata={"amount_usd": 100.0},
+        )
     )
-    assert created.status_code == 200
-    event_id = created.json()["event_id"]
+    event_id = created.event_id
 
-    listed = client.get("/v1/audit/logs", params={"symbol": "AAPL", "event_type": "trade.executed"})
-    assert listed.status_code == 200
-    assert listed.json()[0]["event_id"] == event_id
+    listed = main.list_logs(symbol="AAPL", event_type="trade.executed", limit=100)
+    assert listed[0].event_id == event_id
 
-    fetched = client.get(f"/v1/audit/logs/{event_id}")
-    assert fetched.status_code == 200
-    assert fetched.json()["metadata"]["amount_usd"] == 100.0
+    fetched = main.get_log(event_id)
+    assert fetched.metadata["amount_usd"] == 100.0

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
 
 from contracts import PolicyDecision, PolicyEvaluationRecordResponse, PolicyEvaluationRequest
 from fastapi import FastAPI, Query
@@ -19,13 +18,8 @@ from .rules import evaluate_policy
 logging.basicConfig(level=logging.INFO)
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
-
-
-app = FastAPI(title="policy-service", version="0.1.0", lifespan=lifespan)
+Base.metadata.create_all(bind=engine)
+app = FastAPI(title="policy-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
