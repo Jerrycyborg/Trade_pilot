@@ -152,7 +152,7 @@ async def run_cycle() -> dict[str, object]:
         "executed": 0,
         "signals": 0,
     }
-    weekly_spend = await _weekly_spend()
+    weekly_spend = await _weekly_spend_safe()
     state.weekly_notional_used = weekly_spend
     try:
         await _process_approvals()
@@ -343,21 +343,48 @@ async def _process_approvals() -> None:
         if response.status_code != 200:
             return
         approved_rows = response.json()
-        for row in approved_rows:
-            signal = SignalCandidate.model_validate(row["metadata"]["signal"])
-            risk = type("RiskShim", (), {"adjusted_size_pct": min(signal.size_pct, 0.05), "tier": row["tier"]})
-            order = await _submit_order(signal, risk, load_policy_config(settings.policy_config_path), {"buying_power": 100_000.0})
-            await _audit(
-                AuditEvent(
-                    event_type="trade.executed.approval",
-                    symbol=signal.symbol,
-                    signal_id=signal.signal_id,
-                    decision="APPROVED",
-                    reasoning="approval executed",
-                    metadata=order,
-                )
-            )
-            await _mark_signal_acted(signal.signal_id)
+    config = load_policy_config(settings.policy_config_path)
+    # Re-check kill switch before executing any deferred approvals
+    if config.get("kill_switch"):
+        return
+    portfolio_state = await _portfolio_state()
+    weekly_spend = await _weekly_spend()
+    for row in approved_rows:
+        signal = SignalCandidate.model_validate(row["metadata"]["signal"])
+        # Re-run risk + policy with current state before executing
+        risk = evaluate_risk(signal, portfolio_state, weekly_spend, config)
+        if not risk.approved:
+            await _audit(AuditEvent(
+                event_type="approval.stale_rejected",
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                decision="REJECT",
+                reasoning=f"deferred approval failed re-check: {risk.reason}",
+                metadata={"tier": risk.tier},
+            ))
+            continue
+        policy = await _policy_evaluate(signal, risk, config, portfolio_state)
+        if policy.get("decision") != "APPROVE":
+            await _audit(AuditEvent(
+                event_type="approval.stale_rejected",
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                decision="REJECT",
+                reasoning="deferred approval failed policy re-check",
+                metadata={"policy": policy},
+            ))
+            continue
+        order = await _submit_order(signal, risk, config, portfolio_state)
+        weekly_spend += float(order.get("amount_usd", 0.0))
+        await _audit(AuditEvent(
+            event_type="trade.executed.approval",
+            symbol=signal.symbol,
+            signal_id=signal.signal_id,
+            decision="APPROVED",
+            reasoning="approval executed after re-check",
+            metadata=order,
+        ))
+        await _mark_signal_acted(signal.signal_id)
 
 
 async def _mark_signal_acted(signal_id: str) -> None:
@@ -376,6 +403,15 @@ async def _weekly_spend() -> float:
             return 0.0
         rows = response.json()
     return round(sum(float(row.get("metadata", {}).get("amount_usd", 0.0)) for row in rows), 2)
+
+
+async def _weekly_spend_safe() -> float:
+    """Return weekly spend, falling back to cached state value if audit unavailable."""
+    spend = await _weekly_spend()
+    # If audit logger unreachable (returned 0.0), prefer cached state to avoid resetting cap
+    if spend == 0.0 and state.weekly_notional_used > 0.0:
+        return state.weekly_notional_used
+    return spend
 
 
 async def _audit(event: AuditEvent) -> None:

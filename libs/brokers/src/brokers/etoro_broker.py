@@ -115,9 +115,29 @@ class EtoroBroker:
             logger.error("EtoroBroker.get_account failed: %s", exc)
             return AccountInfo(buying_power=0.0, equity=0.0, cash=0.0, mode="paper" if self._demo else "live")
 
+    def close_position(self, position_id: str, instrument_id: int, units_to_deduct: float | None = None) -> bool:
+        """Close an open position by positionId. units_to_deduct=None = full close."""
+        try:
+            payload: dict[str, object] = {"InstrumentId": instrument_id}
+            if units_to_deduct is not None:
+                payload["UnitsToDeduct"] = units_to_deduct
+            self._request(
+                "POST",
+                f"/trading/execution/{self._execution_prefix()}market-close-orders/positions/{position_id}",
+                json=payload,
+            )
+            return True
+        except Exception as exc:
+            logger.error("EtoroBroker.close_position failed for %s: %s", position_id, exc)
+            return False
+
     def get_order_history(self) -> list[dict[str, object]]:
         try:
-            payload = self._request("GET", "/trading/info/trade/history", params={"minDate": "1970-01-01"})
+            payload = self._request(
+                "GET",
+                f"/trading/info/{self._execution_prefix()}trade/history",
+                params={"minDate": "1970-01-01"},
+            )
             trades = payload.get("trades") or payload.get("history") or payload.get("items") or []
             return [item for item in trades if isinstance(item, dict)]
         except Exception as exc:
