@@ -1,11 +1,11 @@
-weekly_notional_cap_usd: 25
-max_position_size_pct: 5.0
+weekly_notional_cap_usd: 37500
+max_position_size_pct: 15.0
 risk_per_trade_pct: 0.10
 max_daily_drawdown_pct: 3.0
 max_concurrent_positions: 10
 max_sector_concentration: 2
-stop_loss_pct: 0.03
-take_profit_pct: 0.06
+stop_loss_pct: 0.015
+take_profit_pct: 0.04
 kill_switch: false
 close_positions_eod: false
 trading_mode: demo
