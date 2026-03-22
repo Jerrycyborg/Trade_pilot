@@ -56,14 +56,14 @@ class TakeProfitMonitor:
                         latest_close,
                         record.target_price,
                     )
-                    await self._trigger_close(record)
-                    del self._records[symbol]
-                    triggered.append(symbol)
+                    if await self._trigger_close(record):
+                        del self._records[symbol]
+                        triggered.append(symbol)
             except Exception as exc:
                 logger.warning("Take-profit check failed for %s: %s", symbol, exc)
         return triggered
 
-    async def _trigger_close(self, record: TakeProfitRecord) -> None:
+    async def _trigger_close(self, record: TakeProfitRecord) -> bool:
         from uuid import uuid4
 
         payload = {
@@ -82,5 +82,7 @@ class TakeProfitMonitor:
                 )
                 resp.raise_for_status()
                 logger.info("Take-profit close submitted for %s", record.symbol)
+                return True
         except Exception as exc:
             logger.error("Take-profit _trigger_close failed for %s: %s", record.symbol, exc)
+            return False

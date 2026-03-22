@@ -74,16 +74,16 @@
     "tests/audit_logger/__pycache__/test_audit_summary.cpython-314-pytest-9.0.2.pyc": "1d10c169865eabdd28aa426702cc2e337510d01d8ead3465c7d3c183ff0afad2",
     "tests/audit_logger/test_audit_logger.py": "65f14855bd3e9ad799aa88a43438e86940c42c13a215bdd6a5a8530418b0c702",
     "tests/audit_logger/test_audit_summary.py": "8e2dd04c0782eb8123342818dfbc12d63c3f0b9242066d8bc2b2276141ad3099",
-    "tests/autonomy_orchestrator/__pycache__/test_monthly_limits.cpython-314-pytest-9.0.2.pyc": "e9748e958a44358492057210f977b9cdc789022def8ea2c4dd1ded0e8ee513d1",
+    "tests/autonomy_orchestrator/__pycache__/test_monthly_limits.cpython-314-pytest-9.0.2.pyc": "8edeade72e7e7b3ee9657e18b28e6c5ae63e61b7c4053ee4f8ab3822b399187b",
     "tests/autonomy_orchestrator/__pycache__/test_orchestrator_status.cpython-314-pytest-9.0.2.pyc": "3c77f10e07705fc8aa5b05d164b25953418f130fee67efb92a6268280cf27927",
     "tests/autonomy_orchestrator/__pycache__/test_risk_engine.cpython-314-pytest-9.0.2.pyc": "4334e11511c88a4b7af76965a52fced43f07de2d9a975c177775cbfa11d0d4a5",
     "tests/autonomy_orchestrator/__pycache__/test_stop_loss_wiring.cpython-314-pytest-9.0.2.pyc": "a71a1037c6eb10ecb6f9fa80fc8650a0e37a88ede2d92a7c3e6abcd2b2aceea1",
-    "tests/autonomy_orchestrator/__pycache__/test_take_profit_monitor.cpython-314-pytest-9.0.2.pyc": "946d17296b8ce9acdcaa10a7b3b66090b65232be6f1c38abe9b505e18d273dce",
-    "tests/autonomy_orchestrator/test_monthly_limits.py": "e5cc039b0ed50e403818b3faecf9d6b7f3daa7664a6dfbb219a620d051b2b0b8",
+    "tests/autonomy_orchestrator/__pycache__/test_take_profit_monitor.cpython-314-pytest-9.0.2.pyc": "3e4fce38dacf287cbb02d4b82824525be73a020dd99398981465e0437d424d7e",
+    "tests/autonomy_orchestrator/test_monthly_limits.py": "f73a2d5ace067a7add4ec8a4aa50dc887521902308c55c613e27e1843e7f84e2",
     "tests/autonomy_orchestrator/test_orchestrator_status.py": "c9130e3ad23e3dcfb0c032e5e4b36a96f1b7a8f044756837b846744dd2442eab",
     "tests/autonomy_orchestrator/test_risk_engine.py": "224553afb3d968ff3996b90017d9fe9a810d5f375f7c127cea454aabaaf6684c",
     "tests/autonomy_orchestrator/test_stop_loss_wiring.py": "170e8bc1b2f6920e73f3ab867fc1a508566df793f5629098231804c5837cfbec",
-    "tests/autonomy_orchestrator/test_take_profit_monitor.py": "9f0fc30148d44875de2e50ffa705524399ab65aca70a3a17f31b63df974f5e41",
+    "tests/autonomy_orchestrator/test_take_profit_monitor.py": "1dbb8b8e8658b19d2ecc4857118c4177ff50def080711a3454b6c9e4ee599d49",
     "tests/brokers/__pycache__/test_etoro_broker.cpython-314-pytest-9.0.2.pyc": "018a211c49dffc26188dbce3c3d268cee5cc72a395575890981af927ddcaece2",
     "tests/brokers/test_etoro_broker.py": "ecbd0158f6a4f779bae1a8eddd5340d47a7b5dad527a943773d4b1eaf99c4fec",
     "tests/conftest.py": "14620f5ce016cdcb1b096f70de0c6ec308e55fd4b7cf701698b2cdb01b0fe5aa",
@@ -136,5 +136,5 @@
     "tests/strategy_service/test_strategy_service.py": "4dee834197dd1804dcf3f7fca048f92b83ccd2af3438ef2a82b487321435ca93",
     "tests/test_aahp.py": "050335656f8f8a4904450c79d744fb82c373b04ebd49693104fcb2079ab515bc"
   },
-  "generated_at": "2026-03-22T16:10:10.747938+00:00"
+  "generated_at": "2026-03-22T16:12:56.118494+00:00"
 }

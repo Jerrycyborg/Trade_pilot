@@ -37,3 +37,25 @@ action overrides to HOLD. Configured via env var. Wired in ai_pipeline and deter
 `earnings_calendar.is_earnings_blackout(symbol)` uses yfinance to detect proximity to earnings.
 Fails open (never blocks on error). BUY signals suppressed to HOLD within `EARNINGS_BLACKOUT_DAYS` (default 2).
 Wired in strategy-service generate_signal() and autonomy-orchestrator policy payload.
+
+## Trader Sprint Features (2026-03-22)
+
+### Dollar Risk Controls
+Monthly loss limit (`MONTHLY_LOSS_LIMIT_USD=10`) and profit target (`MONTHLY_PROFIT_TARGET_USD=20`)
+block new trades when breached. Counters reset on calendar month boundary.
+Config: `WALLET_SIZE_USD=50`, `risk_per_trade_pct=0.10` (10% of wallet per trade).
+
+### Take-Profit Monitor
+`TakeProfitMonitor` mirrors `StopLossMonitor`. Registers `target_price` per position after execution.
+APScheduler job checks every 5 min, closes position when `close >= target_price`.
+Default target: `TAKE_PROFIT_TARGET_USD=20` per trade.
+
+### Candlestick Pattern Boost
+`evaluate_rules()` accepts `bars` list. `detect_patterns()` runs on last 3 bars.
+Bullish patterns (`hammer`, `bullish_engulfing`) boost BUY confidence `+0.10`.
+Bearish patterns (`shooting_star`, `bearish_engulfing`) boost SELL confidence `+0.10`.
+
+### Intraday Support
+`AlpacaFetcher.fetch_intraday()` fetches 15-min bars (configurable via `INTRADAY_MINUTES`).
+`fetch_bars()` respects `MARKET_DATA_TIMEFRAME=daily|intraday`.
+Falls back to daily Yahoo Finance if Alpaca key not set.

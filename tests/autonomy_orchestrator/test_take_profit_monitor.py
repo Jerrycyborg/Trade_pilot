@@ -63,3 +63,18 @@ def test_default_qty_zero() -> None:
         created_at=datetime.now(timezone.utc),
     )
     assert record.qty == 0.0
+
+
+def test_failed_close_keeps_record_tracked() -> None:
+    import asyncio
+
+    monitor = TakeProfitMonitor("http://localhost:8002", "key")
+    monitor.register(_record("AAPL", 100.0, 110.0))
+    bar = MagicMock()
+    bar.close = 111.0
+    fetcher = MagicMock()
+    fetcher.fetch.return_value = [bar]
+    with patch.object(monitor, "_trigger_close", new=AsyncMock(return_value=False)):
+        result = asyncio.run(monitor.check_all(fetcher))
+    assert result == []
+    assert monitor.get("AAPL") is not None

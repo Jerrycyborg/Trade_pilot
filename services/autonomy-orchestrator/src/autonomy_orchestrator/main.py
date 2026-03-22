@@ -49,6 +49,7 @@ class OrchestratorState:
     monthly_realized_loss_usd: float = 0.0
     monthly_realized_profit_usd: float = 0.0
     monthly_reset_month: int = 0
+    monthly_reset_year: int = 0
 
 
 state = OrchestratorState()
@@ -149,7 +150,9 @@ async def lifespan(app_: FastAPI):
         broker_url=settings.broker_url,
         internal_key=settings.internal_api_key,
     )
-    state.monthly_reset_month = datetime.now(timezone.utc).month
+    now = datetime.now(timezone.utc)
+    state.monthly_reset_month = now.month
+    state.monthly_reset_year = now.year
     await _startup_health_check()
     _start_scheduler()
     try:
@@ -713,7 +716,14 @@ async def _notify(signal: SignalCandidate, risk, policy: dict[str, object]) -> N
 
 
 async def _notify_smart(event_type: str, message: str, tier: int = 1) -> None:
-    """Send notification to notification service."""
+    """Queue notification delivery without blocking the caller."""
+    try:
+        asyncio.get_running_loop().create_task(_send_smart_notification(event_type, message, tier))
+    except RuntimeError as exc:
+        logger.debug("_notify_smart scheduling failed: %s", exc)
+
+
+async def _send_smart_notification(event_type: str, message: str, tier: int = 1) -> None:
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             await client.post(
@@ -727,7 +737,7 @@ async def _notify_smart(event_type: str, message: str, tier: int = 1) -> None:
                 headers=_internal_headers(),
             )
     except Exception as exc:
-        logger.debug("_notify_smart failed: %s", exc)
+        logger.debug("_send_smart_notification failed: %s", exc)
 
 
 async def _notify_trade_executed(signal: SignalCandidate, order: dict[str, object]) -> None:
@@ -952,11 +962,17 @@ async def _validate_allowlist_symbols() -> dict[str, list[str]]:
 
 def _check_monthly_reset() -> None:
     """Reset monthly counters on new calendar month."""
-    current_month = datetime.now(timezone.utc).month
-    if current_month != state.monthly_reset_month:
+    now = datetime.now(timezone.utc)
+    current_month = now.month
+    current_year = now.year
+    if (
+        current_month != state.monthly_reset_month
+        or current_year != state.monthly_reset_year
+    ):
         state.monthly_realized_loss_usd = 0.0
         state.monthly_realized_profit_usd = 0.0
         state.monthly_reset_month = current_month
+        state.monthly_reset_year = current_year
         logger.info("Monthly P&L counters reset for month %d", current_month)
 
 
