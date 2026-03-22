@@ -1,4 +1,4 @@
-weekly_notional_cap_usd: 50
+weekly_notional_cap_usd: 25
 max_position_size_pct: 5.0
 risk_per_trade_pct: 0.10
 max_daily_drawdown_pct: 3.0
