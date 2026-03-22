@@ -115,7 +115,12 @@ def test_atr_sizing_produces_fractional_positions() -> None:
     bars = _make_trending_bars(n=100, daily_return=0.005)
     result_small_risk = run_backtest(_request(risk_per_trade_pct=0.001), bars)
     result_large_risk = run_backtest(_request(risk_per_trade_pct=0.02), bars)
-    # Larger risk per trade should result in different final values
-    # (we just check both complete successfully)
+    # Both must complete successfully
     assert math.isfinite(result_small_risk.sharpe_ratio)
     assert math.isfinite(result_large_risk.sharpe_ratio)
+    # Larger risk_per_trade_pct must produce larger absolute total return
+    # (more shares bought -> larger gain/loss magnitude on a trending series)
+    assert abs(result_large_risk.total_return_pct) > abs(result_small_risk.total_return_pct), (
+        f"Expected larger risk to yield larger return magnitude: "
+        f"large={result_large_risk.total_return_pct}, small={result_small_risk.total_return_pct}"
+    )
