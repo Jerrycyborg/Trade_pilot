@@ -144,9 +144,15 @@ class YahooFinanceFetcher:
 
 
 def get_fetcher(settings: MarketDataSettings) -> AlpacaFetcher | YahooFinanceFetcher:
-    """Return the appropriate fetcher based on available credentials."""
+    """Return the appropriate fetcher based on config.
+
+    Priority:
+      1. MARKET_DATA_PROVIDER=yahoo  → always use Yahoo Finance
+      2. ALPACA_API_KEY + ALPACA_SECRET_KEY set → use Alpaca
+      3. fallback → Yahoo Finance (no API key required)
+    """
     if settings.has_alpaca_credentials:
-        logger.debug("Using AlpacaFetcher for market data")
+        logger.info("Market data: Alpaca")
         return AlpacaFetcher(settings)
-    logger.debug("ALPACA_API_KEY not set — using YahooFinanceFetcher as fallback")
+    logger.info("Market data: Yahoo Finance (set MARKET_DATA_PROVIDER=yahoo to make explicit)")
     return YahooFinanceFetcher()

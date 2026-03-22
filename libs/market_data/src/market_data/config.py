@@ -20,6 +20,10 @@ class MarketDataSettings:
         default_factory=lambda: int(os.getenv("MARKET_DATA_LOOKBACK_DAYS", "60"))
     )
 
+    force_yahoo: bool = field(
+        default_factory=lambda: os.getenv("MARKET_DATA_PROVIDER", "").lower() in ("yahoo", "yfinance")
+    )
+
     @property
     def has_alpaca_credentials(self) -> bool:
-        return bool(self.alpaca_api_key and self.alpaca_secret_key)
+        return bool(self.alpaca_api_key and self.alpaca_secret_key) and not self.force_yahoo
