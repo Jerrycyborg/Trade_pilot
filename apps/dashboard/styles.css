@@ -856,3 +856,92 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+/* =========================================================================
+   TAB NAVIGATION
+========================================================================= */
+.tab-nav {
+  display: flex;
+  gap: 6px;
+  background: rgba(10, 19, 33, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 6px;
+  margin-bottom: 24px;
+  position: sticky;
+  top: 8px;
+  z-index: 100;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  flex-wrap: wrap;
+}
+
+.tab-btn {
+  flex: 1;
+  min-width: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s, transform 0.1s;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.tab-btn:hover {
+  background: rgba(101, 229, 232, 0.08);
+  color: var(--text);
+  transform: none;
+}
+
+.tab-btn.active {
+  background: linear-gradient(135deg, rgba(101, 229, 232, 0.18), rgba(184, 255, 123, 0.1));
+  color: var(--accent);
+  border: 1px solid rgba(101, 229, 232, 0.25);
+  box-shadow: 0 2px 12px rgba(101, 229, 232, 0.12);
+}
+
+.tab-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* =========================================================================
+   TAB PANELS
+========================================================================= */
+.tab-panel {
+  display: none;
+  animation: tabFadeIn 0.2s ease;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+@keyframes tabFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* =========================================================================
+   RESPONSIVE TABS
+========================================================================= */
+@media (max-width: 640px) {
+  .tab-btn {
+    font-size: 11px;
+    padding: 8px 10px;
+    min-width: 60px;
+  }
+
+  .tab-icon {
+    display: none;
+  }
+}

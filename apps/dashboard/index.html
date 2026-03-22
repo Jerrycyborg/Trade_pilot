@@ -32,86 +32,164 @@
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
-    <div id="audit-stats-bar" style="background:#1a1a2e;color:#eee;padding:8px 16px;display:flex;gap:24px;font-size:13px;flex-wrap:wrap;margin-bottom:8px;"></div>
     <main class="page">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Trade Pilot</p>
-          <h1>Live Trading Dashboard</h1>
-          <p class="lede">
-            Real-time operator dashboard — live charts, manual trades, AI signals, and portfolio tracking.
-          </p>
-        </div>
-        <div class="controls">
-          <button id="refresh">Refresh</button>
-          <button id="kill-switch-toggle" class="btn-sell">Toggle Kill Switch</button>
-          <span id="mode-badge" class="mode-badge mode-paper">PAPER</span>
-          <span id="trade-mode-indicator" class="mode-badge mode-paper">DEMO</span>
-          <p id="status">Idle</p>
-          <dl class="service-list">
-            <div><dt>Strategy</dt><dd id="strategy-url"></dd></div>
-            <div><dt>Policy</dt><dd id="policy-url"></dd></div>
-            <div><dt>Execution</dt><dd id="execution-url"></dd></div>
-            <div><dt>Portfolio</dt><dd id="portfolio-url"></dd></div>
-            <div><dt>Research</dt><dd id="research-url"></dd></div>
-            <div><dt>Orchestrator</dt><dd id="orchestrator-url"></dd></div>
-          </dl>
-        </div>
-      </header>
+      <nav class="tab-nav" id="tab-nav">
+        <button class="tab-btn active" data-tab="overview">
+          <span class="tab-icon">🏠</span> Overview
+        </button>
+        <button class="tab-btn" data-tab="trade">
+          <span class="tab-icon">⚡</span> Trade
+        </button>
+        <button class="tab-btn" data-tab="pipeline">
+          <span class="tab-icon">🔁</span> Pipeline
+        </button>
+        <button class="tab-btn" data-tab="intelligence">
+          <span class="tab-icon">🧠</span> Intelligence
+        </button>
+        <button class="tab-btn" data-tab="audit">
+          <span class="tab-icon">📋</span> Audit
+        </button>
+      </nav>
 
-      <section class="worker-panel card">
-        <div class="card-head">
-          <h2>Autonomy Orchestrator</h2>
-          <span id="orchestrator-running-badge" class="mode-badge mode-paper">PAUSED</span>
-        </div>
-        <div class="worker-info">
-          <div class="worker-field"><span class="field-label">Last Cycle</span><span id="orchestrator-last-cycle">—</span></div>
-          <div class="worker-field"><span class="field-label">Trades Today</span><span id="orchestrator-trades-today">0</span></div>
-          <div class="worker-field"><span class="field-label">Weekly Spend</span><span id="orchestrator-weekly-spend">$0.00</span></div>
-          <div class="worker-field"><span class="field-label">Weekly Cap</span><span id="orchestrator-weekly-cap">$500.00</span></div>
-        </div>
-      </section>
+      <div class="tab-panel active" id="tab-overview">
+        <div id="audit-stats-bar" style="background:#1a1a2e;color:#eee;padding:8px 16px;display:flex;gap:24px;font-size:13px;flex-wrap:wrap;margin-bottom:8px;"></div>
+        <header class="hero">
+          <div>
+            <p class="eyebrow">Trade Pilot</p>
+            <h1>Live Trading Dashboard</h1>
+            <p class="lede">
+              Real-time operator dashboard — live charts, manual trades, AI signals, and portfolio tracking.
+            </p>
+          </div>
+          <div class="controls">
+            <button id="refresh">Refresh</button>
+            <button id="kill-switch-toggle" class="btn-sell">Toggle Kill Switch</button>
+            <span id="mode-badge" class="mode-badge mode-paper">PAPER</span>
+            <span id="trade-mode-indicator" class="mode-badge mode-paper">DEMO</span>
+            <p id="status">Idle</p>
+            <dl class="service-list">
+              <div><dt>Strategy</dt><dd id="strategy-url"></dd></div>
+              <div><dt>Policy</dt><dd id="policy-url"></dd></div>
+              <div><dt>Execution</dt><dd id="execution-url"></dd></div>
+              <div><dt>Portfolio</dt><dd id="portfolio-url"></dd></div>
+              <div><dt>Research</dt><dd id="research-url"></dd></div>
+              <div><dt>Orchestrator</dt><dd id="orchestrator-url"></dd></div>
+            </dl>
+          </div>
+        </header>
 
-      <section class="card">
-        <div class="card-head">
-          <h2>Pre-flight Check</h2>
-          <button id="run-validation" class="btn-secondary">Run Validation</button>
-        </div>
-        <div id="validation-summary" class="subtle-line">No validation run yet.</div>
-        <div id="validation-results" class="panel-body"></div>
-      </section>
+        <section class="worker-panel card">
+          <div class="card-head">
+            <h2>Autonomy Orchestrator</h2>
+            <span id="orchestrator-running-badge" class="mode-badge mode-paper">PAUSED</span>
+          </div>
+          <div class="worker-info">
+            <div class="worker-field"><span class="field-label">Last Cycle</span><span id="orchestrator-last-cycle">—</span></div>
+            <div class="worker-field"><span class="field-label">Trades Today</span><span id="orchestrator-trades-today">0</span></div>
+            <div class="worker-field"><span class="field-label">Weekly Spend</span><span id="orchestrator-weekly-spend">$0.00</span></div>
+            <div class="worker-field"><span class="field-label">Weekly Cap</span><span id="orchestrator-weekly-cap">$500.00</span></div>
+          </div>
+        </section>
 
-      <!-- Live Price Ticker Bar -->
-      <section class="ticker-bar" id="ticker-bar">
-        <div id="ticker-items" class="ticker-items">
-          <span class="ticker-loading">Loading prices...</span>
-        </div>
-      </section>
+        <section class="card">
+          <div class="card-head">
+            <h2>Pre-flight Check</h2>
+            <button id="run-validation" class="btn-secondary">Run Validation</button>
+          </div>
+          <div id="validation-summary" class="subtle-line">No validation run yet.</div>
+          <div id="validation-results" class="panel-body"></div>
+        </section>
 
-      <!-- Wallet Panel -->
-      <section class="wallet-panel card">
-        <div class="card-head">
-          <h2>Wallet</h2>
-          <span id="wallet-mode-badge" class="mode-badge mode-paper">PAPER</span>
-        </div>
-        <div class="wallet-metrics">
+        <section class="ticker-bar" id="ticker-bar">
+          <div id="ticker-items" class="ticker-items">
+            <span class="ticker-loading">Loading prices...</span>
+          </div>
+        </section>
+
+        <section class="wallet-panel card">
+          <div class="card-head">
+            <h2>Wallet</h2>
+            <span id="wallet-mode-badge" class="mode-badge mode-paper">PAPER</span>
+          </div>
+          <div class="wallet-metrics">
+            <article class="metric-card">
+              <span class="metric-label">Buying Power</span>
+              <strong class="metric-value" id="wallet-buying-power">—</strong>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Equity</span>
+              <strong class="metric-value" id="wallet-equity">—</strong>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Cash</span>
+              <strong class="metric-value" id="wallet-cash">—</strong>
+            </article>
+          </div>
+        </section>
+
+        <section class="worker-panel card">
+          <div class="card-head">
+            <h2>Auto-Trade Worker</h2>
+            <div style="display:flex;gap:8px;align-items:center">
+              <span id="worker-running-badge" class="mode-badge mode-paper">IDLE</span>
+              <button id="btn-worker-run" class="btn-secondary">Run Now</button>
+            </div>
+          </div>
+          <div class="worker-info">
+            <div class="worker-field"><span class="field-label">Last Run</span><span id="worker-last-run">—</span></div>
+            <div class="worker-field"><span class="field-label">Next Run</span><span id="worker-next-run">—</span></div>
+            <div class="worker-field"><span class="field-label">Watching</span><span id="worker-symbols">—</span></div>
+            <div class="worker-field"><span class="field-label">Last Error</span><span id="worker-error">—</span></div>
+          </div>
+        </section>
+
+        <section class="metrics-grid">
           <article class="metric-card">
-            <span class="metric-label">Buying Power</span>
-            <strong class="metric-value" id="wallet-buying-power">—</strong>
+            <span class="metric-label">Signals</span>
+            <strong class="metric-value" id="metric-signals">0</strong>
           </article>
           <article class="metric-card">
-            <span class="metric-label">Equity</span>
-            <strong class="metric-value" id="wallet-equity">—</strong>
+            <span class="metric-label">Policy</span>
+            <strong class="metric-value" id="metric-policy">0/0/0</strong>
           </article>
           <article class="metric-card">
-            <span class="metric-label">Cash</span>
-            <strong class="metric-value" id="wallet-cash">—</strong>
+            <span class="metric-label">Orders</span>
+            <strong class="metric-value" id="metric-orders">0/0</strong>
           </article>
-        </div>
-      </section>
+          <article class="metric-card">
+            <span class="metric-label">Fills</span>
+            <strong class="metric-value" id="metric-fills">0</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Exposure</span>
+            <strong class="metric-value" id="metric-exposure">$0.00</strong>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">PnL</span>
+            <strong class="metric-value" id="metric-pnl">$0.00 / $0.00</strong>
+          </article>
+        </section>
 
-      <!-- Chart + Manual Trade layout -->
-      <section class="trading-layout">
+        <section class="grid-two">
+          <article class="card">
+            <div class="card-head">
+              <h2>Pending Approvals</h2>
+              <span id="approvals-count" class="card-meta">0 items</span>
+            </div>
+            <div id="pending-approvals" class="panel-body"></div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <h2>Last Cycle Summary</h2>
+              <span class="card-meta">Autonomy loop</span>
+            </div>
+            <div id="orchestrator-cycle-summary" class="panel-body"></div>
+          </article>
+        </section>
+      </div>
+
+      <div class="tab-panel" id="tab-trade">
+        <section class="trading-layout">
 
         <!-- Price Chart Card -->
         <article class="chart-card card">
@@ -179,174 +257,147 @@
             <div id="signal-result" class="signal-result"></div>
           </div>
         </article>
-      </section>
+        </section>
 
-      <!-- Worker Status Panel -->
-      <section class="worker-panel card">
-        <div class="card-head">
-          <h2>Auto-Trade Worker</h2>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span id="worker-running-badge" class="mode-badge mode-paper">IDLE</span>
-            <button id="btn-worker-run" class="btn-secondary">Run Now</button>
+        <section class="card">
+          <div class="card-head">
+            <h2>Watchlist</h2>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button type="button" class="mode-badge mode-live" data-watchlist-tab="myWatchlist" aria-pressed="true">My Watchlist</button>
+              <button type="button" class="mode-badge mode-paper" data-watchlist-tab="recentInvested" aria-pressed="false">Recently Invested</button>
+              <span id="watchlist-count" class="card-meta">0 items</span>
+            </div>
           </div>
-        </div>
-        <div class="worker-info">
-          <div class="worker-field"><span class="field-label">Last Run</span><span id="worker-last-run">—</span></div>
-          <div class="worker-field"><span class="field-label">Next Run</span><span id="worker-next-run">—</span></div>
-          <div class="worker-field"><span class="field-label">Watching</span><span id="worker-symbols">—</span></div>
-          <div class="worker-field"><span class="field-label">Last Error</span><span id="worker-error">—</span></div>
-        </div>
-      </section>
+          <div id="watchlist-content" class="panel-body"></div>
+        </section>
+      </div>
 
-      <section class="metrics-grid">
-        <article class="metric-card">
-          <span class="metric-label">Signals</span>
-          <strong class="metric-value" id="metric-signals">0</strong>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Policy</span>
-          <strong class="metric-value" id="metric-policy">0/0/0</strong>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Orders</span>
-          <strong class="metric-value" id="metric-orders">0/0</strong>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Fills</span>
-          <strong class="metric-value" id="metric-fills">0</strong>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Exposure</span>
-          <strong class="metric-value" id="metric-exposure">$0.00</strong>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">PnL</span>
-          <strong class="metric-value" id="metric-pnl">$0.00 / $0.00</strong>
-        </article>
-      </section>
+      <div class="tab-panel" id="tab-pipeline">
+        <section class="filter-bar card">
+          <div class="filter-group">
+            <label for="symbol-filter">Symbol / ID</label>
+            <input id="symbol-filter" type="search" placeholder="AAPL, REJECT, signal id" />
+          </div>
+          <div class="filter-group">
+            <label for="state-filter">Workflow State</label>
+            <select id="state-filter">
+              <option value="ALL">All</option>
+              <option value="ACCEPTED">Accepted</option>
+              <option value="REJECTED">Rejected</option>
+              <option value="APPROVE">Approve</option>
+              <option value="REVIEW">Review</option>
+              <option value="REJECT">Reject</option>
+              <option value="PENDING">Pending</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label for="limit-filter">Recent Records</label>
+            <select id="limit-filter">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="25">25</option>
+              <option value="ALL">All</option>
+            </select>
+          </div>
+        </section>
 
-      <section class="grid-two">
-        <article class="card">
+        <section class="drilldown card">
           <div class="card-head">
-            <h2>Pending Approvals</h2>
-            <span id="approvals-count" class="card-meta">0 items</span>
+            <h2>Lifecycle Drill-down</h2>
+            <span class="card-meta" id="lifecycles-count">0</span>
           </div>
-          <div id="pending-approvals" class="panel-body"></div>
-        </article>
-        <article class="card">
-          <div class="card-head">
-            <h2>Last Cycle Summary</h2>
-            <span class="card-meta">Autonomy loop</span>
+          <div class="drilldown-layout">
+            <div id="lifecycles" class="lifecycle-list"></div>
+            <div id="lifecycle-detail" class="lifecycle-detail"></div>
           </div>
-          <div id="orchestrator-cycle-summary" class="panel-body"></div>
-        </article>
-      </section>
+        </section>
+      </div>
 
-      <section class="card">
-        <div class="card-head">
-          <h2>Watchlist</h2>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <button type="button" class="mode-badge mode-live" data-watchlist-tab="myWatchlist" aria-pressed="true">My Watchlist</button>
-            <button type="button" class="mode-badge mode-paper" data-watchlist-tab="recentInvested" aria-pressed="false">Recently Invested</button>
-            <span id="watchlist-count" class="card-meta">0 items</span>
+      <div class="tab-panel" id="tab-intelligence">
+        <section class="research-panel card">
+          <div class="card-head">
+            <h2>AI Research</h2>
+            <span class="card-meta" id="research-count">0 symbols</span>
           </div>
-        </div>
-        <div id="watchlist-content" class="panel-body"></div>
-      </section>
+          <div id="research-grid" class="research-grid"></div>
+        </section>
 
-      <section class="filter-bar card">
-        <div class="filter-group">
-          <label for="symbol-filter">Symbol / ID</label>
-          <input id="symbol-filter" type="search" placeholder="AAPL, REJECT, signal id" />
-        </div>
-        <div class="filter-group">
-          <label for="state-filter">Workflow State</label>
-          <select id="state-filter">
-            <option value="ALL">All</option>
-            <option value="ACCEPTED">Accepted</option>
-            <option value="REJECTED">Rejected</option>
-            <option value="APPROVE">Approve</option>
-            <option value="REVIEW">Review</option>
-            <option value="REJECT">Reject</option>
-            <option value="PENDING">Pending</option>
-          </select>
-        </div>
-        <div class="filter-group">
-          <label for="limit-filter">Recent Records</label>
-          <select id="limit-filter">
-            <option value="5">5</option>
-            <option value="10" selected>10</option>
-            <option value="25">25</option>
-            <option value="ALL">All</option>
-          </select>
-        </div>
-      </section>
+        <section class="grid">
+          <article class="card">
+            <div class="card-head">
+              <h2>Latest Signals</h2>
+              <span class="card-meta" id="signals-count">0</span>
+            </div>
+            <div id="signals" class="panel-body"></div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <h2>Policy Decisions</h2>
+              <span class="card-meta" id="policy-decisions-count">0</span>
+            </div>
+            <div id="policy-decisions" class="panel-body"></div>
+          </article>
+        </section>
+      </div>
 
-      <section class="drilldown card">
-        <div class="card-head">
-          <h2>Lifecycle Drill-down</h2>
-          <span class="card-meta" id="lifecycles-count">0</span>
-        </div>
-        <div class="drilldown-layout">
-          <div id="lifecycles" class="lifecycle-list"></div>
-          <div id="lifecycle-detail" class="lifecycle-detail"></div>
-        </div>
-      </section>
-
-      <!-- Research Panel -->
-      <section class="research-panel card">
-        <div class="card-head">
-          <h2>AI Research</h2>
-          <span class="card-meta" id="research-count">0 symbols</span>
-        </div>
-        <div id="research-grid" class="research-grid"></div>
-      </section>
-
-      <section class="grid">
-        <article class="card">
-          <div class="card-head">
-            <h2>Latest Signals</h2>
-            <span class="card-meta" id="signals-count">0</span>
-          </div>
-          <div id="signals" class="panel-body"></div>
-        </article>
-        <article class="card">
-          <div class="card-head">
-            <h2>Policy Decisions</h2>
-            <span class="card-meta" id="policy-decisions-count">0</span>
-          </div>
-          <div id="policy-decisions" class="panel-body"></div>
-        </article>
-        <article class="card">
-          <div class="card-head">
-            <h2>Orders</h2>
-            <span class="card-meta" id="orders-count">0</span>
-          </div>
-          <div id="orders" class="panel-body"></div>
-        </article>
-        <article class="card">
-          <div class="card-head">
-            <h2>Fills</h2>
-            <span class="card-meta" id="fills-count">0</span>
-          </div>
-          <div id="fills" class="panel-body"></div>
-        </article>
-        <article class="card">
-          <div class="card-head">
-            <h2>Positions</h2>
-            <span class="card-meta" id="positions-count">0</span>
-          </div>
-          <div id="positions" class="panel-body"></div>
-        </article>
-        <article class="card">
-          <div class="card-head">
-            <h2>Rejection Reasons</h2>
-            <span class="card-meta" id="rejections-count">0</span>
-          </div>
-          <div id="rejections" class="panel-body"></div>
-        </article>
-      </section>
+      <div class="tab-panel" id="tab-audit">
+        <section class="grid">
+          <article class="card">
+            <div class="card-head">
+              <h2>Orders</h2>
+              <span class="card-meta" id="orders-count">0</span>
+            </div>
+            <div id="orders" class="panel-body"></div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <h2>Fills</h2>
+              <span class="card-meta" id="fills-count">0</span>
+            </div>
+            <div id="fills" class="panel-body"></div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <h2>Positions</h2>
+              <span class="card-meta" id="positions-count">0</span>
+            </div>
+            <div id="positions" class="panel-body"></div>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <h2>Rejection Reasons</h2>
+              <span class="card-meta" id="rejections-count">0</span>
+            </div>
+            <div id="rejections" class="panel-body"></div>
+          </article>
+        </section>
+      </div>
     </main>
+    <script>
+      document.addEventListener("DOMContentLoaded", function() {
+        var btns = document.querySelectorAll(".tab-btn");
+        var panels = document.querySelectorAll(".tab-panel");
+
+        btns.forEach(function(btn) {
+          btn.addEventListener("click", function() {
+            var target = btn.getAttribute("data-tab");
+            btns.forEach(function(b) { b.classList.remove("active"); });
+            panels.forEach(function(p) { p.classList.remove("active"); });
+            btn.classList.add("active");
+            document.getElementById("tab-" + target).classList.add("active");
+            try { localStorage.setItem("tradepilot_tab", target); } catch (e) {}
+          });
+        });
+
+        try {
+          var saved = localStorage.getItem("tradepilot_tab");
+          if (saved) {
+            var savedBtn = document.querySelector('[data-tab="' + saved + '"]');
+            if (savedBtn) savedBtn.click();
+          }
+        } catch (e) {}
+      });
+    </script>
     <script type="module" src="./mvp.js"></script>
   </body>
 </html>
