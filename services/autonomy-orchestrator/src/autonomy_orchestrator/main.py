@@ -463,6 +463,13 @@ async def _portfolio_state() -> dict[str, object]:
 
 
 async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
+    try:
+        from strategy_service.earnings_calendar import is_earnings_blackout as _iec
+
+        event_blackout = _iec(signal.symbol)
+    except Exception:
+        event_blackout = False
+
     request = PolicyEvaluationRequest(
         signal_id=signal.signal_id,
         symbol=signal.symbol,
@@ -472,7 +479,7 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
         market_context={
             "data_age_seconds": 10,
             "market_open": is_market_hours(config),
-            "event_blackout_active": False,
+            "event_blackout_active": event_blackout,
             "liquidity_score": 0.95,
             "symbol_allowed": signal.symbol.upper() in {str(sym).upper() for sym in config.get("symbol_allowlist", [])},
         },

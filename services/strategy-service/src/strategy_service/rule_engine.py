@@ -18,7 +18,11 @@ class RuleSignal:
     size_pct: float
 
 
-def evaluate_rules(ta: TASummary, config: dict | None = None) -> RuleSignal:
+def evaluate_rules(
+    ta: TASummary,
+    config: dict | None = None,
+    sentiment_score: float | None = None,
+) -> RuleSignal:
     """
     Deterministic Dual-EMA Momentum + RSI + MACD strategy.
 
@@ -88,6 +92,15 @@ def evaluate_rules(ta: TASummary, config: dict | None = None) -> RuleSignal:
         f"EMA20={ema_20:.2f} {'>' if ema_20 > ema_50 else '<='} EMA50={ema_50:.2f}, "
         f"RSI={rsi:.1f}, MACD_hist={macd_hist:.6f}, ADX={adx:.1f} -> {action}"
     )
+
+    sentiment_block_threshold = float((config or {}).get("sentiment_block_threshold", -0.3))
+    if action == "BUY" and sentiment_score is not None and sentiment_score < sentiment_block_threshold:
+        action = "HOLD"
+        reasoning = (
+            reasoning
+            + f" | Sentiment gate blocked BUY (score={sentiment_score:.2f} < {sentiment_block_threshold})"
+        )
+        confidence = min(confidence, 0.55)
 
     size_pct = _SIZE_BY_RISK[risk_score]
 

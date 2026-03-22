@@ -79,7 +79,12 @@ class AISignalPipeline:
 
         # 2b. Pre-Claude deterministic check: if rule signal is high-confidence, skip Claude
         if ta_summary is not None and getattr(settings, "prefer_deterministic", False):
-            rule_signal = evaluate_rules(ta_summary)
+            rule_config = {"sentiment_block_threshold": settings.sentiment_block_threshold}
+            rule_signal = evaluate_rules(
+                ta_summary,
+                config=rule_config,
+                sentiment_score=sentiment.score if sentiment else None,
+            )
             if rule_signal.confidence >= 0.75:
                 ta_contract_pre: Optional[TechnicalSummaryContract] = None
                 if ta_summary:
@@ -270,7 +275,11 @@ def _parse_json(text: str) -> dict:
 def _build_deterministic_signal(symbol: str, ta_summary=None) -> SignalCandidate:
     """Deterministic rule-based signal using EMA/RSI/MACD strategy."""
     if ta_summary is not None:
-        rule_signal = evaluate_rules(ta_summary)
+        rule_signal = evaluate_rules(
+            ta_summary,
+            config={"sentiment_block_threshold": settings.sentiment_block_threshold},
+            sentiment_score=None,
+        )
         return SignalCandidate(
             signal_id=str(uuid4()),
             symbol=symbol.upper(),

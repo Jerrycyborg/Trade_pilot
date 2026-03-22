@@ -1,0 +1,9 @@
+- Added a sentiment gate to `strategy_service.rule_engine.evaluate_rules()` with `sentiment_score` input, BUY-to-HOLD suppression below the configured threshold, appended reasoning, and capped confidence when blocked.
+- Wired `sentiment_score` into `strategy_service.ai_pipeline` rule evaluation calls and passed the configured `sentiment_block_threshold` so the new env/config setting is live.
+- Added `strategy_service.earnings_calendar.is_earnings_blackout()` using `yfinance`, fail-open behavior, and blackout-day matching against calendar timestamps.
+- Wired earnings blackout suppression into `strategy_service.main.generate_signal()` so BUY candidates are downgraded to HOLD during blackout windows.
+- Wired orchestrator policy payload construction to populate `market_context.event_blackout_active` via a best-effort import/use of `strategy_service.earnings_calendar`.
+- Added `sentiment_block_threshold` and `earnings_blackout_days` to strategy-service config, plus matching entries in `.env.example`.
+- Added tests: `tests/strategy_service/test_sentiment_gate.py` (4 cases) and `tests/strategy_service/test_earnings_blackout.py` (4 cases).
+- Test result: `106 passed, 7 skipped, 0 failed` via `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --tb=short 2>&1`.
+- Deviation from architect plan: passed the configured sentiment threshold into pipeline rule evaluation so the new config field is effective at runtime; no other deviations.

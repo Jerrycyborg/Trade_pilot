@@ -16,6 +16,7 @@ from sqlalchemy import select
 from .ai_pipeline import AISignalPipeline, _build_deterministic_signal
 from .config import settings
 from .database import Base, SessionLocal, engine
+from .earnings_calendar import is_earnings_blackout
 from .models import SignalRecord
 
 logging.basicConfig(level=logging.INFO)
@@ -62,6 +63,12 @@ async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
         signal = await pipeline.generate(target_symbol)
     else:
         signal = _build_deterministic_signal(target_symbol)
+
+    event_blackout = is_earnings_blackout(target_symbol, blackout_days=settings.earnings_blackout_days)
+    if event_blackout:
+        logger.info("Earnings blackout active for %s — signal suppressed to HOLD", target_symbol)
+        if signal.candidate_action.value == "BUY":
+            signal = signal.model_copy(update={"candidate_action": CandidateAction.HOLD})
 
     _persist_signal(signal)
     return signal

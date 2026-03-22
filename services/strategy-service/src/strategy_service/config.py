@@ -56,6 +56,12 @@ class StrategySettings:
     sentiment_weight: float = field(
         default_factory=lambda: float(os.getenv("SENTIMENT_WEIGHT", "0.3"))
     )
+    sentiment_block_threshold: float = field(
+        default_factory=lambda: float(os.getenv("SENTIMENT_BLOCK_THRESHOLD", "-0.3"))
+    )
+    earnings_blackout_days: int = field(
+        default_factory=lambda: int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
+    )
     stop_loss_pct: float = field(
         default_factory=lambda: float(os.getenv("STOP_LOSS_PCT", "0.03"))
     )
