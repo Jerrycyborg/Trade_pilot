@@ -20,10 +20,13 @@ class OHLCVFetcherProtocol(Protocol):
 
 
 class StopLossRecord(BaseModel):
+    """Tracked stop-loss state. `qty=0.0` means close the full position at the broker."""
+
     symbol: str
     entry_price: float
     stop_price: float  # entry_price - atr * multiplier
     position_id: str
+    qty: float = 0.0
     created_at: datetime
 
 
@@ -79,7 +82,7 @@ class StopLossMonitor:
         return triggered
 
     async def _trigger_exit(self, record: StopLossRecord) -> None:
-        """POST /internal/execute with SELL signal. Fire-and-forget with logged error."""
+        """POST close request. `qty=0.0` means the broker should close the full position."""
         import os
         from uuid import uuid4
 
@@ -87,12 +90,8 @@ class StopLossMonitor:
         payload = {
             "signal_id": str(uuid4()),
             "symbol": record.symbol,
-            "side": "SELL",
-            "qty": 0,  # broker should close full position
-            "order_type": "MARKET",
-            "time_in_force": "DAY",
+            "qty": record.qty,
             "position_id": record.position_id,
-            "reason": "stop_loss_triggered",
         }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:

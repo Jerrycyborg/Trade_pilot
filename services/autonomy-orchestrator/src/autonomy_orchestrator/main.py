@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,10 +16,13 @@ from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from market_data import MarketDataSettings, get_fetcher
+from market_data.indicators import compute_atr
+from market_data.fetcher import OHLCVFetcherProtocol
 from pydantic import BaseModel
 
 from .config import settings
-from .stop_loss_monitor import StopLossMonitor
+from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
 from .risk_engine import evaluate_risk
 
@@ -26,9 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _internal_headers() -> dict[str, str]:
-    import os
-
-    key = os.environ.get("INTERNAL_API_KEY", "")
+    key = settings.internal_api_key or os.environ.get("INTERNAL_API_KEY", "")
     return {"X-Internal-Key": key} if key else {}
 
 
@@ -78,21 +80,12 @@ def _start_scheduler() -> None:
         max_instances=1,
     )
 
-    async def _stop_loss_job() -> None:
-        if state.stop_loss_monitor is None:
-            return
-        from market_data import get_fetcher, MarketDataSettings
-        fetcher = get_fetcher(MarketDataSettings())
-        triggered = await state.stop_loss_monitor.check_all(fetcher)
-        if triggered:
-            logger.info("StopLossMonitor triggered exits for: %s", triggered)
-
     scheduler.add_job(
-        _stop_loss_job,
-        trigger="interval",
-        minutes=5,
+        lambda: asyncio.create_task(_run_stop_loss_check()),
+        "interval",
+        minutes=int(os.getenv("STOP_LOSS_CHECK_INTERVAL_MINUTES", "5")),
         id="stop_loss_check",
-        max_instances=1,
+        replace_existing=True,
     )
     try:
         asyncio.get_running_loop()
@@ -136,14 +129,18 @@ async def _startup_health_check() -> None:
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
-    import os
     state.stop_loss_monitor = StopLossMonitor(
-        broker_url=settings.execution_service_url,
-        internal_key=os.environ.get("INTERNAL_API_KEY", ""),
+        broker_url=settings.broker_url,
+        internal_key=settings.internal_api_key,
     )
     await _startup_health_check()
     _start_scheduler()
-    yield
+    try:
+        yield
+    finally:
+        if state.scheduler is not None:
+            state.scheduler.shutdown(wait=False)
+            state.scheduler = None
 
 
 app = FastAPI(title="autonomy-orchestrator", version="0.1.0", lifespan=lifespan)
@@ -312,9 +309,11 @@ async def run_cycle() -> dict[str, object]:
         await _process_approvals()
         signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
         portfolio_state = await _portfolio_state()
+        fetcher = _build_market_data_fetcher()
         for signal in signals:
             summary["signals"] += 1
-            risk = evaluate_risk(signal, portfolio_state, weekly_spend, config)
+            price_bars = _fetch_price_bars(fetcher, signal.symbol)
+            risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
             if not risk.approved:
                 summary["rejected"] += 1
                 await _audit(
@@ -334,6 +333,7 @@ async def run_cycle() -> dict[str, object]:
                 await _notify(signal, risk, policy)
             if decision == "APPROVE" and risk.tier < 3:
                 order = await _submit_order(signal, risk, config, portfolio_state)
+                _register_stop_loss(signal.symbol, order, price_bars)
                 weekly_spend += float(order.get("amount_usd", 0.0))
                 state.weekly_notional_used = weekly_spend
                 state.trades_today += 1
@@ -524,10 +524,71 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
             },
         )
         response.raise_for_status()
-        body = response.json()
+    body = response.json()
     body["amount_usd"] = amount_usd
+    body["entry_price"] = current_price if current_price is not None else round(amount_usd / qty, 4)
+    body["qty"] = qty
     body["trading_mode"] = config.get("trading_mode", "demo")
     return body
+
+
+def _build_market_data_fetcher() -> OHLCVFetcherProtocol | None:
+    try:
+        return get_fetcher(MarketDataSettings())
+    except Exception as exc:
+        logger.warning("Market data fetcher unavailable: %s", exc)
+        return None
+
+
+def _fetch_price_bars(fetcher: OHLCVFetcherProtocol | None, symbol: str) -> list[Any] | None:
+    if fetcher is None:
+        return None
+    try:
+        return fetcher.fetch(symbol.upper(), period_days=30)
+    except Exception as exc:
+        logger.warning("Unable to fetch price bars for %s: %s", symbol, exc)
+        return None
+
+
+def _register_stop_loss(symbol: str, order: dict[str, object], price_bars: list[Any] | None) -> None:
+    if state.stop_loss_monitor is None:
+        return
+
+    entry_price = float(order.get("entry_price", 0.0))
+    if entry_price <= 0.0:
+        logger.warning("Skipping stop registration for %s: missing entry price", symbol)
+        return
+
+    stop_price = entry_price * 0.98
+    if price_bars:
+        highs = [float(bar.high) for bar in price_bars]
+        lows = [float(bar.low) for bar in price_bars]
+        closes = [float(bar.close) for bar in price_bars]
+        atr = compute_atr(highs, lows, closes)
+        if atr > 0.0:
+            stop_price = entry_price - atr * 2.0
+
+    state.stop_loss_monitor.register(
+        StopLossRecord(
+            symbol=symbol,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            position_id=str(order.get("order_id", symbol)),
+            qty=float(order.get("qty", 0.0)),
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+
+async def _run_stop_loss_check() -> None:
+    if state.stop_loss_monitor is None:
+        return
+    fetcher = _build_market_data_fetcher()
+    if fetcher is None:
+        return
+    triggered = await state.stop_loss_monitor.check_all(fetcher)
+    if triggered:
+        logger.info("StopLossMonitor triggered exits for: %s", triggered)
 
 
 async def _approval(signal: SignalCandidate, risk, policy: dict[str, object]) -> None:
@@ -592,10 +653,12 @@ async def _process_approvals() -> None:
         return
     portfolio_state = await _portfolio_state()
     weekly_spend = await _weekly_spend()
+    fetcher = _build_market_data_fetcher()
     for row in approved_rows:
         signal = SignalCandidate.model_validate(row["metadata"]["signal"])
+        price_bars = _fetch_price_bars(fetcher, signal.symbol)
         # Re-run risk + policy with current state before executing
-        risk = evaluate_risk(signal, portfolio_state, weekly_spend, config)
+        risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
         if not risk.approved:
             await _audit(AuditEvent(
                 event_type="approval.stale_rejected",
@@ -618,6 +681,7 @@ async def _process_approvals() -> None:
             ))
             continue
         order = await _submit_order(signal, risk, config, portfolio_state)
+        _register_stop_loss(signal.symbol, order, price_bars)
         weekly_spend += float(order.get("amount_usd", 0.0))
         await _audit(AuditEvent(
             event_type="trade.executed.approval",

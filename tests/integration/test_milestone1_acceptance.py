@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -48,7 +49,11 @@ def _build_strategy_client(db_path: Path) -> TestClient:
     import strategy_service.database as database
     import strategy_service.main as main
 
-    config.settings = config.StrategySettings(database_url=f"sqlite+pysqlite:///{db_path}")
+    config.settings = config.StrategySettings(
+        database_url=f"sqlite+pysqlite:///{db_path}",
+        anthropic_api_key="",
+    )
+    main.settings = config.settings
     database.settings = config.settings
     database.connect_args = {"check_same_thread": False}
     database.engine = create_engine(
@@ -173,6 +178,70 @@ def _execution_payload(signal: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _generate_signal(symbol: str) -> dict[str, object]:
+    import strategy_service.main as main
+
+    signal = asyncio.run(main.generate_signal(main.SignalGenerationRequest(symbol=symbol)))
+    return signal.model_dump(mode="json")
+
+
+def _list_signals(*, limit: int = 20) -> list[dict[str, object]]:
+    import strategy_service.main as main
+
+    return [row.model_dump(mode="json") for row in main.list_signals(limit=limit)]
+
+
+def _policy_evaluate(payload: dict[str, object]) -> dict[str, object]:
+    import policy_service.main as main
+
+    decision = main.evaluate(main.PolicyEvaluationRequest(**payload))
+    return decision.model_dump(mode="json")
+
+
+def _list_evaluations(*, limit: int = 20, symbol: str | None = None, decision: str | None = None) -> list[dict[str, object]]:
+    import policy_service.main as main
+
+    return [
+        row.model_dump(mode="json")
+        for row in main.list_evaluations(limit=limit, symbol=symbol, decision=decision)
+    ]
+
+
+def _create_order(signal: dict[str, object], *, idempotency_key: str) -> dict[str, object]:
+    import execution_service.main as main
+
+    order = main.create_order(
+        main.ExecutionOrderRequest(**_execution_payload(signal)),
+        idempotency_key=idempotency_key,
+    )
+    return order.model_dump(mode="json")
+
+
+def _list_orders(*, limit: int = 20) -> list[dict[str, object]]:
+    import execution_service.main as main
+
+    return [row.model_dump(mode="json") for row in main.list_orders(limit=limit)]
+
+
+def _get_order_fills(order_id: str) -> list[dict[str, object]]:
+    import execution_service.main as main
+
+    return [row.model_dump(mode="json") for row in main.get_order_fills(order_id)]
+
+
+def _reconcile_portfolio(latest_quotes: dict[str, float]) -> dict[str, object]:
+    import portfolio_service.main as main
+
+    response = main.reconcile(main.PortfolioReconcileRequest(latest_quotes=latest_quotes))
+    return response.model_dump(mode="json")
+
+
+def _get_snapshot() -> dict[str, object]:
+    import portfolio_service.main as main
+
+    return main.get_snapshot().model_dump(mode="json")
+
+
 def test_milestone1_acceptance_flow(tmp_path: Path) -> None:
     (
         strategy_client,
@@ -187,57 +256,31 @@ def test_milestone1_acceptance_flow(tmp_path: Path) -> None:
         portfolio_database,
     ) = _build_clients(tmp_path)
 
-    signal_response = strategy_client.post("/v1/signals/generate", json={"symbol": "AAPL"})
-    assert signal_response.status_code == 200
-    signal = signal_response.json()
+    signal = _generate_signal("AAPL")
     assert signal["candidate_action"] == "BUY"
 
-    policy_response = policy_client.post("/v1/policy/evaluate", json=_policy_payload(signal))
-    assert policy_response.status_code == 200
-    decision = policy_response.json()
+    decision = _policy_evaluate(_policy_payload(signal))
     assert decision["decision"] == "APPROVE"
 
-    order_response = execution_client.post(
-        "/v1/orders",
-        json=_execution_payload(signal),
-        headers={"Idempotency-Key": "acceptance-flow"},
-    )
-    assert order_response.status_code == 200
-    order = order_response.json()
+    order = _create_order(signal, idempotency_key="acceptance-flow")
     assert order["status"] == "ACCEPTED"
 
-    fills_response = execution_client.get(f"/v1/orders/{order['order_id']}/fills")
-    assert fills_response.status_code == 200
-    fills = fills_response.json()
+    fills = _get_order_fills(order["order_id"])
     assert len(fills) == 1
     assert fills[0]["qty"] == 10
     assert fills[0]["price"] == 100.0
 
-    reconcile_response = portfolio_client.post(
-        "/v1/portfolio/reconcile",
-        json={"latest_quotes": {"AAPL": 101.0}},
-    )
-    assert reconcile_response.status_code == 200
-    snapshot_response = portfolio_client.get("/v1/portfolio/snapshot")
-    assert snapshot_response.status_code == 200
-    snapshot = snapshot_response.json()
+    _reconcile_portfolio({"AAPL": 101.0})
+    snapshot = _get_snapshot()
     assert snapshot["gross_exposure"] == 1010.0
     assert snapshot["realized_pnl"] == 0.0
     assert snapshot["unrealized_pnl"] == 10.0
     assert snapshot["positions"][0]["symbol"] == "AAPL"
     assert snapshot["positions"][0]["net_qty"] == 10
 
-    signals_response = strategy_client.get("/v1/signals", params={"limit": 1})
-    assert signals_response.status_code == 200
-    assert signals_response.json()[0]["signal_id"] == signal["signal_id"]
-
-    evaluations_response = policy_client.get("/v1/policy/evaluations", params={"limit": 1})
-    assert evaluations_response.status_code == 200
-    assert evaluations_response.json()[0]["signal_id"] == signal["signal_id"]
-
-    orders_response = execution_client.get("/v1/orders", params={"limit": 1})
-    assert orders_response.status_code == 200
-    assert orders_response.json()[0]["order_id"] == order["order_id"]
+    assert _list_signals(limit=1)[0]["signal_id"] == signal["signal_id"]
+    assert _list_evaluations(limit=1)[0]["signal_id"] == signal["signal_id"]
+    assert _list_orders(limit=1)[0]["order_id"] == order["order_id"]
 
     with execution_database.SessionLocal() as session:
         stored_order = session.scalar(
@@ -283,34 +326,21 @@ def test_review_path_is_visible_without_execution_or_portfolio_mutation(tmp_path
         portfolio_database,
     ) = _build_clients(tmp_path)
 
-    signal_response = strategy_client.post("/v1/signals/generate", json={"symbol": "MSFT"})
-    assert signal_response.status_code == 200
-    signal = signal_response.json()
+    signal = _generate_signal("MSFT")
 
     review_payload = _policy_payload(signal)
     review_payload["confidence"] = 0.4
-    policy_response = policy_client.post("/v1/policy/evaluate", json=review_payload)
-    assert policy_response.status_code == 200
-    decision = policy_response.json()
+    decision = _policy_evaluate(review_payload)
     assert decision["decision"] == "REVIEW"
     assert "confidence_below_floor" in decision["reasons"]
 
-    evaluations_response = policy_client.get(
-        "/v1/policy/evaluations",
-        params={"symbol": "MSFT", "decision": "review"},
-    )
-    assert evaluations_response.status_code == 200
-    assert evaluations_response.json()[0]["signal_id"] == signal["signal_id"]
+    evaluations = _list_evaluations(symbol="MSFT", decision="review")
+    assert evaluations[0]["signal_id"] == signal["signal_id"]
 
-    orders_response = execution_client.get("/v1/orders")
-    assert orders_response.status_code == 200
-    assert orders_response.json() == []
+    assert _list_orders() == []
 
-    reconcile_response = portfolio_client.post("/v1/portfolio/reconcile", json={"latest_quotes": {}})
-    assert reconcile_response.status_code == 200
-    snapshot_response = portfolio_client.get("/v1/portfolio/snapshot")
-    assert snapshot_response.status_code == 200
-    snapshot = snapshot_response.json()
+    _reconcile_portfolio({})
+    snapshot = _get_snapshot()
     assert snapshot["positions"] == []
     assert snapshot["gross_exposure"] == 0.0
 

@@ -283,6 +283,7 @@ class ClosePositionRequest(BaseModel):
     position_id: str
     signal_id: str
     units: float | None = None
+    qty: float | None = Field(default=None, ge=0.0)
 
 
 class ExecutionOrderResponse(BaseModel):

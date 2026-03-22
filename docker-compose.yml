@@ -57,5 +57,14 @@ services:
     ports:
       - "8003:8003"
 
+  backtest-service:
+    build:
+      context: .
+      dockerfile: services/backtest-service/Dockerfile
+    ports:
+      - "8009:8009"
+    env_file: .env
+    restart: unless-stopped
+
 volumes:
   postgres-data:

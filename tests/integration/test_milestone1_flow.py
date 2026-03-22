@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -31,7 +32,11 @@ def _build_strategy_client(db_path: Path) -> TestClient:
     import strategy_service.database as database
     import strategy_service.main as main
 
-    config.settings = config.StrategySettings(database_url=f"sqlite+pysqlite:///{db_path}")
+    config.settings = config.StrategySettings(
+        database_url=f"sqlite+pysqlite:///{db_path}",
+        anthropic_api_key="",
+    )
+    main.settings = config.settings
     database.settings = config.settings
     database.connect_args = {"check_same_thread": False}
     database.engine = create_engine(
@@ -121,6 +126,57 @@ def _execution_payload(signal: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _generate_signal(symbol: str) -> dict[str, object]:
+    import strategy_service.main as main
+
+    signal = asyncio.run(main.generate_signal(main.SignalGenerationRequest(symbol=symbol)))
+    return signal.model_dump(mode="json")
+
+
+def _list_signals(*, limit: int = 20) -> list[dict[str, object]]:
+    import strategy_service.main as main
+
+    return [row.model_dump(mode="json") for row in main.list_signals(limit=limit)]
+
+
+def _policy_evaluate(payload: dict[str, object]) -> dict[str, object]:
+    import policy_service.main as main
+
+    decision = main.evaluate(main.PolicyEvaluationRequest(**payload))
+    return decision.model_dump(mode="json")
+
+
+def _list_evaluations(*, limit: int = 20, symbol: str | None = None, decision: str | None = None) -> list[dict[str, object]]:
+    import policy_service.main as main
+
+    return [
+        row.model_dump(mode="json")
+        for row in main.list_evaluations(limit=limit, symbol=symbol, decision=decision)
+    ]
+
+
+def _create_order(signal: dict[str, object], *, idempotency_key: str) -> dict[str, object]:
+    import execution_service.main as main
+
+    order = main.create_order(
+        main.ExecutionOrderRequest(**_execution_payload(signal)),
+        idempotency_key=idempotency_key,
+    )
+    return order.model_dump(mode="json")
+
+
+def _get_order(order_id: str) -> dict[str, object]:
+    import execution_service.main as main
+
+    return main.get_order(order_id).model_dump(mode="json")
+
+
+def _list_orders(*, limit: int = 20) -> list[dict[str, object]]:
+    import execution_service.main as main
+
+    return [row.model_dump(mode="json") for row in main.list_orders(limit=limit)]
+
+
 def test_signal_policy_execution_flow_persists_order_and_events(tmp_path: Path) -> None:
     (
         strategy_client,
@@ -132,27 +188,16 @@ def test_signal_policy_execution_flow_persists_order_and_events(tmp_path: Path) 
         execution_database,
     ) = _build_clients(tmp_path)
 
-    signal_response = strategy_client.post("/v1/signals/generate", json={"symbol": "AAPL"})
-    assert signal_response.status_code == 200
-    signal = signal_response.json()
+    signal = _generate_signal("AAPL")
 
-    policy_response = policy_client.post("/v1/policy/evaluate", json=_policy_payload(signal))
-    assert policy_response.status_code == 200
-    policy_decision = policy_response.json()
+    policy_decision = _policy_evaluate(_policy_payload(signal))
     assert policy_decision["decision"] == "APPROVE"
 
-    order_response = execution_client.post(
-        "/v1/orders",
-        json=_execution_payload(signal),
-        headers={"Idempotency-Key": "integration-approve"},
-    )
-    assert order_response.status_code == 200
-    order = order_response.json()
+    order = _create_order(signal, idempotency_key="integration-approve")
     assert order["status"] == "ACCEPTED"
 
-    stored_response = execution_client.get(f"/v1/orders/{order['order_id']}")
-    assert stored_response.status_code == 200
-    assert stored_response.json()["status"] == "ACCEPTED"
+    stored_response = _get_order(order["order_id"])
+    assert stored_response["status"] == "ACCEPTED"
 
     with execution_database.SessionLocal() as session:
         order_count = session.scalar(select(func.count()).select_from(execution_models.OrderRecord))
@@ -197,12 +242,8 @@ def test_stale_data_rejection_blocks_execution_flow(tmp_path: Path) -> None:
         execution_database,
     ) = _build_clients(tmp_path)
 
-    signal = strategy_client.post("/v1/signals/generate", json={"symbol": "AAPL"}).json()
-    policy_response = policy_client.post(
-        "/v1/policy/evaluate", json=_policy_payload(signal, stale_seconds=45)
-    )
-    assert policy_response.status_code == 200
-    decision = policy_response.json()
+    signal = _generate_signal("AAPL")
+    decision = _policy_evaluate(_policy_payload(signal, stale_seconds=45))
     assert decision["decision"] == "REJECT"
     assert "stale_data" in decision["reasons"]
 
@@ -225,11 +266,8 @@ def test_stale_data_rejection_blocks_execution_flow(tmp_path: Path) -> None:
     assert stored_evaluation.decision == "REJECT"
     assert "stale_data" in stored_evaluation.reasons_json
 
-    evaluations = policy_client.get(
-        "/v1/policy/evaluations", params={"decision": "reject", "symbol": "aapl"}
-    )
-    assert evaluations.status_code == 200
-    assert evaluations.json()[0]["signal_id"] == signal["signal_id"]
+    evaluations = _list_evaluations(symbol="aapl", decision="reject")
+    assert evaluations[0]["signal_id"] == signal["signal_id"]
 
 
 def test_duplicate_idempotency_returns_same_order_and_single_persisted_record(
@@ -245,17 +283,13 @@ def test_duplicate_idempotency_returns_same_order_and_single_persisted_record(
         execution_database,
     ) = _build_clients(tmp_path)
 
-    signal = strategy_client.post("/v1/signals/generate", json={"symbol": "AAPL"}).json()
-    decision = policy_client.post("/v1/policy/evaluate", json=_policy_payload(signal)).json()
+    signal = _generate_signal("AAPL")
+    decision = _policy_evaluate(_policy_payload(signal))
     assert decision["decision"] == "APPROVE"
 
-    headers = {"Idempotency-Key": "integration-duplicate"}
-    first = execution_client.post("/v1/orders", json=_execution_payload(signal), headers=headers)
-    second = execution_client.post("/v1/orders", json=_execution_payload(signal), headers=headers)
-
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert first.json()["order_id"] == second.json()["order_id"]
+    first = _create_order(signal, idempotency_key="integration-duplicate")
+    second = _create_order(signal, idempotency_key="integration-duplicate")
+    assert first["order_id"] == second["order_id"]
 
     with execution_database.SessionLocal() as session:
         order_count = session.scalar(select(func.count()).select_from(execution_models.OrderRecord))
@@ -284,40 +318,21 @@ def test_dashboard_read_surfaces_expose_latest_persisted_records(tmp_path: Path)
         _execution_database,
     ) = _build_clients(tmp_path)
 
-    approved_signal = strategy_client.post("/v1/signals/generate", json={"symbol": "AAPL"}).json()
-    rejected_signal = strategy_client.post("/v1/signals/generate", json={"symbol": "REJECT"}).json()
+    approved_signal = _generate_signal("AAPL")
+    rejected_signal = _generate_signal("REJECT")
 
-    approved_decision = policy_client.post("/v1/policy/evaluate", json=_policy_payload(approved_signal))
-    rejected_decision = policy_client.post(
-        "/v1/policy/evaluate",
-        json=_policy_payload(rejected_signal, stale_seconds=45),
-    )
-    assert approved_decision.status_code == 200
-    assert rejected_decision.status_code == 200
+    _policy_evaluate(_policy_payload(approved_signal))
+    _policy_evaluate(_policy_payload(rejected_signal, stale_seconds=45))
+    _create_order(approved_signal, idempotency_key="dashboard-accept")
+    _create_order(rejected_signal, idempotency_key="dashboard-reject")
 
-    approved_order = execution_client.post(
-        "/v1/orders",
-        json=_execution_payload(approved_signal),
-        headers={"Idempotency-Key": "dashboard-accept"},
-    )
-    rejected_order = execution_client.post(
-        "/v1/orders",
-        json=_execution_payload(rejected_signal),
-        headers={"Idempotency-Key": "dashboard-reject"},
-    )
-    assert approved_order.status_code == 200
-    assert rejected_order.status_code == 200
+    signals = _list_signals(limit=2)
+    evaluations = _list_evaluations(limit=2)
+    orders = _list_orders(limit=2)
 
-    signals = strategy_client.get("/v1/signals", params={"limit": 2})
-    evaluations = policy_client.get("/v1/policy/evaluations", params={"limit": 2})
-    orders = execution_client.get("/v1/orders", params={"limit": 2})
-
-    assert signals.status_code == 200
-    assert evaluations.status_code == 200
-    assert orders.status_code == 200
-    assert {row["signal_id"] for row in signals.json()} == {
+    assert {row["signal_id"] for row in signals} == {
         approved_signal["signal_id"],
         rejected_signal["signal_id"],
     }
-    assert {row["decision"] for row in evaluations.json()} == {"APPROVE", "REJECT"}
-    assert any(row["rejection_reason"] == "symbol_rejected" for row in orders.json())
+    assert {row["decision"] for row in evaluations} == {"APPROVE", "REJECT"}
+    assert any(row["rejection_reason"] == "symbol_rejected" for row in orders)

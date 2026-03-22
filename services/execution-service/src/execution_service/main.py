@@ -130,11 +130,12 @@ def create_order(
 @app.post("/v1/orders/close")
 def close_order(request: ClosePositionRequest, _: None = Depends(verify_internal_key)) -> dict[str, object]:
     request.symbol = sanitize_symbol(request.symbol)
+    units = None if request.qty == 0 else request.qty
     try:
         closed = close_position(
             position_id=request.position_id,
             symbol=request.symbol,
-            units=request.units,
+            units=request.units if request.units is not None else units,
         )
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc))
