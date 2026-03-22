@@ -66,7 +66,18 @@ class AISignalPipeline:
                         ta = build_ta_summary(symbol, bars)
                 except Exception:
                     pass
-                return _build_deterministic_signal(symbol, ta)
+                # Best-effort sentiment fetch for fallback path
+                fallback_sentiment_score: float | None = None
+                try:
+                    import asyncio
+                    from .config import settings as _s
+                    import httpx
+                    resp = httpx.get(f"{_s.sentiment_service_url}/v1/sentiment/{symbol.upper()}", timeout=2.0)
+                    if resp.status_code == 200:
+                        fallback_sentiment_score = resp.json().get("score")
+                except Exception:
+                    pass
+                return _build_deterministic_signal(symbol, ta, sentiment_score=fallback_sentiment_score)
             raise
 
     async def _do_generate(self, symbol: str) -> SignalCandidate:
@@ -272,13 +283,13 @@ def _parse_json(text: str) -> dict:
     return {"action": "HOLD", "confidence": 0.5, "risk_score": "MEDIUM", "reasoning": "parse error"}
 
 
-def _build_deterministic_signal(symbol: str, ta_summary=None) -> SignalCandidate:
+def _build_deterministic_signal(symbol: str, ta_summary=None, sentiment_score: float | None = None) -> SignalCandidate:
     """Deterministic rule-based signal using EMA/RSI/MACD strategy."""
     if ta_summary is not None:
         rule_signal = evaluate_rules(
             ta_summary,
             config={"sentiment_block_threshold": settings.sentiment_block_threshold},
-            sentiment_score=None,
+            sentiment_score=sentiment_score,
         )
         return SignalCandidate(
             signal_id=str(uuid4()),
