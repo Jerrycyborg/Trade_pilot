@@ -84,7 +84,14 @@ class StrategySettings:
 
     @property
     def use_ai(self) -> bool:
-        return bool(self.anthropic_api_key)
+        # Explicit USE_AI=false always disables Claude (token discipline)
+        explicit = os.getenv("USE_AI", "").lower()
+        if explicit == "false":
+            return False
+        if explicit == "true":
+            return bool(self.anthropic_api_key)
+        # Default: use AI only when key set AND not prefer_deterministic
+        return bool(self.anthropic_api_key) and not self.prefer_deterministic
 
 
 settings = StrategySettings()
