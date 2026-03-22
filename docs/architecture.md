@@ -26,3 +26,14 @@ Execution-to-portfolio boundary:
 - `fills`: source of truth for portfolio position changes
 - `execution_events`: downstream event/audit feed for portfolio and monitoring consumers
 - read interfaces exposed by `execution-service`: `/v1/orders/{order_id}/fills`, `/v1/fills`, `/v1/execution/events`
+
+## Alpha Edge Features (2026-03-22)
+
+### Sentiment Gate
+`evaluate_rules()` accepts `sentiment_score`. If BUY and score < `SENTIMENT_BLOCK_THRESHOLD` (default -0.3),
+action overrides to HOLD. Configured via env var. Wired in ai_pipeline and deterministic path.
+
+### Earnings Blackout
+`earnings_calendar.is_earnings_blackout(symbol)` uses yfinance to detect proximity to earnings.
+Fails open (never blocks on error). BUY signals suppressed to HOLD within `EARNINGS_BLACKOUT_DAYS` (default 2).
+Wired in strategy-service generate_signal() and autonomy-orchestrator policy payload.
