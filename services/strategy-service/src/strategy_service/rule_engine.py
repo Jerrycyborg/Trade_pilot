@@ -22,6 +22,7 @@ def evaluate_rules(
     ta: TASummary,
     config: dict | None = None,
     sentiment_score: float | None = None,
+    bars: list | None = None,
 ) -> RuleSignal:
     """
     Deterministic Dual-EMA Momentum + RSI + MACD strategy.
@@ -101,6 +102,26 @@ def evaluate_rules(
             + f" | Sentiment gate blocked BUY (score={sentiment_score:.2f} < {sentiment_block_threshold})"
         )
         confidence = min(confidence, 0.55)
+
+    if bars is not None and len(bars) >= 2:
+        from market_data.indicators import detect_patterns
+
+        slice_ = bars[-3:] if len(bars) >= 3 else bars
+        opens_ = [b.open for b in slice_]
+        highs_ = [b.high for b in slice_]
+        lows_ = [b.low for b in slice_]
+        closes_ = [b.close for b in slice_]
+        patterns = detect_patterns(opens_, highs_, lows_, closes_)
+        bullish_patterns = {"hammer", "bullish_engulfing"}
+        bearish_patterns = {"shooting_star", "bearish_engulfing"}
+        matched_bullish = bullish_patterns & set(patterns)
+        matched_bearish = bearish_patterns & set(patterns)
+        if action == "BUY" and matched_bullish:
+            confidence = min(0.95, confidence + 0.10)
+            reasoning = reasoning + f" | Pattern: {sorted(matched_bullish)}"
+        elif action == "SELL" and matched_bearish:
+            confidence = min(0.95, confidence + 0.10)
+            reasoning = reasoning + f" | Pattern: {sorted(matched_bearish)}"
 
     size_pct = _SIZE_BY_RISK[risk_score]
 

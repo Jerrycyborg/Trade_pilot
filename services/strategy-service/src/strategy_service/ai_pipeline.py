@@ -58,6 +58,7 @@ class AISignalPipeline:
             if settings.fallback_to_deterministic:
                 logger.info("Falling back to deterministic signal for %s", symbol)
                 ta = None
+                bars = None
                 try:
                     fetcher = get_fetcher(self._market_settings)
                     bars = fetcher.fetch(symbol, period_days=self._market_settings.default_lookback_days)
@@ -77,12 +78,12 @@ class AISignalPipeline:
                         fallback_sentiment_score = resp.json().get("score")
                 except Exception:
                     pass
-                return _build_deterministic_signal(symbol, ta, sentiment_score=fallback_sentiment_score)
+                return _build_deterministic_signal(symbol, ta, sentiment_score=fallback_sentiment_score, bars=bars)
             raise
 
     async def _do_generate(self, symbol: str) -> SignalCandidate:
         # 1. Fetch market data + compute TA
-        ta_summary = await self._get_ta_summary(symbol)
+        ta_summary, bars = await self._get_ta_summary(symbol)
 
         # 2. Fetch research report (best-effort, 5s timeout)
         research = await self._get_research(symbol)
@@ -95,6 +96,7 @@ class AISignalPipeline:
                 ta_summary,
                 config=rule_config,
                 sentiment_score=sentiment.score if sentiment else None,
+                bars=bars,
             )
             if rule_signal.confidence >= 0.75:
                 ta_contract_pre: Optional[TechnicalSummaryContract] = None
@@ -180,14 +182,14 @@ class AISignalPipeline:
             bars = fetcher.fetch(symbol, period_days=self._market_settings.default_lookback_days)
             if not bars:
                 logger.warning("No market data bars returned for %s", symbol)
-                return None
-            return build_ta_summary(symbol, bars, data_source=type(fetcher).__name__)
+                return None, None
+            return build_ta_summary(symbol, bars, data_source=type(fetcher).__name__), bars
         except DataUnavailableError as exc:
             logger.warning("Market data unavailable for %s: %s", symbol, exc)
-            return None
+            return None, None
         except Exception as exc:
             logger.error("TA summary error for %s: %s", symbol, exc)
-            return None
+            return None, None
 
     async def _get_research(self, symbol: str) -> Optional[ResearchReport]:
         try:
@@ -283,13 +285,19 @@ def _parse_json(text: str) -> dict:
     return {"action": "HOLD", "confidence": 0.5, "risk_score": "MEDIUM", "reasoning": "parse error"}
 
 
-def _build_deterministic_signal(symbol: str, ta_summary=None, sentiment_score: float | None = None) -> SignalCandidate:
+def _build_deterministic_signal(
+    symbol: str,
+    ta_summary=None,
+    sentiment_score: float | None = None,
+    bars: list | None = None,
+) -> SignalCandidate:
     """Deterministic rule-based signal using EMA/RSI/MACD strategy."""
     if ta_summary is not None:
         rule_signal = evaluate_rules(
             ta_summary,
             config={"sentiment_block_threshold": settings.sentiment_block_threshold},
             sentiment_score=sentiment_score,
+            bars=bars,
         )
         return SignalCandidate(
             signal_id=str(uuid4()),

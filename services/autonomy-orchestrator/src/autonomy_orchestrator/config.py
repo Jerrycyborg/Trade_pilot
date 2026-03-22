@@ -28,6 +28,10 @@ class OrchestratorSettings:
     approval_gateway_url: str = field(default_factory=lambda: os.getenv("APPROVAL_GATEWAY_URL", "http://localhost:8010"))
     notification_service_url: str = field(default_factory=lambda: os.getenv("NOTIFICATION_SERVICE_URL", "http://localhost:8009"))
     internal_api_key: str = field(default_factory=lambda: os.getenv("INTERNAL_API_KEY", ""))
+    monthly_loss_limit_usd: float = field(default_factory=lambda: float(os.getenv("MONTHLY_LOSS_LIMIT_USD", "10.0")))
+    monthly_profit_target_usd: float = field(default_factory=lambda: float(os.getenv("MONTHLY_PROFIT_TARGET_USD", "20.0")))
+    take_profit_target_usd: float = field(default_factory=lambda: float(os.getenv("TAKE_PROFIT_TARGET_USD", "20.0")))
+    wallet_size_usd: float = field(default_factory=lambda: float(os.getenv("WALLET_SIZE_USD", "50.0")))
 
 
 settings = OrchestratorSettings()

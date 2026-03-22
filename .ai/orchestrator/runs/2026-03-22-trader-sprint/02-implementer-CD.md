@@ -1,0 +1,8 @@
+- Updated [`libs/market_data/src/market_data/config.py`](/home/jarvis/Documents/Personal Projects/Trade_pilot/libs/market_data/src/market_data/config.py) to add `timeframe` and `intraday_minutes` settings sourced from `MARKET_DATA_TIMEFRAME` and `INTRADAY_MINUTES`.
+- Updated [`libs/market_data/src/market_data/fetcher.py`](/home/jarvis/Documents/Personal Projects/Trade_pilot/libs/market_data/src/market_data/fetcher.py) to add `AlpacaFetcher.fetch_intraday()`, stock/crypto intraday helpers, a `fetch_bars()` convenience wrapper, and `get_fetcher()` docstring notes for timeframe-driven usage.
+- Updated [`.env.example`](/home/jarvis/Documents/Personal Projects/Trade_pilot/.env.example) to document the optional intraday environment variables.
+- Added [`tests/market_data/test_intraday_fetcher.py`](/home/jarvis/Documents/Personal Projects/Trade_pilot/tests/market_data/test_intraday_fetcher.py) with 2 new tests covering Alpaca intraday minute-bar fetching and the no-key intraday fallback path.
+- Test count added in this part: 2 tests.
+- Verification run: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/market_data/test_intraday_fetcher.py -q --tb=short` -> `2 passed, 1 warning`.
+- Deviation: `fetch_bars` was not exported from `libs/market_data/src/market_data/__init__.py` because that file was outside the allowed edit list in the implementer brief.
+- Deviation: Sprint D notification wiring was not implemented because its required files (`orchestrator/main.py`, related orchestrator surface) were explicitly marked off-limits for this parallel part.

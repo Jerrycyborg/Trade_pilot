@@ -19,6 +19,12 @@ class MarketDataSettings:
     default_lookback_days: int = field(
         default_factory=lambda: int(os.getenv("MARKET_DATA_LOOKBACK_DAYS", "60"))
     )
+    timeframe: str = field(
+        default_factory=lambda: os.getenv("MARKET_DATA_TIMEFRAME", "daily")
+    )
+    intraday_minutes: int = field(
+        default_factory=lambda: int(os.getenv("INTRADAY_MINUTES", "15"))
+    )
 
     force_yahoo: bool = field(
         default_factory=lambda: os.getenv("MARKET_DATA_PROVIDER", "").lower() in ("yahoo", "yfinance")
