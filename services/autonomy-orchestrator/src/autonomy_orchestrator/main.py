@@ -546,7 +546,7 @@ async def run_cycle() -> dict[str, object]:
                     continue
                 _day_trades().record_open(signal.symbol)
                 _register_stop_loss(
-                    signal.symbol, order, price_bars, side=str(signal.candidate_action)
+                    signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
                 )
                 _register_take_profit(signal, order)
                 weekly_spend += float(order.get("amount_usd", 0.0))
@@ -794,6 +794,17 @@ async def _account_equity() -> float | None:
     return None
 
 
+def _side_of(action: object) -> str:
+    """The order side as a plain string.
+
+    CandidateAction is a (str, Enum), and in Python 3.11 str() on such a member
+    yields "CandidateAction.SELL" rather than "SELL". Storing that made every
+    downstream direction check compare against a value that could never match,
+    so shorts silently kept using long-position logic.
+    """
+    return str(getattr(action, "value", action)).upper()
+
+
 def _order_accepted(order: dict[str, object]) -> bool:
     """Whether the broker actually took the order.
 
@@ -878,7 +889,7 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
             target_price=target_price,
             position_id=str(order.get("order_id", signal.symbol)),
             qty=qty,
-            side=str(signal.candidate_action),
+            side=_side_of(signal.candidate_action),
             target_gain_usd=settings.take_profit_target_usd,
             created_at=datetime.now(timezone.utc),
         )
@@ -1129,7 +1140,7 @@ async def _process_approvals() -> None:
             continue
         _day_trades().record_open(signal.symbol)
         _register_stop_loss(
-            signal.symbol, order, price_bars, side=str(signal.candidate_action)
+            signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
         )
         _register_take_profit(signal, order)
         weekly_spend += float(order.get("amount_usd", 0.0))

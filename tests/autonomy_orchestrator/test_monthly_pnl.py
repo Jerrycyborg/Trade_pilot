@@ -263,3 +263,38 @@ class TestShortDirection:
 
         assert main.state.monthly_realized_loss_usd == 40.0
         assert main.state.monthly_realized_profit_usd == 0.0
+
+
+class TestSideIsStoredAsAPlainValue:
+    """Regression: the direction fix was inert.
+
+    CandidateAction is a (str, Enum) and Python 3.11's str() on such a member
+    yields "CandidateAction.SELL", not "SELL". Every direction check compared
+    against a value that could never match, so shorts kept using long logic —
+    and the earlier tests missed it because they built records from a literal
+    "SELL" string rather than from the enum the orchestrator actually passes.
+    """
+
+    def test_enum_member_reduces_to_its_value(self) -> None:
+        from contracts import CandidateAction
+
+        assert main._side_of(CandidateAction.SELL) == "SELL"
+        assert main._side_of(CandidateAction.BUY) == "BUY"
+        # The bug this guards against:
+        assert str(CandidateAction.SELL) != "SELL"
+
+    def test_plain_strings_pass_through(self) -> None:
+        assert main._side_of("SELL") == "SELL"
+        assert main._side_of("buy") == "BUY"
+
+    def test_a_short_registered_from_the_enum_books_a_loss(self) -> None:
+        """End to end through the type the orchestrator actually supplies."""
+        from contracts import CandidateAction
+
+        record = StopLossRecord(
+            symbol="AAPL", entry_price=100.0, stop_price=103.0, position_id="p",
+            qty=10.0, side=main._side_of(CandidateAction.SELL),
+            created_at=datetime.now(timezone.utc),
+        )
+        # Short at 100, closed at 104 — a $40 loss, not a $40 gain.
+        assert main._realized_pnl(record, 104.0) == -40.0
