@@ -304,12 +304,18 @@ def _compute_sharpe(equity_curve: list[float], periods_per_year: float) -> float
     return (mean / std) * math.sqrt(periods_per_year)
 
 
+# An all-winning run has no losses to divide by. Infinity is the mathematically
+# honest answer but is not JSON-serialisable, and FastAPI raises rather than
+# encode it — so a run with no losing trades would fail the whole request.
+PROFIT_FACTOR_NO_LOSSES = 999.99
+
+
 def _profit_factor(trades: list[TradeRecord]) -> float:
     gains = sum(t.pnl for t in trades if t.pnl > 0)
     losses = -sum(t.pnl for t in trades if t.pnl < 0)
     if losses <= 0:
-        return float("inf") if gains > 0 else 0.0
-    return gains / losses
+        return PROFIT_FACTOR_NO_LOSSES if gains > 0 else 0.0
+    return min(gains / losses, PROFIT_FACTOR_NO_LOSSES)
 
 
 def _max_drawdown(equity_curve: list[float]) -> float:
@@ -364,9 +370,7 @@ def run_backtest(request: BacktestRequest, bars: list[OHLCVBar]) -> BacktestResu
             if net.trades
             else 0.0
         ),
-        profit_factor=(
-            round(profit_factor, 4) if profit_factor != float("inf") else float("inf")
-        ),
+        profit_factor=round(profit_factor, 4),
         avg_trade_pnl=(
             round(sum(t.pnl for t in net.trades) / len(net.trades), 2) if net.trades else 0.0
         ),
@@ -405,7 +409,7 @@ def run_cost_sensitivity(
                 sharpe_ratio=round(
                     _compute_sharpe(run.equity_curve, periods_per_year_for(variant, bars)), 4
                 ),
-                profit_factor=round(min(_profit_factor(run.trades), 1e6), 4),
+                profit_factor=round(_profit_factor(run.trades), 4),
                 total_trades=len(run.trades),
                 total_costs=round(run.total_costs, 2),
             )

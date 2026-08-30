@@ -33,6 +33,9 @@ class StopLossRecord(BaseModel):
     stop_price: float  # entry_price - atr * multiplier
     position_id: str
     qty: float = 0.0
+    side: str = "BUY"
+    """Direction the position was opened in. P&L on a short inverts, so booking
+    it long-only turns a losing short into a recorded profit."""
     created_at: datetime
 
 
@@ -78,9 +81,18 @@ class StopLossMonitor:
                     # A stop we cannot evaluate is a risk we cannot see.
                     logger.warning("StopLossMonitor: no price for %s — stop not evaluated", symbol)
                     continue
-                if float(price) <= record.stop_price:
+                # A short's stop sits above its entry and fires on a rise.
+                # Testing only `price <= stop` leaves every short stop inert.
+                is_short = record.side.upper() == "SELL"
+                breached = (
+                    float(price) >= record.stop_price
+                    if is_short
+                    else float(price) <= record.stop_price
+                )
+                if breached:
                     logger.warning(
-                        "StopLossMonitor: stop triggered for %s (price=%.4f <= stop=%.4f)",
+                        "StopLossMonitor: stop triggered for %s %s (price=%.4f, stop=%.4f)",
+                        record.side,
                         symbol,
                         price,
                         record.stop_price,

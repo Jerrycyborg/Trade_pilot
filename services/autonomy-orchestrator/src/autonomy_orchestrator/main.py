@@ -545,7 +545,9 @@ async def run_cycle() -> dict[str, object]:
                     )
                     continue
                 _day_trades().record_open(signal.symbol)
-                _register_stop_loss(signal.symbol, order, price_bars)
+                _register_stop_loss(
+                    signal.symbol, order, price_bars, side=str(signal.candidate_action)
+                )
                 _register_take_profit(signal, order)
                 weekly_spend += float(order.get("amount_usd", 0.0))
                 state.weekly_notional_used = weekly_spend
@@ -826,7 +828,12 @@ def _fetch_price_bars(symbol: str) -> list[Any] | None:
         return None
 
 
-def _register_stop_loss(symbol: str, order: dict[str, object], price_bars: list[Any] | None) -> None:
+def _register_stop_loss(
+    symbol: str,
+    order: dict[str, object],
+    price_bars: list[Any] | None,
+    side: str = "BUY",
+) -> None:
     if state.stop_loss_monitor is None:
         return
 
@@ -851,6 +858,7 @@ def _register_stop_loss(symbol: str, order: dict[str, object], price_bars: list[
             stop_price=stop_price,
             position_id=str(order.get("order_id", symbol)),
             qty=float(order.get("qty", 0.0)),
+            side=side,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -870,6 +878,7 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
             target_price=target_price,
             position_id=str(order.get("order_id", signal.symbol)),
             qty=qty,
+            side=str(signal.candidate_action),
             target_gain_usd=settings.take_profit_target_usd,
             created_at=datetime.now(timezone.utc),
         )
@@ -878,6 +887,10 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
 
 def _realized_pnl(record, exit_price: float | None) -> float | None:
     """P&L on a closed position, or None when it cannot be determined.
+
+    Direction matters. A short profits when price falls, so the long-only
+    formula inverts its sign: a losing short would be booked as monthly profit
+    and could carry the account straight past the loss limit.
 
     A record registered with qty=0 means "close whatever is open at the broker",
     so the size is unknown here and no P&L can be attributed.
@@ -888,7 +901,8 @@ def _realized_pnl(record, exit_price: float | None) -> float | None:
     entry = float(getattr(record, "entry_price", 0.0) or 0.0)
     if qty <= 0.0 or entry <= 0.0:
         return None
-    return (exit_price - entry) * qty
+    direction = -1.0 if str(getattr(record, "side", "BUY")).upper() == "SELL" else 1.0
+    return (exit_price - entry) * qty * direction
 
 
 async def _run_stop_loss_check() -> None:
@@ -1114,7 +1128,9 @@ async def _process_approvals() -> None:
             )
             continue
         _day_trades().record_open(signal.symbol)
-        _register_stop_loss(signal.symbol, order, price_bars)
+        _register_stop_loss(
+            signal.symbol, order, price_bars, side=str(signal.candidate_action)
+        )
         _register_take_profit(signal, order)
         weekly_spend += float(order.get("amount_usd", 0.0))
         state.weekly_notional_used = weekly_spend

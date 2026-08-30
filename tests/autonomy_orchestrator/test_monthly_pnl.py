@@ -206,3 +206,60 @@ class TestMonthlyLimitGate:
         self._with_limit(monkeypatch, 100.0)
         main.state.monthly_realized_loss_usd = 40.0
         assert main._monthly_limits_ok() is True
+
+
+class TestShortDirection:
+    """A short profits when price falls. Booking it with the long formula turns
+    a losing short into recorded profit, which can carry an account straight
+    past the monthly loss limit."""
+
+    def _record(self, side: str, entry: float = 100.0, qty: float = 10.0):
+        return StopLossRecord(
+            symbol="AAPL",
+            entry_price=entry,
+            stop_price=entry * 1.03,
+            position_id="p",
+            qty=qty,
+            side=side,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    def test_losing_short_is_a_loss_not_a_profit(self) -> None:
+        # Short at 100, price rose to 104 — a $40 loss on 10 shares.
+        assert main._realized_pnl(self._record("SELL"), 104.0) == -40.0
+
+    def test_winning_short_is_a_profit(self) -> None:
+        assert main._realized_pnl(self._record("SELL"), 96.0) == 40.0
+
+    def test_long_direction_is_unchanged(self) -> None:
+        assert main._realized_pnl(self._record("BUY"), 104.0) == 40.0
+        assert main._realized_pnl(self._record("BUY"), 96.0) == -40.0
+
+    def test_records_default_to_long(self) -> None:
+        """Existing persisted records carry no side; long is the safe default
+        because it books an adverse move as a loss rather than a gain."""
+        record = StopLossRecord(
+            symbol="AAPL", entry_price=100.0, stop_price=97.0,
+            position_id="p", qty=10.0, created_at=datetime.now(timezone.utc),
+        )
+        assert record.side == "BUY"
+        assert main._realized_pnl(record, 96.0) == -40.0
+
+    @pytest.mark.asyncio
+    async def test_a_losing_short_counts_toward_the_monthly_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monitor = StopLossMonitor("http://localhost:8002", "k")
+        monitor.register(self._record("SELL"))
+
+        async def _exit(record):
+            return True
+
+        monitor._trigger_exit = _exit  # type: ignore[method-assign]
+        main.state.stop_loss_monitor = monitor
+        monkeypatch.setattr(main, "_price_source", lambda: Prices({"AAPL": 104.0}))
+
+        await main._run_stop_loss_check()
+
+        assert main.state.monthly_realized_loss_usd == 40.0
+        assert main.state.monthly_realized_profit_usd == 0.0

@@ -66,12 +66,32 @@ class TestFillPricing:
         assert buy.fill_price > 200.0
         assert sell.fill_price < 200.0
 
-    def test_unpriceable_symbol_falls_back_rather_than_crashing(
+    def test_unpriceable_symbol_is_rejected_not_filled_at_a_placeholder(
         self, broker: PaperBroker
     ) -> None:
+        """Filling at an invented price writes fictitious cash, exposure and P&L
+        into the ledger — the exact thing this simulator exists to stop."""
         result = broker.place_order(_order(symbol="NOPRICE", qty=1))
-        assert result.status == OrderStatus.ACCEPTED
-        assert result.fill_price == 100.0
+        assert result.status == OrderStatus.REJECTED
+        assert result.rejection_reason == "no_market_price"
+
+    def test_unpriceable_order_leaves_the_ledger_untouched(
+        self, broker: PaperBroker
+    ) -> None:
+        broker.place_order(_order(symbol="NOPRICE", qty=1))
+        assert broker.get_positions() == []
+        assert broker.get_account().cash == 10_000.0
+
+    def test_close_is_refused_when_the_symbol_cannot_be_priced(
+        self, broker: PaperBroker, prices: Prices
+    ) -> None:
+        """Better to leave the position open and visible than to book an exit at
+        a made-up price."""
+        broker.place_order(_order(qty=5))
+        del prices.book["AAPL"]
+
+        assert broker.close_position("AAPL") is False
+        assert broker.get_positions()[0].qty == 5
 
 
 class TestPositionAccounting:

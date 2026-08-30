@@ -25,6 +25,9 @@ class TakeProfitRecord(BaseModel):
     target_price: float
     position_id: str
     qty: float = 0.0
+    side: str = "BUY"
+    """Direction the position was opened in. P&L on a short inverts, so booking
+    it long-only turns a losing short into a recorded profit."""
     target_gain_usd: float = 20.0
     created_at: datetime
 
@@ -56,9 +59,17 @@ class TakeProfitMonitor:
                         "TakeProfitMonitor: no price for %s — target not evaluated", symbol
                     )
                     continue
-                if float(price) >= record.target_price:
+                # A short takes profit as price falls, not rises.
+                is_short = record.side.upper() == "SELL"
+                reached = (
+                    float(price) <= record.target_price
+                    if is_short
+                    else float(price) >= record.target_price
+                )
+                if reached:
                     logger.info(
-                        "Take-profit triggered for %s: price=%.2f >= target=%.2f",
+                        "Take-profit triggered for %s %s: price=%.2f, target=%.2f",
+                        record.side,
                         symbol,
                         price,
                         record.target_price,

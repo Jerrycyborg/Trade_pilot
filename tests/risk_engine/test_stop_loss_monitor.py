@@ -108,3 +108,31 @@ async def test_failed_close_keeps_the_stop_tracked() -> None:
 
     assert triggered == []
     assert monitor.get("AAPL") is not None
+
+
+@pytest.mark.asyncio
+async def test_short_stop_fires_on_a_rise_not_a_fall() -> None:
+    """A short's stop sits above its entry. Testing only `price <= stop` left
+    every short position with a stop that could never fire."""
+    monitor = StopLossMonitor("http://localhost:8002", "key")
+    monitor.register(
+        StopLossRecord(
+            symbol="AAPL", entry_price=100.0, stop_price=103.0,
+            position_id="p", qty=10.0, side="SELL",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)):
+        assert await monitor.check_all(_make_prices(101.0)) == []      # still inside
+        assert await monitor.check_all(_make_prices(104.0)) == ["AAPL"]  # breached
+
+
+@pytest.mark.asyncio
+async def test_long_stop_is_unaffected_by_the_direction_change() -> None:
+    monitor = StopLossMonitor("http://localhost:8002", "key")
+    monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
+
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)):
+        assert await monitor.check_all(_make_prices(98.0)) == []
+        assert await monitor.check_all(_make_prices(94.0)) == ["AAPL"]

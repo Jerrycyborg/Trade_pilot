@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_QTY = 1000
 _SUPPORTED_SIDES = frozenset({"BUY", "SELL"})
-# Used only when no market price can be resolved for a symbol at all.
-_FALLBACK_FILL_PRICE = 100.0
 
 
 @dataclass
@@ -132,19 +130,20 @@ class PaperBroker:
             logger.warning("PaperBroker: price lookup failed for %s: %s", symbol, exc)
             return None
 
-    def _fill_price(self, symbol: str, side: str) -> tuple[float, bool]:
-        """Fill price including slippage. Returns (price, priced_from_market)."""
+    def _fill_price(self, symbol: str, side: str) -> float | None:
+        """Fill price including slippage, or None when the market cannot be priced.
+
+        There is no placeholder. Booking a fill at an invented price writes a
+        fictitious cash balance, exposure and P&L into the ledger — precisely
+        what this simulator exists to stop.
+        """
         price = self.mark_price(symbol)
         if price is None or price <= 0:
-            logger.warning(
-                "PaperBroker: no market price for %s — filling at $%.2f placeholder",
-                symbol,
-                _FALLBACK_FILL_PRICE,
-            )
-            return _FALLBACK_FILL_PRICE, False
+            logger.warning("PaperBroker: no market price for %s — refusing to fill", symbol)
+            return None
         # Slippage always works against the trader.
         drift = price * (self._slippage_bps / 10_000.0)
-        return round(price + drift if side == "BUY" else price - drift, 6), True
+        return round(price + drift if side == "BUY" else price - drift, 6)
 
     # ------------------------------------------------------------------
     # Orders
@@ -170,7 +169,9 @@ class PaperBroker:
         # accepted fill instead of rejecting a malformed order.
         if side not in _SUPPORTED_SIDES:
             return self._reject(f"unsupported_side: {request.side!r}")
-        price, _priced = self._fill_price(symbol, side)
+        price = self._fill_price(symbol, side)
+        if price is None:
+            return self._reject("no_market_price")
         qty = float(request.qty)
         notional = price * qty
 
@@ -313,7 +314,13 @@ class PaperBroker:
                 return False
             qty = abs(position.qty) if not units else min(abs(units), abs(position.qty))
             side = "SELL" if position.qty > 0 else "BUY"
-            price, _ = self._fill_price(symbol, side)
+            price = self._fill_price(symbol, side)
+            if price is None:
+                logger.error(
+                    "PaperBroker: cannot price %s — close refused, position left open",
+                    symbol,
+                )
+                return False
             if side == "SELL":
                 self._apply_sell(symbol, qty, price)
             else:

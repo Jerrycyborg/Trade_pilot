@@ -371,3 +371,32 @@ class TestEquityCurveMarking:
         result = run_backtest(_request(), _flat_bars(120))
         assert result.total_trades == 0
         assert result.max_drawdown_pct == 0.0
+
+
+class TestProfitFactorIsSerialisable:
+    def test_all_winning_run_returns_a_finite_value(self) -> None:
+        """float('inf') is the honest answer but FastAPI refuses to encode it,
+        so an all-winning backtest failed the whole request."""
+        from backtest_service.engine import PROFIT_FACTOR_NO_LOSSES, _profit_factor
+
+        trades = [
+            TradeRecord(
+                entry_date=datetime(2024, 1, 2, tzinfo=timezone.utc),
+                exit_date=datetime(2024, 1, 3, tzinfo=timezone.utc),
+                symbol="TEST", action="BUY_SELL",
+                entry_price=100.0, exit_price=110.0, pnl=10.0, pnl_pct=0.1,
+            )
+        ]
+        assert _profit_factor(trades) == PROFIT_FACTOR_NO_LOSSES
+        assert math.isfinite(_profit_factor(trades))
+
+    def test_result_profit_factor_survives_json_encoding(self) -> None:
+        import json
+
+        result = run_backtest(_request(), _wavy_bars())
+        json.dumps({"profit_factor": result.profit_factor}, allow_nan=False)
+
+    def test_no_trades_gives_zero(self) -> None:
+        from backtest_service.engine import _profit_factor
+
+        assert _profit_factor([]) == 0.0
