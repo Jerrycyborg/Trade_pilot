@@ -214,3 +214,39 @@ def test_order_history_records_each_fill(broker: PaperBroker) -> None:
     history = broker.get_order_history()
     assert [row["side"] for row in history] == ["BUY", "SELL"]
     assert history[0]["fill_price"] == 200.0
+
+
+class TestSideValidation:
+    """Anything not exactly BUY used to fall through to the SELL branch, so a
+    typo opened a simulated short and reported an accepted fill."""
+
+    @pytest.mark.parametrize("side", ["BUYY", "SEL", "LONG", "", "HOLD", "EXIT"])
+    def test_unsupported_side_is_rejected(self, broker: PaperBroker, side: str) -> None:
+        result = broker.place_order(
+            ExecutionOrderRequest(
+                signal_id="s", symbol="AAPL", side=side, qty=1, order_type="MARKET"
+            )
+        )
+        assert result.status == OrderStatus.REJECTED
+        assert "unsupported_side" in result.rejection_reason
+
+    def test_rejected_side_does_not_touch_the_ledger(self, broker: PaperBroker) -> None:
+        broker.place_order(
+            ExecutionOrderRequest(
+                signal_id="s", symbol="AAPL", side="BUYY", qty=5, order_type="MARKET"
+            )
+        )
+        assert broker.get_positions() == []
+        assert broker.get_account().cash == 10_000.0
+        assert broker.get_order_history() == []
+
+    @pytest.mark.parametrize("side", ["buy", "Buy", "sell", "SELL"])
+    def test_supported_sides_are_case_insensitive(
+        self, broker: PaperBroker, side: str
+    ) -> None:
+        result = broker.place_order(
+            ExecutionOrderRequest(
+                signal_id="s", symbol="AAPL", side=side, qty=1, order_type="MARKET"
+            )
+        )
+        assert result.status == OrderStatus.ACCEPTED

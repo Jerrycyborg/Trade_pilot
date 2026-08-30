@@ -10,6 +10,18 @@ SERVICE_FILE="$SYSTEMD_DIR/tp-nginx.service"
 LAN_IP_SCRIPT="$ROOT_DIR/scripts/get-lan-ip.sh"
 NGINX_BIN="$(which nginx 2>/dev/null || true)"
 
+# Keys are injected into the generated config so nginx supplies them on the
+# server side. The browser must never hold ADMIN_API_KEY: anyone with it can
+# toggle the kill switch and live mode.
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a; source "$ROOT_DIR/.env"; set +a
+fi
+: "${INTERNAL_API_KEY:=}"
+: "${ADMIN_API_KEY:=}"
+if [[ -z "$INTERNAL_API_KEY" ]]; then
+  echo "warning: INTERNAL_API_KEY is unset — proxied API calls will 401." >&2
+fi
+
 if [[ -z "$NGINX_BIN" ]]; then
   echo "nginx is not installed."
   echo "Install it first, then rerun this script."
@@ -74,71 +86,71 @@ http {
     location /api/policy/ {
       proxy_pass http://localhost:8001/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/execution/ {
       proxy_pass http://localhost:8002/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/strategy/ {
       proxy_pass http://localhost:8003/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/portfolio/ {
       proxy_pass http://localhost:8004/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/research/ {
       proxy_pass http://localhost:8005/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/audit/ {
       proxy_pass http://localhost:8006/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/orchestrator/ {
       proxy_pass http://localhost:8007/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/sentiment/ {
       proxy_pass http://localhost:8008/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/notification/ {
       proxy_pass http://localhost:8009/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
 
     location /api/approval/ {
       proxy_pass http://localhost:8010/;
       proxy_set_header Host \$host;
-      proxy_set_header X-Internal-Key \$http_x_internal_key;
-      proxy_set_header X-Admin-Key \$http_x_admin_key;
+      proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
+      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
     }
   }
 }

@@ -279,3 +279,82 @@ class TestSettings:
         assert loaded.enabled is False
         assert loaded.max_day_trades == 10
         assert loaded.equity_threshold_usd == 0.0
+
+
+class TestOpenPositionReservation:
+    """A position opened today becomes a day trade the moment it closes today.
+
+    Counting only completed day trades let the guard approve an entry it could
+    not safely exit — the one guarantee it exists to provide.
+    """
+
+    def _day_trade(self, tracker: DayTradeTracker, symbol: str, day: int = 5) -> None:
+        tracker.record_open(symbol, _at(15, day=day))
+        tracker.record_close(symbol, _at(19, day=day))
+
+    def test_open_positions_count_against_the_budget(
+        self, tracker: DayTradeTracker
+    ) -> None:
+        self._day_trade(tracker, "A")
+        self._day_trade(tracker, "B")
+        tracker.record_open("C", _at(15))  # still open today
+
+        decision = tracker.check_entry(10_000.0, now=_at(20))
+        assert decision.day_trades_used == 2
+        assert decision.open_today == 1
+        assert decision.day_trades_remaining == 0
+
+    def test_entry_blocked_when_opens_fill_the_budget(
+        self, tracker: DayTradeTracker
+    ) -> None:
+        """Two done plus two open today is already four if all close today."""
+        self._day_trade(tracker, "A")
+        self._day_trade(tracker, "B")
+        tracker.record_open("C", _at(15))
+        tracker.record_open("D", _at(15))
+
+        decision = tracker.check_entry(10_000.0, now=_at(20))
+        assert decision.allowed is False
+        assert "open today" in decision.reason
+
+    def test_positions_opened_on_an_earlier_session_do_not_reserve(
+        self, tracker: DayTradeTracker
+    ) -> None:
+        """An overnight hold cannot become today's day trade."""
+        tracker.record_open("OLD", _at(15, day=4))
+        self._day_trade(tracker, "A")
+        self._day_trade(tracker, "B")
+
+        decision = tracker.check_entry(10_000.0, now=_at(20, day=5))
+        assert decision.open_today == 0
+        assert decision.allowed is True
+
+    def test_closing_a_position_frees_its_reservation(
+        self, tracker: DayTradeTracker
+    ) -> None:
+        self._day_trade(tracker, "A")
+        tracker.record_open("B", _at(15))
+        tracker.record_open("C", _at(15))
+        assert tracker.check_entry(10_000.0, now=_at(20)).allowed is False
+
+        # Closing B tomorrow makes it an overnight hold, not a day trade.
+        tracker.record_close("B", _at(15, day=6))
+        assert tracker.check_entry(10_000.0, now=_at(20, day=6)).allowed is True
+
+    def test_status_exposes_the_reservation(self, tracker: DayTradeTracker) -> None:
+        self._day_trade(tracker, "A")
+        tracker.record_open("B", _at(15))
+        status = tracker.status(now=_at(20))
+
+        assert status["day_trades_used"] == 1
+        assert status["open_today"] == 1
+        assert status["committed"] == 2
+        assert status["day_trades_remaining"] == 1
+
+    def test_large_account_still_exempt_with_open_positions(
+        self, tracker: DayTradeTracker
+    ) -> None:
+        self._day_trade(tracker, "A")
+        tracker.record_open("B", _at(15))
+        tracker.record_open("C", _at(15))
+        assert tracker.check_entry(100_000.0, now=_at(20)).allowed is True

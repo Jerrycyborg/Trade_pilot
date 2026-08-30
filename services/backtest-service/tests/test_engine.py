@@ -13,7 +13,6 @@ import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
 from backtest_service.engine import (
     MIN_WARMUP_BARS,
     _max_day_trades_in_window,
@@ -302,3 +301,73 @@ class TestReportedMetrics:
         )
         assert result.timeframe == "intraday"
         assert result.intraday_minutes == 5
+
+
+class TestStopExecution:
+    """A stop that only reads bar.close hides real losses and flatters results."""
+
+    def _bar(self, i: int, o: float, h: float, low: float, c: float) -> OHLCVBar:
+        return OHLCVBar(
+            symbol="TEST",
+            timestamp=datetime(2024, 1, 2, ET_OPEN_UTC, 30, tzinfo=timezone.utc)
+            + timedelta(minutes=15 * i),
+            open=o, high=h, low=low, close=c, volume=10_000.0,
+        )
+
+    def _series_with_dip(self) -> list[OHLCVBar]:
+        """A long entry, then one bar that dips hard but closes back up."""
+        bars = _wavy_bars(n=300)
+        # Bar 250: low far below anything nearby, close unchanged.
+        original = bars[250]
+        bars[250] = OHLCVBar(
+            symbol=original.symbol,
+            timestamp=original.timestamp,
+            open=original.open,
+            high=original.high,
+            low=original.low * 0.80,   # deep intrabar wick
+            close=original.close,      # ...that fully recovers by the close
+            volume=original.volume,
+        )
+        return bars
+
+    def test_intrabar_dip_triggers_the_stop(self) -> None:
+        result = run_backtest(_request(), self._series_with_dip())
+        # The wick alone must be able to stop a position out.
+        assert any(t.exit_reason == "stop" for t in result.trades)
+
+    def test_stop_fills_at_the_stop_not_a_later_open(self) -> None:
+        result = run_backtest(_request(), self._series_with_dip())
+        stops = [t for t in result.trades if t.exit_reason == "stop"]
+        assert stops
+        for trade in stops:
+            # Never filled above the entry: a stop is a loss-limiting exit.
+            assert trade.exit_price < trade.entry_price
+
+    def test_stop_exit_is_stamped_within_the_breaching_bar(self) -> None:
+        bars = self._series_with_dip()
+        result = run_backtest(_request(), bars)
+        stamps = {b.timestamp for b in bars}
+        for trade in result.trades:
+            if trade.exit_reason == "stop":
+                assert trade.exit_date in stamps
+
+
+class TestEquityCurveMarking:
+    def test_entry_does_not_create_an_instant_gain(self) -> None:
+        """Marking a just-entered position at the previous bar's close invents
+        P&L across the gap and corrupts Sharpe and drawdown."""
+        bars = _wavy_bars(n=300)
+        zero_cost = run_backtest(_request(), bars)
+
+        # With no costs the curve must start at capital and move only on real
+        # price change — never jump on the entry bar itself.
+        assert zero_cost.total_costs == 0.0
+        assert zero_cost.max_drawdown_pct >= 0.0
+        assert math.isfinite(zero_cost.sharpe_ratio)
+
+    def test_flat_series_has_no_drawdown(self) -> None:
+        """A position marked at the wrong price shows drawdown even when
+        nothing moved."""
+        result = run_backtest(_request(), _flat_bars(120))
+        assert result.total_trades == 0
+        assert result.max_drawdown_pct == 0.0

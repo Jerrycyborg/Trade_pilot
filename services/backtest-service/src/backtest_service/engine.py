@@ -140,9 +140,20 @@ def _simulate(
                 entry_stamp = next_bar.timestamp
                 stop_price = quote - stop_distance
         else:
-            hit_stop = bar.close <= stop_price
-            if signal == "SELL" or hit_stop:
+            # A stop executes the moment price trades through it, not at the
+            # next bar's open: checking only bar.close lets a bar that dipped
+            # below the stop and recovered pass as untouched, which hides real
+            # losses and flatters the result.
+            hit_stop = bar.low <= stop_price
+            if hit_stop:
+                # Filled at the stop, or at the open if the bar gapped straight
+                # through it — a gap fills worse than the stop, never better.
+                quote = min(stop_price, bar.open)
+                exit_stamp = bar.timestamp
+            elif signal == "SELL":
                 quote = next_bar.open
+                exit_stamp = next_bar.timestamp
+            if hit_stop or signal == "SELL":
                 fill = quote * (1 - cost_per_side)
                 cost = position * quote * cost_per_side
                 total_costs += cost
@@ -154,7 +165,7 @@ def _simulate(
                 trades.append(
                     TradeRecord(
                         entry_date=entry_stamp or bar.timestamp,
-                        exit_date=next_bar.timestamp,
+                        exit_date=exit_stamp,
                         symbol=request.symbol,
                         action="BUY_SELL",
                         entry_price=round(entry_price, 4),
@@ -165,7 +176,7 @@ def _simulate(
                         exit_reason="stop" if hit_stop else "signal",
                         same_day=(
                             entry_stamp is not None
-                            and _session_date(entry_stamp) == _session_date(next_bar.timestamp)
+                            and _session_date(entry_stamp) == _session_date(exit_stamp)
                         ),
                     )
                 )
@@ -175,7 +186,11 @@ def _simulate(
                 entry_stamp = None
                 stop_price = 0.0
 
-        equity_curve.append(equity + position * bars[i].close)
+        # Mark at next_bar.open, the point in time this iteration ends at.
+        # Valuing a position entered at next_bar.open using bars[i].close — a
+        # price from before the entry — invents a gain or loss across any gap
+        # and corrupts both Sharpe and max drawdown.
+        equity_curve.append(equity + position * next_bar.open)
 
     # Close anything still open at the final bar.
     if position > 0.0:

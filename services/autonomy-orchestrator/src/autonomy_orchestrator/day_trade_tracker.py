@@ -98,6 +98,9 @@ class PDTDecision:
     day_trades_used: int = 0
     day_trades_remaining: int = 0
     equity: float | None = None
+    open_today: int = 0
+    """Positions opened this session and still open. Each becomes a day trade
+    if it closes today, so each must be reserved against the budget."""
 
 
 class DayTradeTracker:
@@ -152,6 +155,12 @@ class DayTradeTracker:
         with self._lock:
             return self._count_locked(now)
 
+    def open_today(self, now: datetime | None = None) -> int:
+        """Positions opened in the current session that are still open."""
+        today = session_date(now)
+        with self._lock:
+            return sum(1 for opened in self._open_sessions.values() if opened == today)
+
     def check_entry(
         self, equity: float | None, now: datetime | None = None
     ) -> PDTDecision:
@@ -165,11 +174,17 @@ class DayTradeTracker:
             return PDTDecision(True, "pdt_disabled", equity=equity)
 
         used = self.day_trades_used(now)
-        remaining = max(0, self._settings.max_day_trades - used)
+        # A position opened today becomes a day trade the moment it closes
+        # today — and it may have to, on a stop. Counting only completed day
+        # trades would let the guard approve an entry it cannot safely exit,
+        # which is the one guarantee it exists to provide.
+        open_today = self.open_today(now)
+        committed = used + open_today
+        remaining = max(0, self._settings.max_day_trades - committed)
 
         if equity is not None and equity >= self._settings.equity_threshold_usd:
             return PDTDecision(
-                True, "above_pdt_equity_threshold", used, remaining, equity
+                True, "above_pdt_equity_threshold", used, remaining, equity, open_today
             )
 
         if equity is None:
@@ -178,27 +193,40 @@ class DayTradeTracker:
                 "$%.0f threshold", self._settings.equity_threshold_usd
             )
 
-        if used >= self._settings.max_day_trades:
+        if committed >= self._settings.max_day_trades:
+            detail = (
+                f"{used} taken"
+                + (f" + {open_today} open today" if open_today else "")
+                + f" of {self._settings.max_day_trades} in {ROLLING_SESSIONS} sessions"
+            )
             return PDTDecision(
                 False,
-                f"pdt_day_trade_limit ({used}/{self._settings.max_day_trades} "
-                f"in {ROLLING_SESSIONS} sessions)",
+                f"pdt_day_trade_limit ({detail})",
                 used,
                 0,
                 equity,
+                open_today,
             )
-        return PDTDecision(True, "within_day_trade_budget", used, remaining, equity)
+        return PDTDecision(
+            True, "within_day_trade_budget", used, remaining, equity, open_today
+        )
 
     def status(self, now: datetime | None = None) -> dict[str, object]:
         with self._lock:
             recent = dict(sorted(self._day_trades.items()))
             used = self._count_locked(now)
             open_positions = dict(self._open_sessions)
+        today = session_date(now)
+        open_today = sum(1 for opened in open_positions.values() if opened == today)
         return {
             "enabled": self._settings.enabled,
             "day_trades_used": used,
+            "open_today": open_today,
+            "committed": used + open_today,
             "max_day_trades": self._settings.max_day_trades,
-            "day_trades_remaining": max(0, self._settings.max_day_trades - used),
+            "day_trades_remaining": max(
+                0, self._settings.max_day_trades - used - open_today
+            ),
             "equity_threshold_usd": self._settings.equity_threshold_usd,
             "rolling_sessions": ROLLING_SESSIONS,
             "by_session": recent,

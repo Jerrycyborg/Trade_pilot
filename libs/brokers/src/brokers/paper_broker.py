@@ -30,6 +30,7 @@ from .base import BrokerResult
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_QTY = 1000
+_SUPPORTED_SIDES = frozenset({"BUY", "SELL"})
 # Used only when no market price can be resolved for a symbol at all.
 _FALLBACK_FILL_PRICE = 100.0
 
@@ -164,7 +165,12 @@ class PaperBroker:
             return self._reject("qty_limit_exceeded")
 
         side = str(request.side).upper()
-        price, _priced = self._fill_price(symbol, "BUY" if side == "BUY" else "SELL")
+        # Anything that is not exactly BUY used to fall through to the SELL
+        # branch, so a typo like "BUYY" opened a simulated short and reported an
+        # accepted fill instead of rejecting a malformed order.
+        if side not in _SUPPORTED_SIDES:
+            return self._reject(f"unsupported_side: {request.side!r}")
+        price, _priced = self._fill_price(symbol, side)
         qty = float(request.qty)
         notional = price * qty
 

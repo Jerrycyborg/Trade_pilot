@@ -314,21 +314,40 @@ def status() -> dict[str, object]:
 
 @app.get("/v1/orchestrator/client-config")
 async def client_config(request: Request) -> dict[str, str]:
-    """Return dashboard client keys. Only served to requests from localhost or LAN."""
+    """Dashboard client configuration.
+
+    This used to return INTERNAL_API_KEY and ADMIN_API_KEY to any caller whose
+    source address looked local. Behind a reverse proxy — nginx, or
+    scripts/serve_dashboard.py — every request appears to come from localhost,
+    so anyone who could reach the dashboard could read the admin key and toggle
+    the kill switch or live mode.
+
+    Keys are now injected by the proxy on the server side and are not returned
+    here. Set EXPOSE_CLIENT_KEYS=true only if you run an older proxy that
+    cannot inject them, and understand that it hands the admin key to every
+    visitor of the dashboard.
+    """
     import os
+
+    if os.getenv("EXPOSE_CLIENT_KEYS", "false").lower() != "true":
+        return {"keysInjectedByProxy": "true"}
+
     client_host = getattr(request.client, "host", "")
-    # Allow localhost and RFC-1918 private ranges only
     allowed = (
-        client_host in ("127.0.0.1", "::1", "localhost") or
-        client_host.startswith("192.168.") or
-        client_host.startswith("10.") or
-        client_host.startswith("172.")
+        client_host in ("127.0.0.1", "::1", "localhost")
+        or client_host.startswith("192.168.")
+        or client_host.startswith("10.")
+        or client_host.startswith("172.")
     )
     if not allowed:
         raise HTTPException(status_code=403, detail="not allowed")
+    logger.warning(
+        "EXPOSE_CLIENT_KEYS=true — serving API keys to %s. Anyone who can reach "
+        "the dashboard can read the admin key.", client_host,
+    )
     return {
         "internalKey": os.getenv("INTERNAL_API_KEY", ""),
-        "adminKey":    os.getenv("ADMIN_API_KEY", ""),
+        "adminKey": os.getenv("ADMIN_API_KEY", ""),
     }
 
 
@@ -993,6 +1012,26 @@ async def _process_approvals() -> None:
     weekly_spend = await _weekly_spend()
     if not _monthly_limits_ok():
         return
+
+    # Deferred approvals open positions just like the direct path, so they are
+    # subject to the same day-trade budget. Skipping this let an account at its
+    # limit keep opening through the approval route.
+    pdt = _day_trades().check_entry(await _account_equity())
+    if not pdt.allowed:
+        logger.warning("Approved orders held back: %s", pdt.reason)
+        for row in approved_rows:
+            await _audit(
+                AuditEvent(
+                    event_type="signal.rejected",
+                    symbol=str(row.get("symbol", "")),
+                    signal_id=str(row.get("signal_id", "")),
+                    decision="REJECT",
+                    reasoning=pdt.reason,
+                    metadata={"guard": "pattern_day_trader", "path": "approval"},
+                )
+            )
+        return
+
     for row in approved_rows:
         signal = SignalCandidate.model_validate(row["metadata"]["signal"])
         price_bars = _fetch_price_bars(signal.symbol)
@@ -1020,6 +1059,7 @@ async def _process_approvals() -> None:
             ))
             continue
         order = await _submit_order(signal, risk, config, portfolio_state)
+        _day_trades().record_open(signal.symbol)
         _register_stop_loss(signal.symbol, order, price_bars)
         _register_take_profit(signal, order)
         weekly_spend += float(order.get("amount_usd", 0.0))
