@@ -135,6 +135,7 @@ class EtoroBroker:
         position_id: str,
         instrument_id: int,
         units: float | None = None,
+        symbol: str | None = None,
     ) -> bool:
         """Close an open position by positionId. units_to_deduct=None = full close."""
         try:

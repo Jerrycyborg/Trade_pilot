@@ -263,14 +263,43 @@ class PaperBroker:
         # Market orders fill immediately in simulation, so there is nothing to cancel.
         return False
 
+    def _resolve_symbol(self, position_id: str, symbol: str | None) -> str | None:
+        with self._lock:
+            positions = set(self._state.positions)
+            orders = list(self._state.orders)
+        if symbol and symbol.upper() in positions:
+            return symbol.upper()
+        candidate = str(position_id).upper()
+        if candidate in positions:
+            return candidate
+        for order in reversed(orders):
+            if str(order.get("order_id", "")).upper() == candidate:
+                held = str(order.get("symbol", "")).upper()
+                if held in positions:
+                    return held
+        return symbol.upper() if symbol else None
+
     def close_position(
         self,
         position_id: str,
         instrument_id: int | str = 0,
         units: float | None = None,
+        symbol: str | None = None,
     ) -> bool:
-        """Flatten (or partially reduce) a position. ``position_id`` is the symbol."""
-        symbol = str(position_id).upper()
+        """Flatten (or partially reduce) a position.
+
+        Callers identify a position inconsistently: the monitors register the
+        broker's order id, while a manual close passes the symbol. Prefer an
+        explicit symbol, then try position_id as a symbol, then fall back to
+        looking the order id up in our own ledger.
+        """
+        resolved = self._resolve_symbol(position_id, symbol)
+        if resolved is None:
+            logger.info(
+                "PaperBroker: could not resolve a position for %s / %s", position_id, symbol
+            )
+            return False
+        symbol = resolved
         with self._lock:
             position = self._state.positions.get(symbol)
             if position is None or position.qty == 0:

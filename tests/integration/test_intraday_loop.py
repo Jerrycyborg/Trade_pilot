@@ -264,3 +264,66 @@ class TestStopLossAtIntradayResolution:
 
         assert await monitor.check_all(stub_prices) == []
         assert monitor.get(SYMBOL) is not None  # still tracked, not silently dropped
+
+
+class TestClosePathReachesTheBroker:
+    """Regression: execution-service resolved an eToro instrument id before every
+    close, so a paper close raised broker_does_not_support_instrument_resolution
+    and a stop-loss could never actually exit the position."""
+
+    def _close_module(self, broker: PaperBroker, monkeypatch: pytest.MonkeyPatch):
+        import execution_service.broker as broker_module
+
+        monkeypatch.setattr(broker_module, "broker", broker)
+        return broker_module
+
+    def test_close_by_symbol_flattens_the_position(
+        self, broker: PaperBroker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        broker.place_order(
+            ExecutionOrderRequest(
+                signal_id="s", symbol=SYMBOL, side="BUY", qty=4, order_type="MARKET"
+            )
+        )
+        module = self._close_module(broker, monkeypatch)
+
+        assert module.close_position(position_id=SYMBOL, symbol=SYMBOL) is True
+        assert broker.get_positions() == []
+
+    def test_close_by_broker_order_id_still_finds_the_position(
+        self, broker: PaperBroker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The monitors register the broker's order id, not the symbol."""
+        result = broker.place_order(
+            ExecutionOrderRequest(
+                signal_id="s", symbol=SYMBOL, side="BUY", qty=4, order_type="MARKET"
+            )
+        )
+        module = self._close_module(broker, monkeypatch)
+
+        assert (
+            module.close_position(
+                position_id=result.external_order_id, symbol=SYMBOL
+            )
+            is True
+        )
+        assert broker.get_positions() == []
+
+    def test_partial_close_reduces_the_position(
+        self, broker: PaperBroker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        broker.place_order(
+            ExecutionOrderRequest(
+                signal_id="s", symbol=SYMBOL, side="BUY", qty=10, order_type="MARKET"
+            )
+        )
+        module = self._close_module(broker, monkeypatch)
+
+        assert module.close_position(position_id=SYMBOL, symbol=SYMBOL, units=4) is True
+        assert broker.get_positions()[0].qty == 6
+
+    def test_close_without_a_position_reports_failure(
+        self, broker: PaperBroker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        module = self._close_module(broker, monkeypatch)
+        assert module.close_position(position_id=SYMBOL, symbol=SYMBOL) is False
