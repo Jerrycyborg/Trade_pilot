@@ -100,11 +100,13 @@
     "tests/integration/__pycache__/conftest.cpython-311-pytest-9.0.2.pyc": "db3f489ed2a29dbec12bb848568c4251dcbd4f8c3ced8ee7a0608a67fb5b6b1e",
     "tests/integration/__pycache__/test_execution_service_portfolio_boundary.cpython-311-pytest-9.0.2.pyc": "6b23f6ff6a6b4535d45ce5ba400b01352b70d5e6be061db692cf6723042bd050",
     "tests/integration/__pycache__/test_execution_service_postgres.cpython-311-pytest-9.0.2.pyc": "3bcd8ec496ac111229ac4a9a17b1520b595cc2f4fbcc7fd824f18464da46a20c",
+    "tests/integration/__pycache__/test_intraday_loop.cpython-311-pytest-9.0.2.pyc": "231b7c7e6c6cb252eee9240cfcb25e262678132e4d2723f975ced7d95dd60782",
     "tests/integration/__pycache__/test_milestone1_acceptance.cpython-311-pytest-9.0.2.pyc": "320c67d4ecc57b444c0eb8faeca3ec002e7e53e93b491de72cbdc4773d345f1c",
     "tests/integration/__pycache__/test_milestone1_flow.cpython-311-pytest-9.0.2.pyc": "7b1a25cad4178d796ff2920b838b84683cf52dbfcf64979237c42d6af1e8c9c3",
     "tests/integration/conftest.py": "5a38b99af0088253354d0f68f70fe5cf936d441b78e4d0fcbdaebcd1088330b4",
     "tests/integration/test_execution_service_portfolio_boundary.py": "66215c829d7dc74bb26413d535b25545280fda4deeabe84aa4f82bb6deade2b4",
     "tests/integration/test_execution_service_postgres.py": "4df4cba6d7bc435062e79634bf4c648e66494e34a4d920d2018a0a7f9d92fcd1",
+    "tests/integration/test_intraday_loop.py": "36bf559a31b12067d68d6a96c5a019826b66e12128eb17a2fcc00b3ecedf701c",
     "tests/integration/test_milestone1_acceptance.py": "d8e3be8599a8439758d0fc71e2e87468d2eadb972c92b0fb498a90a586a3e095",
     "tests/integration/test_milestone1_flow.py": "e2d0b9354f356124a065406c098a22917b4270e1c5d96fd933782f1a2c9505a1",
     "tests/market_data/__pycache__/test_adx_patterns.cpython-311-pytest-9.0.2.pyc": "120175059587e357689971644da8b163c0503b62baa6064380887c3907d00ea9",
@@ -143,5 +145,5 @@
     "tests/strategy_service/test_strategy_service.py": "4dee834197dd1804dcf3f7fca048f92b83ccd2af3438ef2a82b487321435ca93",
     "tests/test_aahp.py": "050335656f8f8a4904450c79d744fb82c373b04ebd49693104fcb2079ab515bc"
   },
-  "generated_at": "2026-08-30T11:30:51.640842+00:00"
+  "generated_at": "2026-08-30T11:36:19.277216+00:00"
 }
