@@ -88,6 +88,69 @@ curl -X POST http://localhost:8010/v1/approvals/{approval_id}/reject \
 
 Tier 2 approvals auto-expire after 15 minutes (configurable in policy-baseline.yaml).
 
+## Intraday Troubleshooting
+
+### Check what resolution the loop is actually running at
+
+```bash
+curl http://localhost:8007/v1/orchestrator/realtime
+```
+
+`"intraday": false` means the loop is on daily bars regardless of what you
+intended — check `MARKET_DATA_TIMEFRAME` in `.env` and restart the orchestrator.
+
+### "degrading to DAILY bars" in the orchestrator log
+
+Intraday data could not be fetched from any provider, so indicators and stops
+silently changed meaning. The strategy is no longer intraday. Causes, in order
+of likelihood:
+
+1. No network route to the provider — run `uv run python scripts/verify_intraday.py`
+2. `INTRADAY_MINUTES` set to a resolution Yahoo does not serve (it offers
+   1, 2, 5, 15, 30, 60, 90; anything else snaps down to the nearest)
+3. `INTRADAY_LOOKBACK_DAYS` beyond the provider's window — Yahoo caps 1-minute
+   history at 7 days and most other intraday resolutions at 60
+4. Alpaca rate limit or expired keys
+
+### No trades are being placed
+
+Check the audit log for the rejection reason first:
+
+```bash
+curl "http://localhost:8006/v1/audit/logs?event_type=signal.rejected&limit=20"
+```
+
+- `stale_data` — no price could be resolved. This is the system failing closed
+  by design. Check `/v1/orchestrator/realtime` for cached price ages, and raise
+  `MAX_PRICE_AGE_SECONDS` only if the delay is expected (e.g. Yahoo's ~15 min).
+- `market_closed` / `outside_trading_hours` — expected outside the session.
+  Note the Yahoo path uses a weekday heuristic that does not know about market
+  holidays; Alpaca's clock does.
+- `max_size_exceeded` — `max_position_size_pct` in `config/policy-baseline.yaml`.
+
+### Stops are firing late
+
+The stop-loss and take-profit monitors poll. Under intraday they default to
+every 60 seconds; a stop can overshoot by at most one interval. Tighten with
+`STOP_LOSS_CHECK_INTERVAL_MINUTES` (fractions are accepted — `0.5` is 30s).
+With Alpaca, set `STREAMING_ENABLED=true` so each check reads a cached
+streamed price rather than making an HTTP call.
+
+### Paper broker state
+
+Paper positions live in `PAPER_STATE_PATH` (default
+`./paper-broker-state.json`) and survive restarts. To start a fresh run:
+
+```bash
+rm -f paper-broker-state.json
+```
+
+Inspect current paper P&L:
+
+```bash
+curl http://localhost:8002/v1/account
+```
+
 ## Emergency Procedures
 
 ### Service crash

@@ -71,6 +71,26 @@ Production-minded AI trading stack: strategy proposes, policy approves, executio
 | `VOLUME_CONFIRM_ENABLED` | No | Require above-avg volume for BUY (default true) |
 | `STRATEGY_WATCHLIST` | No | Comma-separated symbols to trade |
 
+### Intraday / real-time
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MARKET_DATA_TIMEFRAME` | `daily` | Set to `intraday` to trade on intraday bars |
+| `INTRADAY_MINUTES` | `15` | Bar size. Yahoo serves 1, 2, 5, 15, 30, 60, 90 |
+| `INTRADAY_LOOKBACK_DAYS` | `5` | Bar history for indicators (Yahoo caps 1m at 7 days) |
+| `MARKET_DATA_PROVIDER` | auto | `yahoo` forces Yahoo; blank uses Alpaca when keys are set |
+| `STREAMING_ENABLED` | `false` | Real-time websocket bar stream (Alpaca only) |
+| `STREAM_SYMBOLS` | allowlist | Symbols to stream |
+| `STREAM_SYMBOL_LIMIT` | `30` | Cap on concurrent subscriptions (free IEX feed) |
+| `ALPACA_FEED` | `iex` | `sip` on a paid Alpaca data plan |
+| `MAX_PRICE_AGE_SECONDS` | `120` | Older prices are treated as unusable |
+| `ORCHESTRATOR_INTERVAL_SECONDS` | — | Cycle cadence; overrides the minutes setting |
+| `STOP_LOSS_CHECK_INTERVAL_MINUTES` | 1 intraday / 5 daily | Stop-loss poll interval |
+| `TAKE_PROFIT_CHECK_INTERVAL_MINUTES` | 1 intraday / 5 daily | Take-profit poll interval |
+| `PAPER_STARTING_CASH` | `100000` | Paper broker opening cash |
+| `PAPER_SLIPPAGE_BPS` | `2` | Simulated slippage, always against the trader |
+| `PAPER_STATE_PATH` | `./paper-broker-state.json` | Paper position ledger |
+
 ## Getting eToro API Keys
 
 1. Log into your eToro account at etoro.com
@@ -104,6 +124,87 @@ uv run uvicorn approval_gateway.main:app --port 8010
 # Open dashboard
 open apps/dashboard/index.html
 ```
+
+## Real-Time Intraday Trading
+
+Two data paths are supported. Both run the same trading loop.
+
+| | Alpaca | Yahoo |
+|---|---|---|
+| API key | free account required | none |
+| Intraday bars | real-time | delayed, typically ~15 min |
+| Websocket stream | yes | no |
+| Market calendar | authoritative (holidays, half-days) | weekday heuristic only |
+| Paper fills | real Alpaca paper account | local simulator |
+
+### Yahoo (no signup)
+
+```bash
+MARKET_DATA_PROVIDER=yahoo
+MARKET_DATA_TIMEFRAME=intraday
+INTRADAY_MINUTES=15
+BROKER=paper
+```
+
+Yahoo's intraday feed is delayed, so this is intraday but not truly real-time.
+It is the right setting for validating the pipeline before committing to a data
+provider. Prices are resolved by polling.
+
+### Alpaca (real-time)
+
+```bash
+ALPACA_API_KEY=...
+ALPACA_SECRET_KEY=...
+ALPACA_PAPER=true
+MARKET_DATA_PROVIDER=          # blank — auto-selects Alpaca
+MARKET_DATA_TIMEFRAME=intraday
+INTRADAY_MINUTES=5
+STREAMING_ENABLED=true
+BROKER=alpaca
+```
+
+Keys come from the Alpaca dashboard (alpaca.markets → Paper Trading → API
+Keys). With `STREAMING_ENABLED=true` the orchestrator subscribes to 1-minute
+bars over a websocket and serves prices from an in-memory cache, so stops are
+evaluated against a price that is seconds old rather than one HTTP call away.
+
+### Verify before trading
+
+Unit tests cannot prove that *this host* can reach a data provider. Run the
+preflight on the machine that will trade:
+
+```bash
+uv run python scripts/verify_intraday.py
+uv run python scripts/verify_intraday.py --symbols AAPL,MSFT --stream 30
+```
+
+It checks configuration, the market session, that intraday bars really arrive
+at the configured resolution, and that prices are fresh enough for the policy
+service to accept. It exits non-zero if anything fails.
+
+### Observing the loop
+
+```bash
+curl http://localhost:8007/v1/orchestrator/realtime
+```
+
+Reports the resolution the loop is actually running at: timeframe, provider,
+cycle and risk-check cadence, stream state, and the age of every cached price.
+Check this first if trades are being rejected — a `degrading to DAILY bars`
+error in the orchestrator log means intraday data could not be fetched and the
+strategy is no longer running at intraday resolution.
+
+### How prices are resolved
+
+Each price lookup tries three tiers, freshest first:
+
+1. the websocket stream's in-memory cache (sub-second, Alpaca only)
+2. the provider's latest-trade endpoint (one HTTP call)
+3. the close of the most recent bar
+
+Every result carries a timestamp. If no tier can supply a price, the strategy
+reports the data as **stale** rather than fresh, and the policy service rejects
+the trade. The system fails closed: no price means no order.
 
 ## Enabling Live Mode (Step-by-Step)
 
