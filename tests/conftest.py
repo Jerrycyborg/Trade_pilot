@@ -69,12 +69,26 @@ class StubPriceSource:
 _active_prices: StubPriceSource | None = None
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_price_source: exercise the real RealtimePriceSource instead of the "
+        "suite-wide stub (for tests of the price resolver itself)",
+    )
+
+
 @pytest.fixture(autouse=True)
-def _offline_market_data(monkeypatch: pytest.MonkeyPatch, tmp_path) -> StubPriceSource:
+def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> StubPriceSource:
     """Keep every test off the network and off the developer's paper ledger."""
     global _active_prices
     source = StubPriceSource()
     _active_prices = source
+    monkeypatch.setenv("PAPER_STATE_PATH", str(tmp_path / "paper-broker-state.json"))
+    monkeypatch.setenv("PAPER_SLIPPAGE_BPS", "0")
+    if request.node.get_closest_marker("real_price_source"):
+        # Tests of the resolver itself inject their own fetcher, so they never
+        # reach the network either.
+        return source
     monkeypatch.setattr(
         "market_data.realtime.RealtimePriceSource.get_price",
         lambda _self, symbol: source.get_price(symbol),
@@ -83,8 +97,6 @@ def _offline_market_data(monkeypatch: pytest.MonkeyPatch, tmp_path) -> StubPrice
         "market_data.realtime.RealtimePriceSource.get_snapshot",
         lambda _self, symbol: source.get_snapshot(symbol),
     )
-    monkeypatch.setenv("PAPER_STATE_PATH", str(tmp_path / "paper-broker-state.json"))
-    monkeypatch.setenv("PAPER_SLIPPAGE_BPS", "0")
     return source
 
 
