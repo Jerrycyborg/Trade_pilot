@@ -10,9 +10,12 @@ SERVICE_FILE="$SYSTEMD_DIR/tp-nginx.service"
 LAN_IP_SCRIPT="$ROOT_DIR/scripts/get-lan-ip.sh"
 NGINX_BIN="$(which nginx 2>/dev/null || true)"
 
-# Keys are injected into the generated config so nginx supplies them on the
-# server side. The browser must never hold ADMIN_API_KEY: anyone with it can
-# toggle the kill switch and live mode.
+# INTERNAL_API_KEY is injected server-side so it never reaches the browser.
+# ADMIN_API_KEY is NOT injected — it is only forwarded when the caller supplies
+# it. This server has no client authentication and is reachable from the LAN,
+# so injecting the admin key would hand kill-switch and live-mode rights to
+# anyone who can open the dashboard. Admin actions must carry the key
+# explicitly, which is the right bar for a kill switch.
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a; source "$ROOT_DIR/.env"; set +a
 fi
@@ -87,70 +90,70 @@ http {
       proxy_pass http://localhost:8001/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/execution/ {
       proxy_pass http://localhost:8002/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/strategy/ {
       proxy_pass http://localhost:8003/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/portfolio/ {
       proxy_pass http://localhost:8004/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/research/ {
       proxy_pass http://localhost:8005/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/audit/ {
       proxy_pass http://localhost:8006/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/orchestrator/ {
       proxy_pass http://localhost:8007/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/sentiment/ {
       proxy_pass http://localhost:8008/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/notification/ {
       proxy_pass http://localhost:8009/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
 
     location /api/approval/ {
       proxy_pass http://localhost:8010/;
       proxy_set_header Host \$host;
       proxy_set_header X-Internal-Key "$INTERNAL_API_KEY";
-      proxy_set_header X-Admin-Key "$ADMIN_API_KEY";
+      proxy_set_header X-Admin-Key \$http_x_admin_key;
     }
   }
 }

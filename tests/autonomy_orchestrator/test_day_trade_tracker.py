@@ -382,3 +382,35 @@ class TestBrokerRejectionIsNotAnOpen:
         import autonomy_orchestrator.main as main
 
         assert main._order_accepted({}) is True
+
+
+class TestBudgetIsRecheckedPerEntry:
+    """A cycle can contain several signals. Checking the budget once for the
+    whole batch let every signal through when only the first fitted."""
+
+    def test_each_accepted_open_consumes_budget(self, tracker: DayTradeTracker) -> None:
+        now = _at(15)
+        assert tracker.check_entry(10_000.0, now=now).allowed is True
+
+        tracker.record_open("A", now)
+        tracker.record_open("B", now)
+        # Two opens today against a max of three leaves one.
+        assert tracker.check_entry(10_000.0, now=now).day_trades_remaining == 1
+
+        tracker.record_open("C", now)
+        assert tracker.check_entry(10_000.0, now=now).allowed is False
+
+    def test_a_batch_of_signals_cannot_all_pass_one_check(
+        self, tracker: DayTradeTracker
+    ) -> None:
+        """Simulates the cycle loop: re-checking after each open must stop the
+        batch at the budget rather than admitting all of them."""
+        now = _at(15)
+        admitted = 0
+        for symbol in ("A", "B", "C", "D", "E"):
+            if not tracker.check_entry(10_000.0, now=now).allowed:
+                break
+            tracker.record_open(symbol, now)
+            admitted += 1
+
+        assert admitted == tracker.settings.max_day_trades

@@ -9,8 +9,10 @@ proxying, so `load the app locally` needs no nginx install.
     uv run python scripts/serve_dashboard.py           # http://localhost:8080
     uv run python scripts/serve_dashboard.py --port 9000
 
-Keys are read from the environment (or .env) and injected into proxied
-requests, so they never sit in the page source. Development only: it binds
+INTERNAL_API_KEY is read from the environment (or .env) and injected into
+proxied requests, so it never sits in the page source. ADMIN_API_KEY is never
+injected — admin actions such as the kill switch must supply it explicitly,
+since this server does not authenticate its clients. Development only: it binds
 localhost, is single-threaded, and does no origin checking.
 """
 
@@ -99,14 +101,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             method=method,
         )
         request.add_header("Content-Type", self.headers.get("Content-Type", "application/json"))
-        # Inject credentials server-side so they stay out of the page.
-        for header, env_var in (
-            ("X-Internal-Key", "INTERNAL_API_KEY"),
-            ("X-Admin-Key", "ADMIN_API_KEY"),
-        ):
-            value = self.headers.get(header) or os.environ.get(env_var, "")
-            if value:
-                request.add_header(header, value)
+
+        # INTERNAL_API_KEY is injected so it stays out of the page source.
+        # ADMIN_API_KEY is only forwarded when the caller supplies it: this
+        # server has no client authentication, so injecting it would grant
+        # kill-switch and live-mode rights to anyone who can reach the port.
+        internal = self.headers.get("X-Internal-Key") or os.environ.get(
+            "INTERNAL_API_KEY", ""
+        )
+        if internal:
+            request.add_header("X-Internal-Key", internal)
+        if admin := self.headers.get("X-Admin-Key"):
+            request.add_header("X-Admin-Key", admin)
         if idempotency := self.headers.get("Idempotency-Key"):
             request.add_header("Idempotency-Key", idempotency)
 
@@ -153,6 +159,7 @@ def main() -> int:
         print(f"Proxying /api/<service>/ to {len(SERVICE_PORTS)} local services")
         if not os.environ.get("INTERNAL_API_KEY"):
             print("  warning: INTERNAL_API_KEY not set — authenticated calls will 401")
+        print("  admin key is NOT injected; admin actions must send X-Admin-Key")
         print("Ctrl-C to stop.")
         try:
             httpd.serve_forever()

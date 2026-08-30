@@ -472,10 +472,11 @@ async def run_cycle() -> dict[str, object]:
         signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
         portfolio_state = await _portfolio_state()
 
-        # Pattern-day-trader budget. Checked once per cycle rather than per
-        # signal: the equity lookup is a network call and the budget cannot
-        # change mid-cycle, since it only moves when a position is closed.
-        pdt = _day_trades().check_entry(await _account_equity())
+        # Pattern-day-trader budget. The equity lookup is a network call so it
+        # is done once, but the decision is re-taken per signal: every accepted
+        # entry increments open_today, which the budget is gated on.
+        account_equity = await _account_equity()
+        pdt = _day_trades().check_entry(account_equity)
         summary["pdt"] = {
             "allowed": pdt.allowed,
             "reason": pdt.reason,
@@ -492,6 +493,7 @@ async def run_cycle() -> dict[str, object]:
 
         for signal in signals:
             summary["signals"] += 1
+            pdt = _day_trades().check_entry(account_equity)
             if not pdt.allowed:
                 summary["rejected"] += 1
                 await _audit(
@@ -718,8 +720,21 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
 async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
     buying_power = float(portfolio_state.get("buying_power", 100_000.0))
     amount_usd = round(buying_power * risk.adjusted_size_pct, 2)
-    qty = max(1, int(amount_usd / 100.0))
     current_price = await _get_quote_price(signal.symbol)
+    # Sizing must divide by the real price. The hardcoded 100.0 that used to be
+    # here was only ever consistent with the old paper broker's flat $100 fill;
+    # against a real quote a $5,000 target in a $500 stock became a $25,000
+    # position. The same bug was fixed in strategy-service's _compute_qty.
+    if current_price is None or current_price <= 0:
+        logger.warning("No quote for %s — refusing to size an order", signal.symbol)
+        return {"status": "REJECTED", "rejection_reason": "no_quote_for_sizing"}
+    qty = int(amount_usd / current_price)
+    if qty < 1:
+        logger.info(
+            "Order for %s sizes to 0 shares ($%.2f at %.4f) — skipping",
+            signal.symbol, amount_usd, current_price,
+        )
+        return {"status": "REJECTED", "rejection_reason": "qty_below_one_share"}
     stop_loss_pct = float(config.get("stop_loss_pct", 0.03))
     take_profit_pct = float(config.get("take_profit_pct", 0.06))
     stop_loss_rate = current_price * (1 - stop_loss_pct) if current_price is not None else None
@@ -745,7 +760,7 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
         response.raise_for_status()
     body = response.json()
     body["amount_usd"] = amount_usd
-    body["entry_price"] = current_price if current_price is not None else round(amount_usd / qty, 4)
+    body["entry_price"] = current_price
     body["qty"] = qty
     body["trading_mode"] = config.get("trading_mode", "demo")
     return body
@@ -1043,7 +1058,8 @@ async def _process_approvals() -> None:
     # Deferred approvals open positions just like the direct path, so they are
     # subject to the same day-trade budget. Skipping this let an account at its
     # limit keep opening through the approval route.
-    pdt = _day_trades().check_entry(await _account_equity())
+    account_equity = await _account_equity()
+    pdt = _day_trades().check_entry(account_equity)
     if not pdt.allowed:
         logger.warning("Approved orders held back: %s", pdt.reason)
         for row in approved_rows:
@@ -1061,6 +1077,10 @@ async def _process_approvals() -> None:
 
     for row in approved_rows:
         signal = SignalCandidate.model_validate(row["metadata"]["signal"])
+        # Re-checked per order: each accepted entry consumes budget.
+        if not _day_trades().check_entry(account_equity).allowed:
+            logger.warning("Remaining approved orders held back: day-trade budget spent")
+            break
         price_bars = _fetch_price_bars(signal.symbol)
         # Re-run risk + policy with current state before executing
         risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
