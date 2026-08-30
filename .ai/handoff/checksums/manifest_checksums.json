@@ -57,6 +57,7 @@
     "services/strategy-service/src/strategy_service/__pycache__/main.cpython-311.pyc": "bf5407cacfcc9145f2d0bd818bf5b6adddadd11f59db8a307ce7b2345a1d360d",
     "services/strategy-service/src/strategy_service/__pycache__/models.cpython-311.pyc": "e6a7536cdf08b236fee21ced2752b8f96be0051c1870f82b81f65d45f74673d9",
     "services/strategy-service/src/strategy_service/__pycache__/rule_engine.cpython-311.pyc": "ad8e0318d3e0d0b383c89908df2e317082173f6d1a169c26f2c1f4a473f9068f",
+    "services/strategy-service/src/strategy_service/__pycache__/scheduler.cpython-311.pyc": "2c880244ed61f43bee3fdbf24effb7dcaf9529e01f3a3b43327ab01fb1175a37",
     "services/strategy-service/src/strategy_service/__pycache__/worker.cpython-311.pyc": "99a5b6f7956d067adf5475d580532c19d3e86d54d841e5ea2d44c1852c70893d",
     "services/strategy-service/src/strategy_service/ai_pipeline.py": "19bab19535686d2f27a2809c53d115f136010754161f06da1ceb152f6e452d17",
     "services/strategy-service/src/strategy_service/config.py": "a8ebd6d035834c9012232de675a5297b89ae268dad9add3569be16676323ae85",
@@ -74,13 +75,13 @@
     "tests/audit_logger/test_audit_logger.py": "65f14855bd3e9ad799aa88a43438e86940c42c13a215bdd6a5a8530418b0c702",
     "tests/audit_logger/test_audit_summary.py": "8e2dd04c0782eb8123342818dfbc12d63c3f0b9242066d8bc2b2276141ad3099",
     "tests/autonomy_orchestrator/__pycache__/test_monthly_limits.cpython-311-pytest-9.0.2.pyc": "60e0d9d682662744e16dd7dc54c0617e594582f49fe3b2b5afc514c920b53ed3",
-    "tests/autonomy_orchestrator/__pycache__/test_monthly_pnl.cpython-311-pytest-9.0.2.pyc": "42bec84fa74501486ac139af066080e26a1ef1dd08f4fee160ba3e5434e5581d",
+    "tests/autonomy_orchestrator/__pycache__/test_monthly_pnl.cpython-311-pytest-9.0.2.pyc": "627141a4a91098c28341792bf4a524a601c2b625b369d208dd2a18f5535ef130",
     "tests/autonomy_orchestrator/__pycache__/test_orchestrator_status.cpython-311-pytest-9.0.2.pyc": "a8dc9496b954ff13bf181c2336266591bf8c23cbc1ce72d6a7fe58b37dbf93a4",
     "tests/autonomy_orchestrator/__pycache__/test_risk_engine.cpython-311-pytest-9.0.2.pyc": "f3afbf4debb361d5e47972226e109b406d0d05c5fa8c74b8a5871384a8af98aa",
     "tests/autonomy_orchestrator/__pycache__/test_stop_loss_wiring.cpython-311-pytest-9.0.2.pyc": "73df8caaf1b554237e6808a23aeadf06ab701edfb1f405efc478a76fcd271d51",
     "tests/autonomy_orchestrator/__pycache__/test_take_profit_monitor.cpython-311-pytest-9.0.2.pyc": "0a874c59ea3b895cb6e0973392834ca00562b36a5fc9146b5b7dfb7a448a1197",
     "tests/autonomy_orchestrator/test_monthly_limits.py": "f73a2d5ace067a7add4ec8a4aa50dc887521902308c55c613e27e1843e7f84e2",
-    "tests/autonomy_orchestrator/test_monthly_pnl.py": "a697769725a288b13d8dc05e35067ad5f58fcaa344be4011651078328f8218d7",
+    "tests/autonomy_orchestrator/test_monthly_pnl.py": "51cb94f9e316d5af4477f886868215551480d3e3fd9c35197414a9e49466ee45",
     "tests/autonomy_orchestrator/test_orchestrator_status.py": "c9130e3ad23e3dcfb0c032e5e4b36a96f1b7a8f044756837b846744dd2442eab",
     "tests/autonomy_orchestrator/test_risk_engine.py": "224553afb3d968ff3996b90017d9fe9a810d5f375f7c127cea454aabaaf6684c",
     "tests/autonomy_orchestrator/test_stop_loss_wiring.py": "170e8bc1b2f6920e73f3ab867fc1a508566df793f5629098231804c5837cfbec",
@@ -147,5 +148,5 @@
     "tests/strategy_service/test_strategy_service.py": "4dee834197dd1804dcf3f7fca048f92b83ccd2af3438ef2a82b487321435ca93",
     "tests/test_aahp.py": "050335656f8f8a4904450c79d744fb82c373b04ebd49693104fcb2079ab515bc"
   },
-  "generated_at": "2026-08-30T11:45:28.764408+00:00"
+  "generated_at": "2026-08-30T12:31:20.236284+00:00"
 }

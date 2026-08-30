@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Run the strategy over historical bars and report whether it made money.
+
+This is the question the rest of the system cannot answer: the live loop will
+happily trade a strategy with no edge. Run this before trusting it with money.
+
+    # 60 days of 15-minute bars, realistic costs
+    uv run python scripts/run_backtest.py --symbols AAPL,MSFT,NVDA
+
+    # daily bars for comparison
+    uv run python scripts/run_backtest.py --symbols AAPL --timeframe daily --days 365
+
+    # how much cost does the edge survive?
+    uv run python scripts/run_backtest.py --symbols AAPL --sweep
+
+Costs default to 5bps spread + 1bps slippage + zero commission, which is
+roughly a liquid US large-cap at a commission-free broker. Set them to match
+YOUR broker and YOUR symbols — a wider spread is the single fastest way for an
+intraday strategy to stop working.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+
+from backtest_service.engine import run_backtest, run_cost_sensitivity
+from backtest_service.main import load_bars
+from backtest_service.models import BacktestRequest
+
+GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+
+
+def _pct(value: float) -> str:
+    colour = GREEN if value > 0 else RED if value < 0 else ""
+    return f"{colour}{value:+.2%}{RESET}"
+
+
+def _report(result) -> None:
+    bar_label = (
+        f"{result.intraday_minutes}-min" if result.timeframe == "intraday" else "daily"
+    )
+    print(f"\n{'=' * 62}")
+    print(f"  {result.symbol}  ({bar_label} bars, {result.bars_count} bars)")
+    print(f"{'=' * 62}")
+
+    if result.total_trades == 0:
+        print(f"  {YELLOW}No trades taken.{RESET} The entry conditions never all held.")
+        print(f"  {DIM}Not a result — there is nothing to evaluate here.{RESET}")
+        return
+
+    print(f"  Net return        {_pct(result.total_return_pct)}")
+    print(f"  Gross (no costs)  {_pct(result.gross_return_pct)}")
+    drag = result.gross_return_pct - result.total_return_pct
+    share = (drag / abs(result.gross_return_pct) * 100) if result.gross_return_pct else 0.0
+    print(
+        f"  Cost drag         {RED}-{drag:.2%}{RESET}  "
+        f"(${result.total_costs:,.0f}, {share:.0f}% of gross)"
+    )
+    print()
+    print(f"  Sharpe            {result.sharpe_ratio:.2f}")
+    print(f"  Max drawdown      {result.max_drawdown_pct:.2%}")
+    print(f"  Profit factor     {result.profit_factor:.2f}")
+    print(f"  Trades            {result.total_trades}   win rate {result.win_rate:.0%}")
+    print(f"  Avg trade         ${result.avg_trade_pnl:,.2f}")
+    print()
+    print(f"  Day trades        {result.day_trades} of {result.total_trades}")
+    if result.max_day_trades_in_5_sessions >= 4:
+        print(
+            f"  {RED}PDT RISK{RESET}          peak {result.max_day_trades_in_5_sessions} "
+            f"day trades in 5 sessions"
+        )
+        print(
+            f"  {DIM}A US margin account under $25k equity is restricted at 4. "
+            f"See PDT_ENABLED.{RESET}"
+        )
+
+    verdict, colour = (
+        ("makes money after costs", GREEN)
+        if result.total_return_pct > 0
+        else ("loses money after costs", RED)
+    )
+    print(f"\n  Verdict: {colour}{verdict}{RESET}")
+    if result.gross_return_pct > 0 >= result.total_return_pct:
+        print(f"  {YELLOW}The edge exists gross but is entirely eaten by costs.{RESET}")
+
+
+def _sweep(request: BacktestRequest, bars) -> None:
+    result = run_cost_sensitivity(request, bars)
+    print(f"\n  Cost sensitivity — {result.symbol}")
+    print(f"  {'spread':>10} {'return':>12} {'sharpe':>9} {'trades':>8} {'costs':>12}")
+    for scenario in result.scenarios:
+        print(
+            f"  {scenario.spread_bps:>7.1f}bps {scenario.total_return_pct:>11.2%} "
+            f"{scenario.sharpe_ratio:>9.2f} {scenario.total_trades:>8} "
+            f"${scenario.total_costs:>10,.0f}"
+        )
+    if result.breakeven_spread_bps is None:
+        print(f"  {RED}Unprofitable at every spread tested, including zero.{RESET}")
+    else:
+        print(
+            f"  Still profitable up to {GREEN}{result.breakeven_spread_bps:.0f}bps{RESET} "
+            f"spread."
+        )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--symbols", default="AAPL,MSFT,NVDA")
+    parser.add_argument("--timeframe", choices=("intraday", "daily"), default="intraday")
+    parser.add_argument("--minutes", type=int, default=15, help="intraday bar size")
+    parser.add_argument("--days", type=int, default=59, help="history to fetch")
+    parser.add_argument("--capital", type=float, default=100_000.0)
+    parser.add_argument("--risk", type=float, default=0.01, help="risk per trade")
+    parser.add_argument("--spread-bps", type=float, default=5.0)
+    parser.add_argument("--slippage-bps", type=float, default=1.0)
+    parser.add_argument("--commission-pct", type=float, default=0.0)
+    parser.add_argument("--sweep", action="store_true", help="run a cost sensitivity ladder")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.CRITICAL)
+    logging.getLogger("yfinance").setLevel(
+        logging.INFO if args.verbose else logging.CRITICAL
+    )
+
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    failures = 0
+
+    for symbol in symbols:
+        request = BacktestRequest(
+            symbol=symbol,
+            timeframe=args.timeframe,
+            intraday_minutes=args.minutes,
+            period_days=args.days,
+            initial_capital=args.capital,
+            risk_per_trade_pct=args.risk,
+            spread_bps=args.spread_bps,
+            slippage_bps=args.slippage_bps,
+            commission_pct=args.commission_pct,
+        )
+        try:
+            bars = load_bars(request)
+        except Exception as exc:
+            print(f"\n  {RED}{symbol}: no data — {exc}{RESET}")
+            failures += 1
+            continue
+
+        try:
+            _report(run_backtest(request, bars))
+            if args.sweep:
+                _sweep(request, bars)
+        except ValueError as exc:
+            print(f"\n  {RED}{symbol}: {exc}{RESET}")
+            failures += 1
+
+    print(
+        f"\n{DIM}Costs assumed: {args.spread_bps}bps spread, {args.slippage_bps}bps "
+        f"slippage, {args.commission_pct:.3%} commission. Past results do not "
+        f"predict future returns.{RESET}\n"
+    )
+    return 1 if failures == len(symbols) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

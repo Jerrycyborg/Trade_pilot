@@ -64,7 +64,9 @@ research-service = { workspace = true }
 backtest-service = { workspace = true }
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# services/*/tests were never collected, so the backtest engine's tests had
+# never run. Both roots are collected now.
+testpaths = ["tests", "services/backtest-service/tests"]
 asyncio_mode = "auto"
 
 [tool.ruff]
