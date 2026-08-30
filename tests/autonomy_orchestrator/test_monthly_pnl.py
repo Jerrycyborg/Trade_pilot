@@ -82,7 +82,7 @@ class TestStopLossAttribution:
         monitor.register(_stop_record(qty=10, entry=100.0, stop=97.0))
 
         async def _exit(record):
-            return None
+            return True  # broker confirmed the close
 
         monitor._trigger_exit = _exit  # type: ignore[method-assign]
         main.state.stop_loss_monitor = monitor
@@ -101,7 +101,7 @@ class TestStopLossAttribution:
         monitor.register(_stop_record(qty=10, entry=100.0, stop=110.0))
 
         async def _exit(record):
-            return None
+            return True  # broker confirmed the close
 
         monitor._trigger_exit = _exit  # type: ignore[method-assign]
         main.state.stop_loss_monitor = monitor
@@ -121,7 +121,7 @@ class TestStopLossAttribution:
         monitor.register(_stop_record(qty=0.0))
 
         async def _exit(record):
-            return None
+            return True  # broker confirmed the close
 
         monitor._trigger_exit = _exit  # type: ignore[method-assign]
         main.state.stop_loss_monitor = monitor
@@ -130,6 +130,30 @@ class TestStopLossAttribution:
         await main._run_stop_loss_check()
 
         assert main.state.monthly_realized_loss_usd == 0.0
+
+
+class TestFailedCloseIsNotBooked:
+    @pytest.mark.asyncio
+    async def test_a_close_that_fails_books_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A broker error used to be reported as a successful exit, booking a
+        realised loss and a day trade for a position that stayed open — and
+        dropping the stop that was watching it."""
+        monitor = StopLossMonitor("http://localhost:8002", "k")
+        monitor.register(_stop_record(qty=10, entry=100.0, stop=97.0))
+
+        async def _failed_exit(record):
+            return False
+
+        monitor._trigger_exit = _failed_exit  # type: ignore[method-assign]
+        main.state.stop_loss_monitor = monitor
+        monkeypatch.setattr(main, "_price_source", lambda: Prices({"AAPL": 96.0}))
+
+        await main._run_stop_loss_check()
+
+        assert main.state.monthly_realized_loss_usd == 0.0
+        assert monitor.get("AAPL") is not None  # still tracked, retried next check
 
 
 class TestTakeProfitAttribution:

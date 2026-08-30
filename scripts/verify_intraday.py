@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -63,13 +64,15 @@ def check_config(settings: MarketDataSettings, report: Report) -> None:
 
     if settings.has_alpaca_credentials:
         report.ok("provider", "Alpaca (real-time)")
-    elif settings.force_yahoo:
+    else:
+        policy_limit = float(os.getenv("POLICY_MAX_DATA_AGE_SECONDS", "30"))
+        source = "Yahoo" if settings.force_yahoo else "Yahoo fallback (no Alpaca keys)"
         report.warn(
             "provider",
-            "Yahoo — intraday data is delayed (typically ~15 min) and cannot stream",
+            f"{source} — delayed ~15 min, which exceeds the policy limit of "
+            f"{policy_limit:.0f}s. Raise POLICY_MAX_DATA_AGE_SECONDS or use Alpaca, "
+            f"or every order will be rejected as stale_data",
         )
-    else:
-        report.warn("provider", "Yahoo fallback — no ALPACA_API_KEY/ALPACA_SECRET_KEY set")
 
     if settings.can_stream:
         report.ok("streaming", "enabled")
@@ -125,18 +128,36 @@ def check_bars(settings: MarketDataSettings, symbols: list[str], report: Report)
 
 
 def check_prices(settings: MarketDataSettings, symbols: list[str], report: Report) -> None:
-    print("\nLive prices")
+    """Freshness against the limit the POLICY SERVICE enforces.
+
+    This is the check that decides whether orders actually get placed. Comparing
+    against MAX_PRICE_AGE_SECONDS (which governs our own cache) rather than
+    POLICY_MAX_DATA_AGE_SECONDS would report a 60-second-old quote as fine while
+    the policy service rejects every order built on it as stale_data.
+    """
+    policy_limit = float(os.getenv("POLICY_MAX_DATA_AGE_SECONDS", "30"))
+    print(f"\nLive prices  (policy rejects anything older than {policy_limit:.0f}s)")
     source = RealtimePriceSource(settings)
-    limit = settings.max_price_age_seconds
+
     for symbol in symbols:
         snapshot = source.get_snapshot(symbol)
         if snapshot is None:
-            report.fail(symbol, "no price from any tier — orders would be blocked as stale")
+            # get_snapshot already refuses anything past our own age limit.
+            report.fail(
+                symbol,
+                f"no usable price — nothing fresher than "
+                f"{settings.price_age_limit_seconds:.0f}s available",
+            )
             continue
+
         age = snapshot.age_seconds()
         detail = f"{snapshot.price:.4f} via {snapshot.source}, {age:.0f}s old"
-        if age > limit:
-            report.warn(symbol, f"{detail} — older than MAX_PRICE_AGE_SECONDS={limit}")
+        if age > policy_limit:
+            report.fail(
+                symbol,
+                f"{detail} — policy rejects this as stale_data, so no order "
+                f"would ever be placed",
+            )
         else:
             report.ok(symbol, detail)
 

@@ -49,7 +49,8 @@ class MarketDataSettings:
     streaming_enabled: bool = field(
         default_factory=lambda: os.getenv("STREAMING_ENABLED", "false").lower() == "true"
     )
-    # A cached price older than this is treated as unusable for a trading decision.
+    # A price older than this is unusable for a trading decision. Read through
+    # price_age_limit_seconds, which scales the default to the timeframe.
     max_price_age_seconds: int = field(
         default_factory=lambda: int(os.getenv("MAX_PRICE_AGE_SECONDS", "120"))
     )
@@ -66,6 +67,19 @@ class MarketDataSettings:
     @property
     def is_intraday(self) -> bool:
         return self.timeframe.lower() == "intraday"
+
+    @property
+    def price_age_limit_seconds(self) -> float:
+        """How old a price may be before it is refused.
+
+        120 seconds suits intraday but would reject every daily bar, which is
+        hours old by construction, so the default scales with the timeframe.
+        An explicit MAX_PRICE_AGE_SECONDS always wins.
+        """
+        explicit = os.getenv("MAX_PRICE_AGE_SECONDS")
+        if explicit:
+            return float(explicit)
+        return 120.0 if self.is_intraday else 86_400.0
 
     @property
     def can_stream(self) -> bool:

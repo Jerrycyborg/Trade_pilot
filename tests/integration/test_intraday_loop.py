@@ -235,7 +235,9 @@ class TestStopLossAtIntradayResolution:
 
         async def _record_exit(record):
             closed.append(record.symbol)
-            broker.close_position(record.symbol)
+            # Returning the broker's own result: the monitor books a day trade
+            # and a realised loss only on a confirmed close.
+            return broker.close_position(record.symbol)
 
         monitor._trigger_exit = _record_exit  # type: ignore[method-assign]
         triggered = await monitor.check_all(stub_prices)

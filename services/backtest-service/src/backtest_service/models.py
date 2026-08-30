@@ -39,6 +39,10 @@ class BacktestRequest(BaseModel):
     """Additional adverse fill vs the quote, per side, in basis points."""
 
     @property
+    def is_intraday(self) -> bool:
+        return self.timeframe == "intraday"
+
+    @property
     def periods_per_year(self) -> float:
         """Return periods per year for this bar size, for annualising Sharpe."""
         if self.timeframe != "intraday":

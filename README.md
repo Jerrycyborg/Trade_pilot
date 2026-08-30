@@ -168,6 +168,27 @@ Keys). With `STREAMING_ENABLED=true` the orchestrator subscribes to 1-minute
 bars over a websocket and serves prices from an in-memory cache, so stops are
 evaluated against a price that is seconds old rather than one HTTP call away.
 
+### Yahoo cannot satisfy the default policy limit
+
+Worth knowing before you pick a provider. Yahoo's intraday feed is delayed by
+roughly 15 minutes, while policy-service rejects any decision built on data
+older than `POLICY_MAX_DATA_AGE_SECONDS` (default **30 seconds**). Under
+defaults, the Yahoo path therefore places **zero live orders** — every signal is
+rejected as `stale_data`. That is the system failing closed correctly, not a
+bug.
+
+Three ways forward:
+
+| | What you get |
+|---|---|
+| **Use Alpaca** | Real-time prices; the default limit works as intended |
+| **Raise `POLICY_MAX_DATA_AGE_SECONDS`** | Trading on ~15-minute-old prices. Defensible on a 15-minute bar strategy, indefensible on a 1-minute one. Set it deliberately, not to make a warning go away |
+| **Use Yahoo for backtesting only** | Historical bars have no freshness requirement, so `run_backtest.py` works fine on Yahoo regardless |
+
+`scripts/verify_intraday.py` checks freshness against the *policy* limit and
+fails when it is exceeded, so this shows up before you start rather than as a
+run of rejections in the audit log.
+
 ### Verify before trading
 
 Unit tests cannot prove that *this host* can reach a data provider. Run the

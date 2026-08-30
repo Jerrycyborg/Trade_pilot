@@ -358,3 +358,27 @@ class TestOpenPositionReservation:
         tracker.record_open("B", _at(15))
         tracker.record_open("C", _at(15))
         assert tracker.check_entry(100_000.0, now=_at(20)).allowed is True
+
+
+class TestBrokerRejectionIsNotAnOpen:
+    """execution-service answers HTTP 200 for a rejected order with the reason
+    in the body, so the status must be read rather than inferred."""
+
+    def test_rejected_status_is_not_accepted(self) -> None:
+        import autonomy_orchestrator.main as main
+
+        assert main._order_accepted({"status": "REJECTED"}) is False
+        assert main._order_accepted({"status": "CANCELLED"}) is False
+
+    def test_accepted_and_filled_both_count(self) -> None:
+        import autonomy_orchestrator.main as main
+
+        assert main._order_accepted({"status": "ACCEPTED"}) is True
+        assert main._order_accepted({"status": "FILLED"}) is True
+
+    def test_missing_status_is_treated_as_accepted(self) -> None:
+        """Brokers that report no status still fill; only an explicit rejection
+        should suppress the bookkeeping."""
+        import autonomy_orchestrator.main as main
+
+        assert main._order_accepted({}) is True

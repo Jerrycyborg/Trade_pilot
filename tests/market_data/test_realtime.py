@@ -171,3 +171,77 @@ class TestStreamManager:
         asyncio.run(manager._on_bar(bar))
 
         assert cache.get("AAPL").price == 250.25
+
+
+@pytest.mark.real_price_source
+class TestFreshnessAppliesToEveryTier:
+    """A stale price must be refused wherever it came from.
+
+    Stop-loss monitors and the fill simulator call get_price() directly. During
+    a provider outage the last-bar tier returns yesterday's close, and they
+    cannot tell it from a live quote.
+    """
+
+    def test_stale_latest_trade_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
+        fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=3_600))
+        source = RealtimePriceSource(
+            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
+        )
+        assert source.get_price("AAPL") is None
+
+    def test_stale_last_bar_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
+        old_bar = OHLCVBar(
+            symbol="AAPL",
+            timestamp=datetime.now(timezone.utc) - timedelta(days=1),
+            open=1, high=2, low=0.5, close=77.0, volume=10,
+        )
+        fetcher = StubFetcher(latest=None, bars=[old_bar])
+        source = RealtimePriceSource(
+            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
+        )
+        assert source.get_snapshot("AAPL") is None
+
+    def test_fresh_price_still_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
+        fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=5))
+        source = RealtimePriceSource(
+            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
+        )
+        assert source.get_price("AAPL") == 100.0
+
+    def test_daily_timeframe_tolerates_an_old_bar(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """120 seconds is an intraday limit. A daily bar is hours old by
+        construction, so the limit scales with the timeframe."""
+        monkeypatch.delenv("MARKET_DATA_TIMEFRAME", raising=False)
+        monkeypatch.delenv("MAX_PRICE_AGE_SECONDS", raising=False)
+        fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=3_600 * 6))
+        source = RealtimePriceSource(
+            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
+        )
+        assert source.get_price("AAPL") == 100.0
+
+    def test_explicit_limit_overrides_the_timeframe_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MAX_PRICE_AGE_SECONDS", "10")
+        fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=60))
+        source = RealtimePriceSource(
+            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
+        )
+        assert source.get_price("AAPL") is None
+
+    def test_a_refused_price_is_still_cached_for_inspection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operators need to see what the last observation was and how old."""
+        monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
+        cache = LivePriceCache()
+        fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=3_600))
+        source = RealtimePriceSource(MarketDataSettings(), cache=cache, fetcher=fetcher)
+
+        assert source.get_price("AAPL") is None
+        assert cache.peek("AAPL") is not None

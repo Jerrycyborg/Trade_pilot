@@ -56,12 +56,14 @@ async def test_register_and_trigger() -> None:
     monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
     prices = _make_prices(94.0)  # below stop
 
-    with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock) as mock_exit:
+    with patch.object(
+        monitor, "_trigger_exit", new=AsyncMock(return_value=True)
+    ) as mock_exit:
         triggered = await monitor.check_all(prices)
 
     assert "AAPL" in triggered
     mock_exit.assert_called_once()
-    # Position should be removed after trigger
+    # Position should be removed after a confirmed close
     assert monitor.get("AAPL") is None
 
 
@@ -87,7 +89,22 @@ async def test_at_stop_price_triggers() -> None:
     monitor.register(_record("AAPL", stop_price=95.0))
     prices = _make_prices(95.0)  # exactly at stop
 
-    with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock):
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)):
         triggered = await monitor.check_all(prices)
 
     assert "AAPL" in triggered
+
+
+@pytest.mark.asyncio
+async def test_failed_close_keeps_the_stop_tracked() -> None:
+    """A close the broker refused must not be reported as an exit, and the stop
+    must survive so the open position is still being watched."""
+    monitor = StopLossMonitor("http://localhost:8002", "key")
+    monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
+    prices = _make_prices(90.0)
+
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=False)):
+        triggered = await monitor.check_all(prices)
+
+    assert triggered == []
+    assert monitor.get("AAPL") is not None

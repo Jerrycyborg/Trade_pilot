@@ -28,6 +28,8 @@ from market_data.indicators import compute_atr, compute_ema, compute_macd, compu
 from market_data.models import OHLCVBar
 
 from .models import (
+    TRADING_DAYS_PER_YEAR,
+    US_SESSION_MINUTES,
     BacktestRequest,
     BacktestResult,
     CostScenario,
@@ -42,6 +44,35 @@ MARKET_TZ = zoneinfo.ZoneInfo("America/New_York")
 # EMA-50 plus MACD's 26+9 warm-up: below this the indicators return defaults
 # rather than signal, so no position is taken.
 MIN_WARMUP_BARS = 51
+
+
+def infer_bar_minutes(bars: list[OHLCVBar]) -> float | None:
+    """Median spacing between consecutive bars, in minutes.
+
+    Providers silently substitute a resolution they support — ask Yahoo for
+    10-minute bars and it returns 5-minute ones. Annualising from the
+    *requested* interval then misstates Sharpe, so the spacing is measured from
+    the data actually returned. Overnight and weekend gaps are excluded by
+    taking the median rather than the mean.
+    """
+    if len(bars) < 3:
+        return None
+    gaps = sorted(
+        (bars[i].timestamp - bars[i - 1].timestamp).total_seconds() / 60.0
+        for i in range(1, len(bars))
+    )
+    median = gaps[len(gaps) // 2]
+    return median if median > 0 else None
+
+
+def periods_per_year_for(request: BacktestRequest, bars: list[OHLCVBar]) -> float:
+    """Annualisation factor from the observed bar size, falling back to the request."""
+    if not request.is_intraday:
+        return request.periods_per_year
+    observed = infer_bar_minutes(bars)
+    if observed is None:
+        return request.periods_per_year
+    return TRADING_DAYS_PER_YEAR * (US_SESSION_MINUTES / observed)
 
 
 def _compute_signals(bars: list[OHLCVBar], request: BacktestRequest) -> list[str]:
@@ -306,13 +337,19 @@ def run_backtest(request: BacktestRequest, bars: list[OHLCVBar]) -> BacktestResu
 
     capital = request.initial_capital
     profit_factor = _profit_factor(net.trades)
+    periods = periods_per_year_for(request, bars)
+    observed_minutes = infer_bar_minutes(bars)
 
     return BacktestResult(
         symbol=request.symbol,
         strategy=request.strategy,
         period_days=request.period_days,
         timeframe=request.timeframe,
-        intraday_minutes=request.intraday_minutes,
+        intraday_minutes=(
+            int(round(observed_minutes))
+            if request.is_intraday and observed_minutes
+            else request.intraday_minutes
+        ),
         bars_count=len(bars),
         initial_capital=capital,
         final_value=round(net.final_equity, 2),
@@ -320,7 +357,7 @@ def run_backtest(request: BacktestRequest, bars: list[OHLCVBar]) -> BacktestResu
         gross_return_pct=round((gross.final_equity - capital) / capital, 4),
         total_costs=round(net.total_costs, 2),
         max_drawdown_pct=round(_max_drawdown(net.equity_curve), 4),
-        sharpe_ratio=round(_compute_sharpe(net.equity_curve, request.periods_per_year), 4),
+        sharpe_ratio=round(_compute_sharpe(net.equity_curve, periods), 4),
         total_trades=len(net.trades),
         win_rate=(
             round(sum(1 for t in net.trades if t.pnl > 0) / len(net.trades), 4)
@@ -366,7 +403,7 @@ def run_cost_sensitivity(
                 commission_pct=variant.commission_pct,
                 total_return_pct=round(total_return, 4),
                 sharpe_ratio=round(
-                    _compute_sharpe(run.equity_curve, variant.periods_per_year), 4
+                    _compute_sharpe(run.equity_curve, periods_per_year_for(variant, bars)), 4
                 ),
                 profit_factor=round(min(_profit_factor(run.trades), 1e6), 4),
                 total_trades=len(run.trades),

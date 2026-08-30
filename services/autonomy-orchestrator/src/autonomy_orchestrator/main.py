@@ -526,6 +526,22 @@ async def run_cycle() -> dict[str, object]:
                 await _notify(signal, risk, policy)
             if decision == "APPROVE" and risk.tier < 3:
                 order = await _submit_order(signal, risk, config, portfolio_state)
+                if not _order_accepted(order):
+                    # execution-service answers 200 with status REJECTED (no cash,
+                    # qty limit). Recording an open here would burn a day-trade
+                    # reservation on a position that does not exist.
+                    summary["rejected"] += 1
+                    await _audit(
+                        AuditEvent(
+                            event_type="signal.rejected",
+                            symbol=signal.symbol,
+                            signal_id=signal.signal_id,
+                            decision="REJECT",
+                            reasoning=str(order.get("rejection_reason") or "broker_rejected"),
+                            metadata={"order": order},
+                        )
+                    )
+                    continue
                 _day_trades().record_open(signal.symbol)
                 _register_stop_loss(signal.symbol, order, price_bars)
                 _register_take_profit(signal, order)
@@ -759,6 +775,17 @@ async def _account_equity() -> float | None:
     except Exception as exc:
         logger.warning("Could not read account equity for the PDT check: %s", exc)
     return None
+
+
+def _order_accepted(order: dict[str, object]) -> bool:
+    """Whether the broker actually took the order.
+
+    execution-service returns HTTP 200 for a rejected order with the reason in
+    the body, so the status has to be read rather than inferred from the
+    response code.
+    """
+    status = str(order.get("status", "")).upper()
+    return status not in ("REJECTED", "CANCELLED")
 
 
 def _market_settings() -> MarketDataSettings:
@@ -1059,6 +1086,13 @@ async def _process_approvals() -> None:
             ))
             continue
         order = await _submit_order(signal, risk, config, portfolio_state)
+        if not _order_accepted(order):
+            logger.warning(
+                "Approved order for %s rejected by the broker: %s",
+                signal.symbol,
+                order.get("rejection_reason"),
+            )
+            continue
         _day_trades().record_open(signal.symbol)
         _register_stop_loss(signal.symbol, order, price_bars)
         _register_take_profit(signal, order)

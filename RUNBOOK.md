@@ -120,9 +120,13 @@ Check the audit log for the rejection reason first:
 curl "http://localhost:8006/v1/audit/logs?event_type=signal.rejected&limit=20"
 ```
 
-- `stale_data` — no price could be resolved. This is the system failing closed
-  by design. Check `/v1/orchestrator/realtime` for cached price ages, and raise
-  `MAX_PRICE_AGE_SECONDS` only if the delay is expected (e.g. Yahoo's ~15 min).
+- `stale_data` — the price was older than `POLICY_MAX_DATA_AGE_SECONDS`
+  (default 30s), or none could be resolved at all. The system is failing closed
+  by design. **On the Yahoo provider this is expected and permanent**: its feed
+  is ~15 minutes delayed, so nothing it returns can satisfy a 30-second limit.
+  Either move to Alpaca, or raise `POLICY_MAX_DATA_AGE_SECONDS` deliberately,
+  accepting that you are trading on delayed prices. Check
+  `/v1/orchestrator/realtime` for the age of each cached price.
 - `market_closed` / `outside_trading_hours` — expected outside the session.
   Note the Yahoo path uses a weekday heuristic that does not know about market
   holidays; Alpaca's clock does.

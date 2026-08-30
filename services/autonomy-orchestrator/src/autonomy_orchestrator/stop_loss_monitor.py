@@ -85,15 +85,29 @@ class StopLossMonitor:
                         price,
                         record.stop_price,
                     )
-                    await self._trigger_exit(record)
-                    triggered.append(symbol)
-                    self.remove(symbol)
+                    if await self._trigger_exit(record):
+                        triggered.append(symbol)
+                        self.remove(symbol)
+                    else:
+                        # The close failed. Reporting it as triggered would book
+                        # a day trade and a realised loss for a position that is
+                        # still open, and dropping the stop would leave that
+                        # position with nothing watching it. Keep it tracked and
+                        # retry on the next check.
+                        logger.error(
+                            "StopLossMonitor: exit for %s failed — position still "
+                            "open, stop retained", symbol,
+                        )
             except Exception as exc:
                 logger.error("StopLossMonitor: error checking %s: %s", symbol, exc)
         return triggered
 
-    async def _trigger_exit(self, record: StopLossRecord) -> None:
-        """POST close request. `qty=0.0` means the broker should close the full position."""
+    async def _trigger_exit(self, record: StopLossRecord) -> bool:
+        """POST close request. `qty=0.0` means the broker should close the full position.
+
+        Returns whether the broker confirmed the close. Callers must not book a
+        realised loss or a day trade on a close that did not happen.
+        """
         import os
         from uuid import uuid4
 
@@ -113,5 +127,9 @@ class StopLossMonitor:
                 )
                 response.raise_for_status()
                 logger.info("StopLossMonitor: exit order placed for %s", record.symbol)
+                return True
         except Exception as exc:
-            logger.error("StopLossMonitor: failed to trigger exit for %s: %s", record.symbol, exc)
+            logger.error(
+                "StopLossMonitor: failed to trigger exit for %s: %s", record.symbol, exc
+            )
+            return False

@@ -100,8 +100,16 @@ class RealtimePriceSource:
         return self._fetcher
 
     def get_snapshot(self, symbol: str) -> PriceSnapshot | None:
-        """Current price with provenance, or None if no tier can supply one."""
-        cached = self._cache.get(symbol, self._settings.max_price_age_seconds)
+        """Current price with provenance, or None if no tier can supply a fresh one.
+
+        The age limit applies to every tier, not only to cache hits. A provider
+        outage makes the last-bar tier return yesterday's close, and callers
+        here are stop-loss monitors and the fill simulator — they must get None
+        and refuse to act rather than a stale number they cannot tell apart
+        from a live one.
+        """
+        limit = self._settings.price_age_limit_seconds
+        cached = self._cache.get(symbol, limit)
         if cached is not None:
             return cached
 
@@ -118,8 +126,20 @@ class RealtimePriceSource:
         if snapshot is None:
             snapshot = self._from_last_bar(symbol, fetcher)
 
-        if snapshot is not None:
-            self._cache.record(snapshot)
+        if snapshot is None:
+            return None
+
+        # Cache it either way — a stale observation is still the freshest thing
+        # we have, and callers that tolerate age can read it via the cache.
+        self._cache.record(snapshot)
+
+        age = snapshot.age_seconds()
+        if age > limit:
+            logger.warning(
+                "Refusing %s price for %s: %.0fs old via %s, limit is %.0fs",
+                "stale", symbol, age, snapshot.source, limit,
+            )
+            return None
         return snapshot
 
     def get_price(self, symbol: str) -> float | None:
