@@ -9,8 +9,6 @@ from typing import Optional
 from uuid import uuid4
 
 import httpx
-from market_data import MarketDataSettings, build_ta_summary, get_fetcher
-
 from contracts import (
     CandidateAction,
     ExecutionOrderRequest,
@@ -19,6 +17,13 @@ from contracts import (
     PortfolioContext,
     SignalCandidate,
     TechnicalSummaryContract,
+)
+from market_data import (
+    MarketDataSettings,
+    RealtimePriceSource,
+    build_ta_summary,
+    fetch_bars,
+    market_session,
 )
 
 from .ai_pipeline import AISignalPipeline, _build_deterministic_signal
@@ -50,8 +55,9 @@ class WorkerRunResult:
 class TradeWorker:
     """Runs one full pipeline cycle: research → signals → policy → execution."""
 
-    def __init__(self) -> None:
-        self._fetcher = get_fetcher(MarketDataSettings())
+    def __init__(self, price_source: RealtimePriceSource | None = None) -> None:
+        self._market_settings = MarketDataSettings()
+        self._prices = price_source or RealtimePriceSource(self._market_settings)
 
     async def run_cycle(self) -> dict:
         worker_state.is_running = True
@@ -148,13 +154,7 @@ class TradeWorker:
             candidate_action=signal.candidate_action,
             confidence=signal.confidence,
             size_pct=signal.size_pct,
-            market_context=MarketContext(
-                data_age_seconds=10,
-                market_open=True,
-                event_blackout_active=False,
-                liquidity_score=0.95,
-                symbol_allowed=True,
-            ),
+            market_context=self._market_context(symbol, bars),
             portfolio_context=portfolio_ctx,
             risk_score=signal.risk_score,
         )
@@ -171,9 +171,18 @@ class TradeWorker:
 
         # 5. Compute order quantity
         approved_size_pct = float(policy_decision.get("approved_size_pct", signal.size_pct))
-        qty = _compute_qty(approved_size_pct, buying_power, signal)
+        reference_price = self._prices.get_price(symbol)
+        if reference_price is None and bars:
+            reference_price = float(bars[-1].close)
+        qty = _compute_qty(approved_size_pct, buying_power, reference_price)
         if qty < 1:
-            logger.debug("Qty < 1 for %s — skipping order", symbol)
+            logger.debug(
+                "Qty < 1 for %s (size_pct=%.4f, buying_power=%.2f, price=%s) — skipping order",
+                symbol,
+                approved_size_pct,
+                buying_power,
+                reference_price,
+            )
             return
 
         # 6. Submit order to execution-service
@@ -189,6 +198,35 @@ class TradeWorker:
         if submitted:
             result.orders_submitted += 1
             logger.info("Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action)
+
+    def _market_context(self, symbol: str, bars: list) -> MarketContext:
+        """Build the policy's market context from observed data, not assumptions.
+
+        The policy service rejects stale data, so reporting a made-up age would
+        disable that guard entirely. Age comes from our freshest actual price;
+        when no price can be resolved we report an age that trips the staleness
+        rule rather than one that passes it.
+        """
+        session = market_session(self._market_settings)
+        snapshot = self._prices.get_snapshot(symbol)
+        if snapshot is not None:
+            age_seconds = int(snapshot.age_seconds())
+        elif bars:
+            age_seconds = int(
+                (datetime.now(timezone.utc) - _as_utc(bars[-1].timestamp)).total_seconds()
+            )
+        else:
+            # No observable price: fail closed.
+            age_seconds = 10_000
+            logger.warning("No price available for %s — reporting data as stale", symbol)
+
+        return MarketContext(
+            data_age_seconds=age_seconds,
+            market_open=session.is_open,
+            event_blackout_active=False,
+            liquidity_score=0.95,
+            symbol_allowed=True,
+        )
 
     async def _generate_exit_signals(self) -> int:
         positions = await self._get_open_positions()
@@ -223,7 +261,12 @@ class TradeWorker:
             return None
 
         entry_price = float(position.get("average_cost", 0.0))
-        current_price = float(ta.current_price)
+        # Prefer the live price over the last bar close: at intraday resolution a
+        # stop that reacts only on bar boundaries is a stop that fires late.
+        live_price = self._prices.get_price(symbol)
+        current_price = float(
+            live_price if live_price is not None else ta.current_price
+        )
         qty = int(position.get("net_qty", 0))
         opened_at = _parse_datetime(position.get("opened_at")) or _parse_datetime(position.get("updated_at"))
         max_hold = timedelta(hours=settings.max_hold_hours)
@@ -268,14 +311,16 @@ class TradeWorker:
         )
 
     def _get_market_snapshot(self, symbol: str):
+        """Bars at the configured timeframe — intraday when MARKET_DATA_TIMEFRAME=intraday."""
         try:
-            bars = self._fetcher.fetch(symbol, period_days=60)
+            bars = fetch_bars(symbol, self._market_settings)
         except Exception as exc:
-            logger.debug("TA fetch failed for %s during exit checks: %s", symbol, exc)
+            logger.debug("Bar fetch failed for %s: %s", symbol, exc)
             return None, []
         if not bars:
             return None, []
-        return build_ta_summary(symbol, bars, data_source=type(self._fetcher).__name__), bars
+        source = "intraday" if self._market_settings.is_intraday else "daily"
+        return build_ta_summary(symbol, bars, data_source=source), bars
 
     def _get_ta_snapshot(self, symbol: str):
         ta, _ = self._get_market_snapshot(symbol)
@@ -376,19 +421,26 @@ class TradeWorker:
         return False
 
 
-def _compute_qty(size_pct: float, buying_power: float, signal: SignalCandidate) -> int:
-    """Compute integer order quantity from size_pct and buying_power."""
-    # Use current price from TA summary if available, else fallback to $100
-    current_price: float = 100.0
-    if signal.ta_summary and hasattr(signal.ta_summary, "current_price"):
-        # TechnicalSummaryContract doesn't carry price — use fallback
-        pass
+def _compute_qty(
+    size_pct: float,
+    buying_power: float,
+    reference_price: float | None,
+) -> int:
+    """Shares to buy for a target dollar exposure at the current market price.
 
+    Sizing must divide by the real price. Using a fixed placeholder silently
+    scales every order by price/placeholder — a $500 share gets 5x the intended
+    exposure and a $10 share a fifth of it.
+    """
+    if reference_price is None or reference_price <= 0:
+        logger.warning("No reference price available — cannot size order")
+        return 0
     dollar_amount = size_pct * buying_power
-    if current_price <= 0:
-        return 1
-    qty = int(dollar_amount / current_price)
-    return max(1, qty)
+    return int(dollar_amount / reference_price)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _parse_datetime(value: object) -> datetime | None:

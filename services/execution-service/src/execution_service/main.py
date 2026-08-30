@@ -14,6 +14,7 @@ from contracts import (
     ExecutionOrderRequest,
     ExecutionOrderResponse,
     FillRecord,
+    OrderStatus,
 )
 from contracts.auth import verify_internal_key
 from contracts.sanitize import sanitize_symbol, validate_positive_amount
@@ -107,7 +108,15 @@ def create_order(
             event_type=f"order.{order.status.lower()}",
             payload={"rejection_reason": broker_result.rejection_reason},
         )
-        if broker_result.status.value == "ACCEPTED":
+        # A fill is recorded whenever the broker gave us a price and did not
+        # reject the order. Keying only off ACCEPTED loses the fill for brokers
+        # that report an immediate FILLED (the paper simulator, and Alpaca when
+        # a market order fills inside the status poll).
+        if (
+            broker_result.fill_price is not None
+            and broker_result.status
+            in (OrderStatus.ACCEPTED, OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
+        ):
             fill = _persist_fill(session, order=order, fill_price=broker_result.fill_price)
             _persist_event(
                 session,

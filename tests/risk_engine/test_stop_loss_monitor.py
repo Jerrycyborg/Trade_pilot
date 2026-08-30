@@ -21,12 +21,18 @@ def _record(symbol: str = "AAPL", stop_price: float = 95.0, entry_price: float =
     )
 
 
-def _make_fetcher(close_price: float):
-    bar = MagicMock()
-    bar.close = close_price
-    fetcher = MagicMock()
-    fetcher.fetch.return_value = [bar]
-    return fetcher
+class _Prices:
+    """Minimal price source: what the monitor now consumes instead of bars."""
+
+    def __init__(self, price: float | None) -> None:
+        self._price = price
+
+    def get_price(self, symbol: str) -> float | None:
+        return self._price
+
+
+def _make_prices(price: float | None):
+    return _Prices(price)
 
 
 def test_register_stores_record() -> None:
@@ -50,10 +56,10 @@ async def test_register_and_trigger() -> None:
     """Price below stop triggers _trigger_exit."""
     monitor = StopLossMonitor("http://localhost:8002", "key")
     monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
-    fetcher = _make_fetcher(close_price=94.0)  # below stop
+    prices = _make_prices(94.0)  # below stop
 
     with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock) as mock_exit:
-        triggered = await monitor.check_all(fetcher)
+        triggered = await monitor.check_all(prices)
 
     assert "AAPL" in triggered
     mock_exit.assert_called_once()
@@ -66,10 +72,10 @@ async def test_no_trigger_above_stop() -> None:
     """Price above stop -> nothing triggered."""
     monitor = StopLossMonitor("http://localhost:8002", "key")
     monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
-    fetcher = _make_fetcher(close_price=98.0)  # above stop
+    prices = _make_prices(98.0)  # above stop
 
     with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock) as mock_exit:
-        triggered = await monitor.check_all(fetcher)
+        triggered = await monitor.check_all(prices)
 
     assert triggered == []
     mock_exit.assert_not_called()
@@ -81,9 +87,9 @@ async def test_at_stop_price_triggers() -> None:
     """Price exactly at stop price should trigger."""
     monitor = StopLossMonitor("http://localhost:8002", "key")
     monitor.register(_record("AAPL", stop_price=95.0))
-    fetcher = _make_fetcher(close_price=95.0)  # exactly at stop
+    prices = _make_prices(95.0)  # exactly at stop
 
     with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock):
-        triggered = await monitor.check_all(fetcher)
+        triggered = await monitor.check_all(prices)
 
     assert "AAPL" in triggered

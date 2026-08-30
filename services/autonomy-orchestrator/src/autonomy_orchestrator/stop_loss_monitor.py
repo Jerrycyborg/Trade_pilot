@@ -1,9 +1,15 @@
-"""Stop-loss monitor: polls open positions and triggers exits when price <= stop_price."""
+"""Stop-loss monitor: polls live prices and triggers exits when price <= stop_price.
+
+Resolution matters here. Checking a daily bar's close means a stop can only fire
+once a day; an intraday stop has to read the current price. The monitor therefore
+takes a price source (``get_price(symbol) -> float | None``) rather than a bar
+fetcher.
+"""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Protocol
 
 import httpx
@@ -12,10 +18,10 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-class OHLCVFetcherProtocol(Protocol):
-    """Minimal fetcher protocol: fetch(symbol, period_days) -> list of bars."""
+class PriceSourceProtocol(Protocol):
+    """Minimal price protocol: get_price(symbol) -> current price or None."""
 
-    def fetch(self, symbol: str, period_days: int = 1) -> list:
+    def get_price(self, symbol: str) -> float | None:
         ...
 
 
@@ -54,24 +60,24 @@ class StopLossMonitor:
     def remove(self, symbol: str) -> None:
         self._stops.pop(symbol.upper(), None)
 
-    async def check_all(self, fetcher: OHLCVFetcherProtocol) -> list[str]:
+    async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
         """
-        For each tracked position fetch latest close.
-        If close <= stop_price, call broker sell endpoint and return triggered symbols.
+        Read the current price for each tracked position. If it is at or below
+        the stop, close the position at the broker and return the symbol.
         """
         triggered: list[str] = []
         for symbol, record in list(self._stops.items()):
             try:
-                bars = fetcher.fetch(symbol, period_days=1)
-                if not bars:
-                    logger.warning("StopLossMonitor: no bars for %s", symbol)
+                price = price_source.get_price(symbol)
+                if price is None:
+                    # A stop we cannot evaluate is a risk we cannot see.
+                    logger.warning("StopLossMonitor: no price for %s — stop not evaluated", symbol)
                     continue
-                latest_close = float(bars[-1].close)
-                if latest_close <= record.stop_price:
+                if float(price) <= record.stop_price:
                     logger.warning(
-                        "StopLossMonitor: stop triggered for %s (close=%.4f <= stop=%.4f)",
+                        "StopLossMonitor: stop triggered for %s (price=%.4f <= stop=%.4f)",
                         symbol,
-                        latest_close,
+                        price,
                         record.stop_price,
                     )
                     await self._trigger_exit(record)

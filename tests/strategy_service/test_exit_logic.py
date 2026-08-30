@@ -19,7 +19,7 @@ def _ta_snapshot(*, price: float, rsi: float):
     )
 
 
-def test_build_exit_signal_for_long_stop_loss(monkeypatch) -> None:
+def test_build_exit_signal_for_long_stop_loss(monkeypatch, stub_prices) -> None:
     import strategy_service.worker as worker_mod
 
     worker_mod.settings = worker_mod.settings.__class__(
@@ -29,7 +29,11 @@ def test_build_exit_signal_for_long_stop_loss(monkeypatch) -> None:
         max_hold_hours=48,
     )
     worker = worker_mod.TradeWorker()
-    monkeypatch.setattr(worker, "_get_ta_snapshot", lambda symbol: _ta_snapshot(price=96.0, rsi=50.0))
+    # The exit check reads the live price first, so drive the scenario there.
+    stub_prices.set("AAPL", 96.0)
+    monkeypatch.setattr(
+        worker, "_get_ta_snapshot", lambda symbol: _ta_snapshot(price=96.0, rsi=50.0)
+    )
 
     signal = worker._build_exit_signal(
         {

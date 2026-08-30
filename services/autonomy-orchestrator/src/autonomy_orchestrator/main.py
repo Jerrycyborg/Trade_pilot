@@ -16,9 +16,15 @@ from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from market_data import MarketDataSettings, get_fetcher
+from market_data import (
+    LivePriceCache,
+    MarketDataSettings,
+    RealtimePriceSource,
+    StreamManager,
+    fetch_bars,
+)
+from market_data.fetcher import OHLCVFetcherProtocol  # noqa: F401 - kept for type hints
 from market_data.indicators import compute_atr
-from market_data.fetcher import OHLCVFetcherProtocol
 from pydantic import BaseModel
 
 from .config import settings
@@ -50,6 +56,9 @@ class OrchestratorState:
     monthly_realized_profit_usd: float = 0.0
     monthly_reset_month: int = 0
     monthly_reset_year: int = 0
+    price_source: RealtimePriceSource | None = None
+    stream_manager: StreamManager | None = None
+    market_settings: MarketDataSettings | None = None
 
 
 state = OrchestratorState()
@@ -62,6 +71,27 @@ class KillSwitchRequest(BaseModel):
 class LiveModeRequest(BaseModel):
     enable: bool
     confirmation: str = ""
+
+
+def _cycle_interval_seconds() -> int:
+    """Trading cycle cadence. ORCHESTRATOR_INTERVAL_SECONDS wins when set."""
+    explicit_seconds = os.getenv("ORCHESTRATOR_INTERVAL_SECONDS")
+    if explicit_seconds:
+        return max(10, int(explicit_seconds))
+    return max(10, settings.orchestrator_interval_minutes * 60)
+
+
+def _risk_check_interval_seconds(env_var: str) -> int:
+    """How often to re-check stops/targets.
+
+    An exit check is only as timely as its interval: a 5-minute poll on a
+    15-minute intraday strategy means a stop can overshoot by 5 minutes of
+    price movement. Intraday runs therefore default to 60 seconds.
+    """
+    explicit = os.getenv(env_var)
+    if explicit:
+        return max(10, int(float(explicit) * 60))
+    return 60 if _market_settings().is_intraday else 300
 
 
 def _start_scheduler() -> None:
@@ -81,24 +111,27 @@ def _start_scheduler() -> None:
     scheduler.add_job(
         run_job,
         trigger="interval",
-        minutes=settings.orchestrator_interval_minutes,
+        seconds=_cycle_interval_seconds(),
         id="autonomy_orchestrator",
         max_instances=1,
+        coalesce=True,
     )
 
     scheduler.add_job(
         lambda: asyncio.create_task(_run_stop_loss_check()),
         "interval",
-        minutes=int(os.getenv("STOP_LOSS_CHECK_INTERVAL_MINUTES", "5")),
+        seconds=_risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES"),
         id="stop_loss_check",
         replace_existing=True,
+        coalesce=True,
     )
     scheduler.add_job(
         lambda: asyncio.create_task(_run_take_profit_check()),
         "interval",
-        minutes=int(os.getenv("TAKE_PROFIT_CHECK_INTERVAL_MINUTES", "5")),
+        seconds=_risk_check_interval_seconds("TAKE_PROFIT_CHECK_INTERVAL_MINUTES"),
         id="take_profit_check",
         replace_existing=True,
+        coalesce=True,
     )
     try:
         asyncio.get_running_loop()
@@ -140,6 +173,37 @@ async def _startup_health_check() -> None:
             )
 
 
+def _stream_symbols() -> list[str]:
+    """Symbols to stream: the policy allowlist, narrowed by STREAM_SYMBOLS if set."""
+    explicit = os.getenv("STREAM_SYMBOLS", "").strip()
+    if explicit:
+        return [s.strip().upper() for s in explicit.split(",") if s.strip()]
+    try:
+        config = load_policy_config(settings.policy_config_path)
+        allowlist = [str(s).upper() for s in config.get("symbol_allowlist", [])]
+    except Exception as exc:
+        logger.warning("Could not read allowlist for streaming: %s", exc)
+        return []
+    # Alpaca's free IEX feed caps concurrent subscriptions; stream the head of the
+    # list and let everything else resolve by polling.
+    limit = int(os.getenv("STREAM_SYMBOL_LIMIT", "30"))
+    return allowlist[:limit]
+
+
+async def _start_price_stream() -> None:
+    market_settings = _market_settings()
+    cache: LivePriceCache = _price_source().cache
+    state.stream_manager = StreamManager(
+        settings=market_settings,
+        symbols=_stream_symbols(),
+        cache=cache,
+    )
+    try:
+        await state.stream_manager.start()
+    except Exception as exc:
+        logger.error("Price stream failed to start: %s — falling back to polling", exc)
+
+
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
     state.stop_loss_monitor = StopLossMonitor(
@@ -153,7 +217,16 @@ async def lifespan(app_: FastAPI):
     now = datetime.now(timezone.utc)
     state.monthly_reset_month = now.month
     state.monthly_reset_year = now.year
+    market_settings = _market_settings()
+    logger.info(
+        "Orchestrator starting: timeframe=%s intraday_minutes=%s cycle=%ss streaming=%s",
+        market_settings.timeframe,
+        market_settings.intraday_minutes,
+        _cycle_interval_seconds(),
+        market_settings.can_stream,
+    )
     await _startup_health_check()
+    await _start_price_stream()
     _start_scheduler()
     try:
         yield
@@ -161,6 +234,9 @@ async def lifespan(app_: FastAPI):
         if state.scheduler is not None:
             state.scheduler.shutdown(wait=False)
             state.scheduler = None
+        if state.stream_manager is not None:
+            await state.stream_manager.stop()
+            state.stream_manager = None
 
 
 app = FastAPI(title="autonomy-orchestrator", version="0.1.0", lifespan=lifespan)
@@ -176,6 +252,42 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "autonomy-orchestrator"}
+
+
+@app.get("/v1/orchestrator/realtime")
+def realtime_status() -> dict[str, object]:
+    """Intraday/streaming state — what resolution the loop is actually running at."""
+    market_settings = _market_settings()
+    stream_status: dict[str, object] = (
+        state.stream_manager.status()
+        if state.stream_manager is not None
+        else {"enabled": market_settings.can_stream, "running": False}
+    )
+    source = _price_source()
+    return {
+        "timeframe": market_settings.timeframe,
+        "intraday": market_settings.is_intraday,
+        "intraday_minutes": market_settings.intraday_minutes,
+        "provider": "alpaca" if market_settings.has_alpaca_credentials else "yahoo",
+        "cycle_interval_seconds": _cycle_interval_seconds(),
+        "stop_loss_check_seconds": _risk_check_interval_seconds(
+            "STOP_LOSS_CHECK_INTERVAL_MINUTES"
+        ),
+        "take_profit_check_seconds": _risk_check_interval_seconds(
+            "TAKE_PROFIT_CHECK_INTERVAL_MINUTES"
+        ),
+        "max_price_age_seconds": market_settings.max_price_age_seconds,
+        "stream": stream_status,
+        "cached_prices": {
+            symbol: {
+                "price": snapshot.price,
+                "age_seconds": round(snapshot.age_seconds(), 1),
+                "source": snapshot.source,
+            }
+            for symbol in source.cache.symbols()
+            if (snapshot := source.cache.peek(symbol)) is not None
+        },
+    }
 
 
 @app.get("/v1/orchestrator/status")
@@ -331,10 +443,9 @@ async def run_cycle() -> dict[str, object]:
             return summary
         signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
         portfolio_state = await _portfolio_state()
-        fetcher = _build_market_data_fetcher()
         for signal in signals:
             summary["signals"] += 1
-            price_bars = _fetch_price_bars(fetcher, signal.symbol)
+            price_bars = _fetch_price_bars(signal.symbol)
             risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
             if not risk.approved:
                 summary["rejected"] += 1
@@ -563,19 +674,24 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
     return body
 
 
-def _build_market_data_fetcher() -> OHLCVFetcherProtocol | None:
-    try:
-        return get_fetcher(MarketDataSettings())
-    except Exception as exc:
-        logger.warning("Market data fetcher unavailable: %s", exc)
-        return None
+def _market_settings() -> MarketDataSettings:
+    if state.market_settings is None:
+        state.market_settings = MarketDataSettings()
+    return state.market_settings
 
 
-def _fetch_price_bars(fetcher: OHLCVFetcherProtocol | None, symbol: str) -> list[Any] | None:
-    if fetcher is None:
-        return None
+def _price_source() -> RealtimePriceSource:
+    """Shared price resolver — reads the stream cache first, then polls."""
+    if state.price_source is None:
+        state.price_source = RealtimePriceSource(_market_settings())
+    return state.price_source
+
+
+def _fetch_price_bars(symbol: str) -> list[Any] | None:
+    """Bars at the configured timeframe. ATR-based stops depend on this matching
+    the trading horizon: daily ATR on an intraday strategy sets stops far too wide."""
     try:
-        return fetcher.fetch(symbol.upper(), period_days=30)
+        return fetch_bars(symbol.upper(), _market_settings())
     except Exception as exc:
         logger.warning("Unable to fetch price bars for %s: %s", symbol, exc)
         return None
@@ -634,10 +750,7 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
 async def _run_stop_loss_check() -> None:
     if state.stop_loss_monitor is None:
         return
-    fetcher = _build_market_data_fetcher()
-    if fetcher is None:
-        return
-    triggered = await state.stop_loss_monitor.check_all(fetcher)
+    triggered = await state.stop_loss_monitor.check_all(_price_source())
     if not triggered:
         return
     logger.info("StopLossMonitor triggered exits for: %s", triggered)
@@ -661,10 +774,7 @@ async def _run_stop_loss_check() -> None:
 async def _run_take_profit_check() -> None:
     if state.take_profit_monitor is None:
         return
-    fetcher = _build_market_data_fetcher()
-    if fetcher is None:
-        return
-    triggered = await state.take_profit_monitor.check_all(fetcher)
+    triggered = await state.take_profit_monitor.check_all(_price_source())
     for symbol in triggered:
         state.monthly_realized_profit_usd += settings.take_profit_target_usd
         await _notify_smart("take_profit", f"✅ Take-profit hit: {symbol}", tier=1)
@@ -773,12 +883,11 @@ async def _process_approvals() -> None:
         return
     portfolio_state = await _portfolio_state()
     weekly_spend = await _weekly_spend()
-    fetcher = _build_market_data_fetcher()
     if not _monthly_limits_ok():
         return
     for row in approved_rows:
         signal = SignalCandidate.model_validate(row["metadata"]["signal"])
-        price_bars = _fetch_price_bars(fetcher, signal.symbol)
+        price_bars = _fetch_price_bars(signal.symbol)
         # Re-run risk + policy with current state before executing
         risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
         if not risk.approved:
@@ -922,9 +1031,10 @@ async def _get_quote_price(symbol: str) -> float | None:
             )
             if response.status_code == 200:
                 return float(response.json().get("price"))
-    except Exception:
-        return None
-    return None
+    except Exception as exc:
+        logger.debug("Quote lookup via strategy-service failed for %s: %s", symbol, exc)
+    # Fall back to our own price source rather than giving up on a price.
+    return _price_source().get_price(symbol)
 
 
 async def _validate_allowlist_symbols() -> dict[str, list[str]]:

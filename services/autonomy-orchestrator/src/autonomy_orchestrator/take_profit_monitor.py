@@ -12,10 +12,10 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-class OHLCVFetcherProtocol(Protocol):
-    """Minimal fetcher protocol: fetch(symbol, period_days) -> list of bars."""
+class PriceSourceProtocol(Protocol):
+    """Minimal price protocol: get_price(symbol) -> current price or None."""
 
-    def fetch(self, symbol: str, period_days: int = 1) -> list:
+    def get_price(self, symbol: str) -> float | None:
         ...
 
 
@@ -41,19 +41,21 @@ class TakeProfitMonitor:
     def get(self, symbol: str) -> TakeProfitRecord | None:
         return self._records.get(symbol.upper())
 
-    async def check_all(self, fetcher: OHLCVFetcherProtocol) -> list[str]:
+    async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
         triggered: list[str] = []
         for symbol, record in list(self._records.items()):
             try:
-                bars = fetcher.fetch(symbol, period_days=1)
-                if not bars:
+                price = price_source.get_price(symbol)
+                if price is None:
+                    logger.warning(
+                        "TakeProfitMonitor: no price for %s — target not evaluated", symbol
+                    )
                     continue
-                latest_close = float(bars[-1].close)
-                if latest_close >= record.target_price:
+                if float(price) >= record.target_price:
                     logger.info(
-                        "Take-profit triggered for %s: close=%.2f >= target=%.2f",
+                        "Take-profit triggered for %s: price=%.2f >= target=%.2f",
                         symbol,
-                        latest_close,
+                        price,
                         record.target_price,
                     )
                     if await self._trigger_close(record):
