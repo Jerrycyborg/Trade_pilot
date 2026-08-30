@@ -9,9 +9,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 
-import pytest
-
 import autonomy_orchestrator.main as main
+import pytest
 from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor, StopLossRecord
 from autonomy_orchestrator.take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
 
