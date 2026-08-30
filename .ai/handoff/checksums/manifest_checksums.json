@@ -74,11 +74,13 @@
     "tests/audit_logger/test_audit_logger.py": "65f14855bd3e9ad799aa88a43438e86940c42c13a215bdd6a5a8530418b0c702",
     "tests/audit_logger/test_audit_summary.py": "8e2dd04c0782eb8123342818dfbc12d63c3f0b9242066d8bc2b2276141ad3099",
     "tests/autonomy_orchestrator/__pycache__/test_monthly_limits.cpython-311-pytest-9.0.2.pyc": "60e0d9d682662744e16dd7dc54c0617e594582f49fe3b2b5afc514c920b53ed3",
+    "tests/autonomy_orchestrator/__pycache__/test_monthly_pnl.cpython-311-pytest-9.0.2.pyc": "42bec84fa74501486ac139af066080e26a1ef1dd08f4fee160ba3e5434e5581d",
     "tests/autonomy_orchestrator/__pycache__/test_orchestrator_status.cpython-311-pytest-9.0.2.pyc": "a8dc9496b954ff13bf181c2336266591bf8c23cbc1ce72d6a7fe58b37dbf93a4",
     "tests/autonomy_orchestrator/__pycache__/test_risk_engine.cpython-311-pytest-9.0.2.pyc": "f3afbf4debb361d5e47972226e109b406d0d05c5fa8c74b8a5871384a8af98aa",
     "tests/autonomy_orchestrator/__pycache__/test_stop_loss_wiring.cpython-311-pytest-9.0.2.pyc": "73df8caaf1b554237e6808a23aeadf06ab701edfb1f405efc478a76fcd271d51",
     "tests/autonomy_orchestrator/__pycache__/test_take_profit_monitor.cpython-311-pytest-9.0.2.pyc": "0a874c59ea3b895cb6e0973392834ca00562b36a5fc9146b5b7dfb7a448a1197",
     "tests/autonomy_orchestrator/test_monthly_limits.py": "f73a2d5ace067a7add4ec8a4aa50dc887521902308c55c613e27e1843e7f84e2",
+    "tests/autonomy_orchestrator/test_monthly_pnl.py": "a697769725a288b13d8dc05e35067ad5f58fcaa344be4011651078328f8218d7",
     "tests/autonomy_orchestrator/test_orchestrator_status.py": "c9130e3ad23e3dcfb0c032e5e4b36a96f1b7a8f044756837b846744dd2442eab",
     "tests/autonomy_orchestrator/test_risk_engine.py": "224553afb3d968ff3996b90017d9fe9a810d5f375f7c127cea454aabaaf6684c",
     "tests/autonomy_orchestrator/test_stop_loss_wiring.py": "170e8bc1b2f6920e73f3ab867fc1a508566df793f5629098231804c5837cfbec",
@@ -145,5 +147,5 @@
     "tests/strategy_service/test_strategy_service.py": "4dee834197dd1804dcf3f7fca048f92b83ccd2af3438ef2a82b487321435ca93",
     "tests/test_aahp.py": "050335656f8f8a4904450c79d744fb82c373b04ebd49693104fcb2079ab515bc"
   },
-  "generated_at": "2026-08-30T11:42:47.682669+00:00"
+  "generated_at": "2026-08-30T11:45:28.764408+00:00"
 }

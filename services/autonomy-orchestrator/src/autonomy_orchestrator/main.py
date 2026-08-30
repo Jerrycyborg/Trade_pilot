@@ -747,15 +747,43 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     )
 
 
+def _realized_pnl(record, exit_price: float | None) -> float | None:
+    """P&L on a closed position, or None when it cannot be determined.
+
+    A record registered with qty=0 means "close whatever is open at the broker",
+    so the size is unknown here and no P&L can be attributed.
+    """
+    if record is None or exit_price is None:
+        return None
+    qty = float(getattr(record, "qty", 0.0) or 0.0)
+    entry = float(getattr(record, "entry_price", 0.0) or 0.0)
+    if qty <= 0.0 or entry <= 0.0:
+        return None
+    return (exit_price - entry) * qty
+
+
 async def _run_stop_loss_check() -> None:
     if state.stop_loss_monitor is None:
         return
-    triggered = await state.stop_loss_monitor.check_all(_price_source())
+    prices = _price_source()
+    # check_all() drops each record as it fires, so snapshot before calling it.
+    tracked = state.stop_loss_monitor.records()
+    triggered = await state.stop_loss_monitor.check_all(prices)
     if not triggered:
         return
     logger.info("StopLossMonitor triggered exits for: %s", triggered)
     for symbol in triggered:
-        state.monthly_realized_loss_usd += 5.0
+        # Attribute the actual loss. Adding a flat constant per stop meant the
+        # monthly limit tripped after a fixed number of stops rather than at a
+        # real drawdown — and intraday fires stops far more often.
+        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        if realized is None:
+            logger.warning(
+                "Stop-loss on %s: position size unknown, loss not attributed to the "
+                "monthly limit", symbol,
+            )
+        else:
+            state.monthly_realized_loss_usd += max(0.0, -realized)
         await _notify_smart("stop_loss_triggered", f"⛔ Stop-loss fired: {symbol}", tier=2)
         if state.monthly_realized_loss_usd >= settings.monthly_loss_limit_usd * 0.7:
             await _notify_smart(
@@ -774,9 +802,19 @@ async def _run_stop_loss_check() -> None:
 async def _run_take_profit_check() -> None:
     if state.take_profit_monitor is None:
         return
-    triggered = await state.take_profit_monitor.check_all(_price_source())
+    prices = _price_source()
+    tracked = state.take_profit_monitor.records()
+    triggered = await state.take_profit_monitor.check_all(prices)
     for symbol in triggered:
-        state.monthly_realized_profit_usd += settings.take_profit_target_usd
+        # Book the gain actually achieved, not the target that was aimed at.
+        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        if realized is None:
+            logger.warning(
+                "Take-profit on %s: position size unknown, gain not attributed to the "
+                "monthly target", symbol,
+            )
+        else:
+            state.monthly_realized_profit_usd += max(0.0, realized)
         await _notify_smart("take_profit", f"✅ Take-profit hit: {symbol}", tier=1)
         if state.monthly_realized_profit_usd >= settings.monthly_profit_target_usd:
             await _notify_smart(

@@ -41,6 +41,11 @@ class TakeProfitMonitor:
     def get(self, symbol: str) -> TakeProfitRecord | None:
         return self._records.get(symbol.upper())
 
+    def records(self) -> dict[str, TakeProfitRecord]:
+        """Snapshot of tracked targets. check_all() removes them as they fire, so
+        callers that need a fired record must take this first."""
+        return dict(self._records)
+
     async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
         triggered: list[str] = []
         for symbol, record in list(self._records.items()):

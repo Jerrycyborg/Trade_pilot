@@ -60,6 +60,11 @@ class StopLossMonitor:
     def remove(self, symbol: str) -> None:
         self._stops.pop(symbol.upper(), None)
 
+    def records(self) -> dict[str, StopLossRecord]:
+        """Snapshot of tracked stops. check_all() removes them as they fire, so
+        callers that need a fired record must take this first."""
+        return dict(self._stops)
+
     async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
         """
         Read the current price for each tracked position. If it is at or below
