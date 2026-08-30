@@ -151,6 +151,53 @@ Inspect current paper P&L:
 curl http://localhost:8002/v1/account
 ```
 
+## Day-Trade Budget (PDT)
+
+Check remaining budget:
+```bash
+curl http://localhost:8007/v1/orchestrator/day-trades
+```
+
+### "New entries paused — pdt_day_trade_limit"
+
+Expected, not a fault: three day trades have been taken inside the rolling
+five-business-day window and account equity is under the threshold. Exits still
+work; only new entries are blocked. The budget frees up as sessions roll off.
+
+To trade through it, one of:
+- Fund the account above `PDT_EQUITY_THRESHOLD_USD` (25,000 by default)
+- Set `PDT_ENABLED=false` **only if the rule does not apply to your broker or
+  jurisdiction** — confirm with the broker first
+- Wait for the window to roll
+
+### Budget looks wrong after a restart
+
+State lives in `PDT_STATE_PATH` (default `./day-trade-state.json`). If it was
+deleted the count restarts at zero while the broker still remembers, which can
+put the account over the real limit. Reconcile against the broker's own day
+trade counter before resuming.
+
+### Holiday weeks
+
+The window is weekday-based and does not know market holidays, so a day trade
+can expire one session early in a holiday week. Set `PDT_MAX_DAY_TRADES=2` for
+margin if that matters.
+
+## Checking Whether the Strategy Makes Money
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT,NVDA
+uv run python scripts/run_backtest.py --symbols AAPL --sweep   # cost sensitivity
+```
+
+Read the **cost drag** line first. If gross is positive and net is negative, the
+strategy has a signal but not an edge — costs consume it, and running it faster
+only loses money quicker.
+
+"No trades taken" is not a pass: it means the entry conditions never all held,
+so there is nothing to evaluate. Lengthen `--days` or check the warm-up (EMA-50
+needs 51 bars before any signal is possible).
+
 ## Emergency Procedures
 
 ### Service crash

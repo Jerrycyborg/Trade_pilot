@@ -206,6 +206,86 @@ Every result carries a timestamp. If no tier can supply a price, the strategy
 reports the data as **stale** rather than fresh, and the policy service rejects
 the trade. The system fails closed: no price means no order.
 
+## Does the Strategy Actually Work?
+
+The live loop will trade a strategy with no edge just as happily as a good one.
+Backtest before trusting it with money.
+
+```bash
+# 60 days of 15-minute bars across three symbols, with realistic costs
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT,NVDA
+
+# how much cost does the edge survive?
+uv run python scripts/run_backtest.py --symbols AAPL --sweep
+```
+
+The report separates **gross** return from **net**, because on an intraday
+strategy the gap between them is usually the whole story:
+
+```
+  Net return        +2.14%
+  Gross (no costs)  +8.90%
+  Cost drag         -6.76%  ($6,760, 76% of gross)
+```
+
+Costs default to 5bps spread + 1bps slippage + zero commission — roughly a
+liquid US large-cap at a commission-free broker. **Set them to match your broker
+and your symbols.** A wider spread is the fastest way for an intraday strategy
+to stop working, and `--sweep` shows exactly where it breaks:
+
+```
+      spread       return    trades
+       0.0bps       8.90%        84
+       5.0bps       2.14%        84
+      10.0bps      -4.61%        84     <- edge gone
+```
+
+If the strategy is unprofitable at your real costs, no amount of faster
+execution will fix that. Fix the strategy or stop.
+
+### What the backtest does not tell you
+
+- It runs one symbol at a time with no portfolio interaction.
+- It assumes every order fills at the next bar's open. Real market orders in
+  fast markets do worse.
+- Past results do not predict future returns. A strategy tuned until a backtest
+  looks good is a strategy fitted to history.
+
+## Pattern Day Trader (PDT) Protection
+
+Intraday trading in the US runs into a rule that automated systems breach
+quickly: **four or more day trades in five business days, with account equity
+under $25,000**, gets an account designated a pattern day trader and restricted.
+
+The orchestrator tracks day trades in a rolling five-business-day window and
+blocks new **entries** once the budget is spent. It never blocks an exit —
+holding a losing position past its stop to avoid a compliance flag trades a
+regulatory problem for a financial one.
+
+```bash
+curl http://localhost:8007/v1/orchestrator/day-trades
+```
+
+```json
+{"enabled": true, "day_trades_used": 2, "max_day_trades": 3,
+ "day_trades_remaining": 1, "equity_threshold_usd": 25000.0}
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PDT_ENABLED` | `true` | Set `false` if the rule does not apply to you |
+| `PDT_EQUITY_THRESHOLD_USD` | `25000` | Above this the rule does not bite |
+| `PDT_MAX_DAY_TRADES` | `3` | The 4th triggers designation; use `2` for margin |
+| `PDT_STATE_PATH` | `./day-trade-state.json` | Persisted; the window spans 5 days |
+
+**This is a US margin-account rule.** Cash accounts face settlement constraints
+instead, and non-US brokers have their own regimes. Confirm which applies to you
+with your broker rather than trusting this default — being flagged is
+disruptive to undo. Two known limitations: market holidays are not known, so in
+a holiday week a day trade can expire one session early (set
+`PDT_MAX_DAY_TRADES=2` for margin); and crypto round trips are counted even
+though FINRA's rule covers securities, which is conservative rather than unsafe.
+
 ## Enabling Live Mode (Step-by-Step)
 
 ⚠️ Only proceed after at least 30 days of demo/paper trading with no policy violations.

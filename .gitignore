@@ -12,3 +12,5 @@ __pycache__/
 .env
 paper-broker-state.json
 paper-broker-state.tmp
+day-trade-state.json
+day-trade-state.tmp

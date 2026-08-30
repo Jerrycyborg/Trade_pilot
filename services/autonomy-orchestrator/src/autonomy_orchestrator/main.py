@@ -28,6 +28,7 @@ from market_data.indicators import compute_atr
 from pydantic import BaseModel
 
 from .config import settings
+from .day_trade_tracker import DayTradeTracker
 from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
@@ -59,6 +60,7 @@ class OrchestratorState:
     price_source: RealtimePriceSource | None = None
     stream_manager: StreamManager | None = None
     market_settings: MarketDataSettings | None = None
+    day_trades: DayTradeTracker | None = None
 
 
 state = OrchestratorState()
@@ -266,6 +268,7 @@ def realtime_status() -> dict[str, object]:
     source = _price_source()
     return {
         "timeframe": market_settings.timeframe,
+        "pattern_day_trader": _day_trades().status(),
         "intraday": market_settings.is_intraday,
         "intraday_minutes": market_settings.intraday_minutes,
         "provider": "alpaca" if market_settings.has_alpaca_credentials else "yahoo",
@@ -288,6 +291,12 @@ def realtime_status() -> dict[str, object]:
             if (snapshot := source.cache.peek(symbol)) is not None
         },
     }
+
+
+@app.get("/v1/orchestrator/day-trades")
+def day_trade_status() -> dict[str, object]:
+    """Day-trade budget under the US pattern-day-trader rule."""
+    return _day_trades().status()
 
 
 @app.get("/v1/orchestrator/status")
@@ -443,8 +452,40 @@ async def run_cycle() -> dict[str, object]:
             return summary
         signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
         portfolio_state = await _portfolio_state()
+
+        # Pattern-day-trader budget. Checked once per cycle rather than per
+        # signal: the equity lookup is a network call and the budget cannot
+        # change mid-cycle, since it only moves when a position is closed.
+        pdt = _day_trades().check_entry(await _account_equity())
+        summary["pdt"] = {
+            "allowed": pdt.allowed,
+            "reason": pdt.reason,
+            "day_trades_used": pdt.day_trades_used,
+            "day_trades_remaining": pdt.day_trades_remaining,
+        }
+        if not pdt.allowed:
+            logger.warning("New entries blocked: %s", pdt.reason)
+            await _notify_smart(
+                "pdt_limit_reached",
+                f"\u26d4 New entries paused — {pdt.reason}. Exits are unaffected.",
+                tier=2,
+            )
+
         for signal in signals:
             summary["signals"] += 1
+            if not pdt.allowed:
+                summary["rejected"] += 1
+                await _audit(
+                    AuditEvent(
+                        event_type="signal.rejected",
+                        symbol=signal.symbol,
+                        signal_id=signal.signal_id,
+                        decision="REJECT",
+                        reasoning=pdt.reason,
+                        metadata={"guard": "pattern_day_trader"},
+                    )
+                )
+                continue
             price_bars = _fetch_price_bars(signal.symbol)
             risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
             if not risk.approved:
@@ -466,6 +507,7 @@ async def run_cycle() -> dict[str, object]:
                 await _notify(signal, risk, policy)
             if decision == "APPROVE" and risk.tier < 3:
                 order = await _submit_order(signal, risk, config, portfolio_state)
+                _day_trades().record_open(signal.symbol)
                 _register_stop_loss(signal.symbol, order, price_bars)
                 _register_take_profit(signal, order)
                 weekly_spend += float(order.get("amount_usd", 0.0))
@@ -674,6 +716,32 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
     return body
 
 
+def _day_trades() -> DayTradeTracker:
+    if state.day_trades is None:
+        state.day_trades = DayTradeTracker()
+    return state.day_trades
+
+
+async def _account_equity() -> float | None:
+    """Account equity, or None if it cannot be read.
+
+    None is not treated as "fine": the PDT guard assumes an unknown balance is
+    below the threshold, because approving on a guess is how an account gets
+    flagged.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{settings.execution_service_url}/v1/account",
+                headers=_internal_headers(),
+            )
+            if response.status_code == 200:
+                return float(response.json().get("equity"))
+    except Exception as exc:
+        logger.warning("Could not read account equity for the PDT check: %s", exc)
+    return None
+
+
 def _market_settings() -> MarketDataSettings:
     if state.market_settings is None:
         state.market_settings = MarketDataSettings()
@@ -776,6 +844,7 @@ async def _run_stop_loss_check() -> None:
         # Attribute the actual loss. Adding a flat constant per stop meant the
         # monthly limit tripped after a fixed number of stops rather than at a
         # real drawdown — and intraday fires stops far more often.
+        _day_trades().record_close(symbol)
         realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
         if realized is None:
             logger.warning(
@@ -807,6 +876,7 @@ async def _run_take_profit_check() -> None:
     triggered = await state.take_profit_monitor.check_all(prices)
     for symbol in triggered:
         # Book the gain actually achieved, not the target that was aimed at.
+        _day_trades().record_close(symbol)
         realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
         if realized is None:
             logger.warning(
@@ -1035,6 +1105,7 @@ async def _process_exit_signals() -> int:
         if response.status_code not in (200, 201):
             continue
         closed += 1
+        _day_trades().record_close(signal.symbol)
         await _audit(
             AuditEvent(
                 event_type="trade.closed",
