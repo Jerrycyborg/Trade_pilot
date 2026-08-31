@@ -853,14 +853,20 @@ def _register_stop_loss(
         logger.warning("Skipping stop registration for %s: missing entry price", symbol)
         return
 
-    stop_price = entry_price * 0.98
+    # A short is stopped out by a RISE, so its stop sits above the entry. Placing
+    # it below (as the long formula does) puts the stop on the wrong side of the
+    # market: the direction-aware monitor would fire it on the first check,
+    # closing every short the moment it opened.
+    is_short = side.upper() == "SELL"
+    distance = entry_price * 0.02
     if price_bars:
         highs = [float(bar.high) for bar in price_bars]
         lows = [float(bar.low) for bar in price_bars]
         closes = [float(bar.close) for bar in price_bars]
         atr = compute_atr(highs, lows, closes)
         if atr > 0.0:
-            stop_price = entry_price - atr * 2.0
+            distance = atr * 2.0
+    stop_price = entry_price + distance if is_short else entry_price - distance
 
     state.stop_loss_monitor.register(
         StopLossRecord(
@@ -881,7 +887,15 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     if entry_price <= 0.0 or state.take_profit_monitor is None:
         return
 
-    target_price = entry_price + (settings.take_profit_target_usd / qty) if qty > 0 else entry_price * 1.06
+    # Mirror image: a short profits as price FALLS, so its target sits below the
+    # entry. An above-entry target is already satisfied at the moment of entry.
+    is_short = _side_of(signal.candidate_action) == "SELL"
+    gain_per_share = (
+        settings.take_profit_target_usd / qty if qty > 0 else entry_price * 0.06
+    )
+    target_price = (
+        entry_price - gain_per_share if is_short else entry_price + gain_per_share
+    )
     state.take_profit_monitor.register(
         TakeProfitRecord(
             symbol=signal.symbol,

@@ -298,3 +298,73 @@ class TestSideIsStoredAsAPlainValue:
         )
         # Short at 100, closed at 104 — a $40 loss, not a $40 gain.
         assert main._realized_pnl(record, 104.0) == -40.0
+
+
+class TestShortLevelsAreOnTheRightSide:
+    """Regression: the direction-aware monitors made shorts self-destruct.
+
+    A short's stop was still built below entry and its target above, so both
+    conditions were already satisfied at the moment of entry — every short
+    opened and closed on the first monitor tick.
+    """
+
+    def _order(self, entry: float = 100.0, qty: float = 10.0) -> dict:
+        return {"order_id": "o1", "entry_price": entry, "qty": qty}
+
+    def _signal(self, action):
+        from contracts import SignalCandidate
+
+        return SignalCandidate(
+            signal_id="s", symbol="AAPL", ts=datetime.now(timezone.utc),
+            candidate_action=action, confidence=0.8, size_pct=0.01,
+            horizon="intraday", source="t", model_version="v", risk_score="LOW",
+        )
+
+    def test_short_stop_sits_above_entry(self) -> None:
+        from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor
+
+        main.state.stop_loss_monitor = StopLossMonitor("http://x", "k")
+        main._register_stop_loss("AAPL", self._order(), None, side="SELL")
+
+        record = main.state.stop_loss_monitor.get("AAPL")
+        assert record.stop_price > record.entry_price
+
+    def test_long_stop_still_sits_below_entry(self) -> None:
+        from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor
+
+        main.state.stop_loss_monitor = StopLossMonitor("http://x", "k")
+        main._register_stop_loss("AAPL", self._order(), None, side="BUY")
+
+        record = main.state.stop_loss_monitor.get("AAPL")
+        assert record.stop_price < record.entry_price
+
+    def test_a_fresh_short_is_not_immediately_stopped_out(self) -> None:
+        """The failure mode itself: at the entry price, nothing should trigger."""
+        from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor
+
+        main.state.stop_loss_monitor = StopLossMonitor("http://x", "k")
+        main._register_stop_loss("AAPL", self._order(entry=100.0), None, side="SELL")
+        record = main.state.stop_loss_monitor.get("AAPL")
+
+        assert not (100.0 >= record.stop_price)  # the short trigger condition
+
+    def test_short_target_sits_below_entry(self) -> None:
+        from autonomy_orchestrator.take_profit_monitor import TakeProfitMonitor
+        from contracts import CandidateAction
+
+        main.state.take_profit_monitor = TakeProfitMonitor("http://x", "k")
+        main._register_take_profit(self._signal(CandidateAction.SELL), self._order())
+
+        record = main.state.take_profit_monitor.get("AAPL")
+        assert record.target_price < record.entry_price
+        assert record.side == "SELL"
+
+    def test_long_target_still_sits_above_entry(self) -> None:
+        from autonomy_orchestrator.take_profit_monitor import TakeProfitMonitor
+        from contracts import CandidateAction
+
+        main.state.take_profit_monitor = TakeProfitMonitor("http://x", "k")
+        main._register_take_profit(self._signal(CandidateAction.BUY), self._order())
+
+        record = main.state.take_profit_monitor.get("AAPL")
+        assert record.target_price > record.entry_price
