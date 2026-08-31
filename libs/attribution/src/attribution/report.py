@@ -20,6 +20,7 @@ from typing import Any
 from .attribute import attribute
 from .counterfactual import run_counterfactuals
 from .models import Attribution, CoverageReport, RoundTrip
+from .regime import RegimeSlice
 from .roundtrips import load_round_trips
 
 logger = logging.getLogger(__name__)
@@ -35,10 +36,30 @@ def _point_in_time_bars(
     diagnosis would make every trade look worse or better than it was
     decidable at the time.
     """
+    return _bars_as_of(journal, round_trip.symbol, timeframe, round_trip.exit.at)
+
+
+def _entry_bars(journal: Any, round_trip: RoundTrip, timeframe: str) -> list[dict[str, Any]]:
+    """The series as it stood when the trade was opened.
+
+    A second query per round trip, and worth it. The entry regime is a
+    statement about what was knowable at the entry, and filtering the
+    exit-time series by timestamp does not produce that: it removes bars from
+    the future but keeps revisions of past bars that arrived during the hold.
+    Classifying the conditions a decision was made in, using data that arrived
+    after the decision, is the exact mistake the point-in-time archive was
+    built to prevent.
+    """
+    return _bars_as_of(journal, round_trip.symbol, timeframe, round_trip.entry.at)
+
+
+def _bars_as_of(
+    journal: Any, symbol: str, timeframe: str, moment: datetime
+) -> list[dict[str, Any]]:
     try:
-        return journal.bars_as_of(round_trip.symbol, timeframe, round_trip.exit.at)
+        return journal.bars_as_of(symbol, timeframe, moment)
     except Exception as exc:  # pragma: no cover - a report must not crash
-        logger.debug("Point-in-time bars unavailable for %s: %s", round_trip.symbol, exc)
+        logger.debug("Point-in-time bars unavailable for %s: %s", symbol, exc)
         return []
 
 
@@ -53,9 +74,11 @@ def build_report(
     window_end: datetime | None = None,
     timeframe: str = "15m",
     with_counterfactuals: bool = True,
+    with_regime: bool = True,
     limit: int = 5000,
 ) -> dict[str, Any]:
     """Attribute every closed round trip in scope, and report the coverage."""
+    with_regime_or_cf = with_counterfactuals or with_regime
     trips = load_round_trips(
         journal,
         strategy_id=strategy_id,
@@ -75,8 +98,9 @@ def build_report(
         coverage.environments[trip.environment] = (
             coverage.environments.get(trip.environment, 0) + 1
         )
-        bars = _point_in_time_bars(journal, trip, timeframe) if with_counterfactuals else []
-        result = attribute(trip, bars)
+        bars = _point_in_time_bars(journal, trip, timeframe) if with_regime_or_cf else []
+        entry_bars = _entry_bars(journal, trip, timeframe) if with_regime_or_cf else None
+        result = attribute(trip, bars, entry_bars)
         attributions.append(result)
 
         if result.complete:
@@ -106,6 +130,7 @@ def build_report(
         "exit_reasons": dict(
             Counter(a.diagnostics.get("exit_reason", "unknown") for a in attributions)
         ),
+        "by_regime": _by_regime(attributions),
         "attributions": [a.to_dict() for a in attributions],
         "counterfactuals": counterfactuals,
     }
@@ -221,3 +246,74 @@ def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
     result["max_cumulative_loss"] = round(trough, 4)
     result["win_rate"] = round(sum(1 for v in series if v > 0) / len(series), 4)
     return result
+
+
+def _by_regime(attributions: list[Attribution]) -> dict[str, Any]:
+    """Results grouped by the regime each trade was *entered* into.
+
+    Entry rather than exit, because that is the regime the decision was made
+    in, and the question this answers is whether the rule is being applied
+    where it works. A slice that is consistently negative is the strongest
+    evidence L0 can produce: not "the strategy is bad" but "the strategy is
+    being run in conditions it does not handle", which points at a filter
+    rather than at the rule.
+
+    Trades whose regime could not be classified go to their own slice instead
+    of a residual bucket that quietly resembles a real one. So do trades whose
+    decomposition is incomplete: they are counted in the slice, and counted
+    again as incomplete, so a reader can see how much of it rests on trades
+    that could not be fully explained.
+    """
+    slices: dict[str, RegimeSlice] = {}
+    shifted = 0
+    shift_known = 0
+    shift_realized = 0.0
+    steady_realized = 0.0
+
+    for attribution in attributions:
+        reading = attribution.diagnostics.get("entry_regime") or {}
+        label = reading.get("label", "unknown") if reading.get("available") else "unknown"
+        slot = slices.setdefault(label, RegimeSlice(regime=label))
+        slot.trades += 1
+        slot.symbols.add(attribution.round_trip.symbol)
+
+        realized = attribution.round_trip.realized
+        if realized is not None:
+            slot.realized += realized
+            if realized > 0:
+                slot.wins += 1
+
+        if attribution.complete:
+            qty = attribution.round_trip.qty
+            slot.from_signal += (attribution.signal or 0.0) * qty
+            slot.execution_cost += (
+                (attribution.entry_execution or 0.0) + (attribution.exit_execution or 0.0)
+            ) * qty
+        else:
+            slot.incomplete += 1
+
+        shift = attribution.diagnostics.get("regime_shift") or {}
+        if shift.get("changed") is not None:
+            shift_known += 1
+            if shift["changed"]:
+                shifted += 1
+                shift_realized += realized or 0.0
+            else:
+                steady_realized += realized or 0.0
+
+    return {
+        "slices": [
+            slices[key].to_dict() for key in sorted(slices, key=lambda k: -slices[k].trades)
+        ],
+        "regime_shift": {
+            "classifiable_trades": shift_known,
+            "changed": shifted,
+            "realized_when_changed": round(shift_realized, 4),
+            "realized_when_steady": round(steady_realized, 4),
+            "note": (
+                "A trade whose regime changed under it is the textbook way for a "
+                "correct signal to lose money. Comparing the two totals is "
+                "suggestive, not causal: nothing here controls for anything."
+            ),
+        },
+    }

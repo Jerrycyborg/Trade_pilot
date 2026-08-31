@@ -12,20 +12,34 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from contracts import CandidateAction, ExecutionOrderRequest, PortfolioContext, SignalCandidate
+from market_data import build_ta_summary
 from market_data.models import OHLCVBar
 from strategy_service.config import settings as worker_settings
 from strategy_service.worker import TradeWorker, WorkerRunResult
 
+_UNSET = object()
 
-def _bars(volume: float, n: int = 3) -> list[OHLCVBar]:
+
+def _bars(volume: float, n: int = 30, flat: bool = False) -> list[OHLCVBar]:
+    """A gently rising series, long enough for ADX to be a measurement.
+
+    Three flat bars used to be enough, because `compute_adx` returns its
+    neutral sentinel of 25.0 on a short series and 25.0 clears the worker's
+    trend gate. That made these sizing tests run down a path where the regime
+    filter was disabled by a fabricated number — which is the defect the worker
+    now refuses. The series rises so the regime is genuinely trending; volumes
+    stay uniform so the ADV arithmetic below is unchanged.
+    """
     now = datetime.now(timezone.utc)
+    step = 0.0 if flat else 0.05
+    prices = [200.0 - step * (n - 1 - i) for i in range(n)]
     return [
         OHLCVBar(
             symbol="AAPL",
-            timestamp=now - timedelta(minutes=5 * i),
-            open=200.0, high=200.0, low=200.0, close=200.0, volume=volume,
+            timestamp=now - timedelta(minutes=5 * (n - 1 - i)),
+            open=price, high=price, low=price, close=price, volume=volume,
         )
-        for i in range(n)
+        for i, price in enumerate(prices)
     ]
 
 
@@ -78,14 +92,20 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
         *,
         volume: float = 50_000_000.0,
         action: CandidateAction = CandidateAction.BUY,
+        bar_count: int = 30,
+        flat: bool = False,
+        ta: object = _UNSET,
     ) -> ExecutionOrderRequest | None:
         worker = TradeWorker()
-        bars = _bars(volume)
+        bars = _bars(volume, n=bar_count, flat=flat)
 
         monkeypatch.setattr(
             "strategy_service.worker._build_deterministic_signal", lambda _s: _signal(action)
         )
-        monkeypatch.setattr(worker, "_get_market_snapshot", lambda _s: (None, bars))
+        summary = (
+            build_ta_summary("AAPL", bars, data_source="intraday") if ta is _UNSET else ta
+        )
+        monkeypatch.setattr(worker, "_get_market_snapshot", lambda _s: (summary, bars))
 
         async def buying_power() -> float:
             return 100_000.0
@@ -214,3 +234,32 @@ async def test_an_unavailable_authority_places_no_order(worker_run, monkeypatch)
 
     reset_lifecycle_service(LifecycleService(store=None))
     assert await worker_run() is None
+
+
+class TestTheRegimeGateFailsClosed:
+    """`compute_adx` returns 25.0 when the series is too short to measure one,
+    and 25.0 is *above* the worker's own trend threshold of 20. So the filter
+    that exists to keep trend entries out of a range used to pass on thin or
+    absent data — the one condition where nothing is known about the regime at
+    all. An unmeasurable regime is not a trending one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_short_series_does_not_reach_the_broker(self, worker_run) -> None:
+        assert await worker_run(bar_count=6) is None
+
+    @pytest.mark.asyncio
+    async def test_no_market_snapshot_at_all_does_not_reach_the_broker(
+        self, worker_run
+    ) -> None:
+        assert await worker_run(ta=None) is None
+
+    @pytest.mark.asyncio
+    async def test_a_measurable_trend_still_trades(self, worker_run) -> None:
+        """The gate must refuse the unknown without refusing everything: a
+        filter that blocks every entry is not fail-closed, it is broken."""
+        assert await worker_run() is not None
+
+    @pytest.mark.asyncio
+    async def test_a_measurable_range_is_still_refused(self, worker_run) -> None:
+        assert await worker_run(flat=True) is None

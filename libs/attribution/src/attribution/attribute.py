@@ -26,16 +26,26 @@ import logging
 from typing import Any
 
 from .models import Attribution, RoundTrip
+from .regime import classify, describe_shift
 
 logger = logging.getLogger(__name__)
 
 
-def attribute(round_trip: RoundTrip, bars: list[dict[str, Any]] | None = None) -> Attribution:
+def attribute(
+    round_trip: RoundTrip,
+    bars: list[dict[str, Any]] | None = None,
+    entry_bars: list[dict[str, Any]] | None = None,
+) -> Attribution:
     """Explain one round trip, naming whatever it could not explain.
 
-    `bars` are the point-in-time series for the holding period — what the
-    system knew *then*, not the corrected series. Passing the corrected one
-    would let a revision the live system never saw shape the diagnosis.
+    `bars` are the point-in-time series as of the exit — what the system knew
+    *then*, not the corrected series. Passing the corrected one would let a
+    revision the live system never saw shape the diagnosis.
+
+    `entry_bars` is the same series as of the *entry*, used only to classify
+    the regime the trade was opened into. Filtering `bars` by timestamp would
+    remove future bars but not revisions of past ones that arrived during the
+    hold, so without it the entry regime is a weaker claim and says so.
     """
     result = Attribution(round_trip=round_trip)
     entry, exit_ = round_trip.entry, round_trip.exit
@@ -51,7 +61,7 @@ def attribute(round_trip: RoundTrip, bars: list[dict[str, Any]] | None = None) -
         result.missing.append("exit_decision_price")
 
     result.fees = round((entry.fees or 0.0) + (exit_.fees or 0.0), 6)
-    result.diagnostics.update(_diagnostics(round_trip, bars))
+    result.diagnostics.update(_diagnostics(round_trip, bars, entry_bars))
 
     if result.missing:
         # Partial on purpose: a zero here would read as "execution cost nothing"
@@ -64,12 +74,17 @@ def attribute(round_trip: RoundTrip, bars: list[dict[str, Any]] | None = None) -
     return result
 
 
-def _diagnostics(round_trip: RoundTrip, bars: list[dict[str, Any]] | None) -> dict[str, Any]:
+def _diagnostics(
+    round_trip: RoundTrip,
+    bars: list[dict[str, Any]] | None,
+    entry_bars: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Context that explains a result without being part of the identity."""
     diagnostics: dict[str, Any] = {
         "exit_reason": round_trip.exit.outcome or "unknown",
         "held_for_minutes": round(round_trip.held_for_minutes, 2),
     }
+    diagnostics.update(_regime(round_trip, bars, entry_bars))
 
     window = _bars_between(round_trip, bars)
     if not window:
@@ -130,3 +145,32 @@ def _bars_between(
         if round_trip.entry.at <= stamp <= round_trip.exit.at:
             out.append(bar)
     return out
+
+
+def _regime(
+    round_trip: RoundTrip,
+    bars: list[dict[str, Any]] | None,
+    entry_bars: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """What the market was doing at each end of the trade.
+
+    Kept out of the identity deliberately. A regime label is a classification
+    with a threshold in it, and a threshold is an opinion; the three price
+    components have to add up whatever anyone thinks about ADX.
+
+    The entry reading prefers a series fetched as of the entry. When only the
+    exit-time series is available it is still used — a timestamp-filtered
+    reading is worth more than no reading — but it is labelled `exit_series`
+    so nobody reads it as point-in-time when it is not.
+    """
+    if entry_bars is not None:
+        entry_regime = classify(entry_bars, round_trip.entry.at, point_in_time="as_of")
+    else:
+        entry_regime = classify(bars, round_trip.entry.at, point_in_time="exit_series")
+    exit_regime = classify(bars, round_trip.exit.at, point_in_time="as_of")
+
+    return {
+        "entry_regime": entry_regime.to_dict(),
+        "exit_regime": exit_regime.to_dict(),
+        "regime_shift": describe_shift(entry_regime, exit_regime),
+    }

@@ -793,11 +793,47 @@ They are questions for a later phase, not recommendations. Per
 propose a change until attribution has shown the archive can explain outcomes
 at all — this is L0 of that roadmap, and it proposes nothing.
 
+### Regime: was the rule wrong, or run in the wrong conditions?
+
+The price decomposition says how much of a result came from the signal. It
+cannot say *why* the signal was right or wrong, and for a rule-based strategy
+the most common answer is that the rule was applied in conditions it was not
+built for. A trend entry taken in a range earns nothing however well it is
+executed, and that failure looks identical to a bad rule in the numbers above.
+
+So each trade carries the regime at both ends, classified from bars the system
+actually held at that moment — `bars_as_of(entry)` for the entry, not the
+exit-time series, because a revision that arrived during the hold was not
+knowable when the entry was decided. Results are then grouped by the regime
+each trade was **entered** into:
+
+```text
+  BY ENTRY REGIME
+  regime             trades     realised      signal   win rate
+  ranging                 8      -268.00     -220.00         0%
+  trending_up             6      +603.00     +630.00       100%
+```
+
+The headline for that archive is `+335 realised`, which reads as a strategy
+that works. The slices say it earns in a trend and loses in a range — which
+points at a missing filter rather than at a broken rule, and those imply
+completely different work.
+
+A regime that cannot be measured gets its own `unknown` row rather than a
+residual bucket that resembles a real one. `compute_adx` returns 25.0 when the
+series is too short, which reads as "mildly trending"; letting that into an
+analysis would turn the absence of evidence into evidence. Regime is a
+diagnostic and never enters the identity — a label with a threshold in it is an
+opinion, and the three price components have to add up regardless of anyone's
+opinion about ADX.
+
+> The same sentinel was a live defect. The strategy worker gates trend entries
+> on `ADX < 20`, and 25.0 sits above 20 — so on thin data, or with no market
+> snapshot at all, the regime filter passed on a fabricated number. It now
+> refuses an entry whose regime it cannot measure.
+
 ### What it cannot tell you
 
-- **Regime attribution is not implemented.** The decomposition separates signal
-  from execution; it does not yet say whether the signal was wrong because the
-  regime changed.
 - **It cannot see a trade it has no record of.** Coverage below 100% means
   exactly that, and the fix is upstream in what gets recorded.
 - **Pairing is FIFO within one (strategy, symbol, environment, account).** It

@@ -139,10 +139,14 @@ version = "0.1.0"
 source = { editable = "libs/attribution" }
 dependencies = [
     { name = "journal" },
+    { name = "market-data" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "journal", editable = "libs/journal" }]
+requires-dist = [
+    { name = "journal", editable = "libs/journal" },
+    { name = "market-data", editable = "libs/market_data" },
+]
 
 [[package]]
 name = "audit-logger"

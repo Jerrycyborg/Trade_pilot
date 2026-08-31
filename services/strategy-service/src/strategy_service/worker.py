@@ -27,8 +27,10 @@ from contracts.execution import (
 from lifecycle import DEFAULT_LIVE_STRATEGY
 from lifecycle.service import get_lifecycle_service, reset_lifecycle_service
 from market_data import (
+    ADX_NEUTRAL,
     MarketDataSettings,
     RealtimePriceSource,
+    adx_is_computable,
     build_ta_summary,
     fetch_bars,
     market_session,
@@ -144,8 +146,19 @@ class TradeWorker:
 
         ta, bars = self._get_market_snapshot(symbol)
         if signal.candidate_action == "BUY":
-            adx = getattr(ta, "adx", 25.0) if ta is not None else 25.0
-            if adx < 20.0:
+            # compute_adx returns ADX_NEUTRAL (25.0) when the series is too
+            # short, and 25.0 sits *above* this filter's threshold — so on thin
+            # or missing data the regime gate used to pass on a fabricated
+            # number rather than refuse. An unmeasurable regime is not a
+            # trending one.
+            bars_count = getattr(ta, "bars_count", 0) if ta is not None else 0
+            adx = getattr(ta, "adx", ADX_NEUTRAL) if ta is not None else ADX_NEUTRAL
+            if not adx_is_computable(bars_count):
+                logger.debug(
+                    "regime: not measurable (%s bars), suppressing trend signal", bars_count
+                )
+                signal.candidate_action = CandidateAction.HOLD
+            elif adx < 20.0:
                 logger.debug("regime: ranging (adx=%s), suppressing trend signal", round(adx, 4))
                 signal.candidate_action = CandidateAction.HOLD
             elif settings.volume_confirm_enabled and bars:

@@ -136,12 +136,41 @@ def compute_atr(
     return atr
 
 
+#: Wilder's default, and the period every caller here uses.
+ADX_PERIOD = 14
+
+#: What compute_adx returns when it cannot compute one. It reads as "mildly
+#: trending", which is a usable default for a filter that must decide
+#: something and a trap for anything that treats it as an observation.
+ADX_NEUTRAL = 25.0
+
+#: Below this many bars the result is ADX_NEUTRAL rather than a measurement.
+ADX_MIN_BARS = ADX_PERIOD + 2
+
+
+def adx_is_computable(bars_count: int, period: int = ADX_PERIOD) -> bool:
+    """Whether an ADX from `bars_count` bars is a measurement or the sentinel.
+
+    Exists so callers stop having to know that 25.0 is sometimes a number and
+    sometimes an absence. A trend filter that skips this check does not fail
+    closed on thin data — it passes, because the sentinel sits above every
+    threshold anyone sets.
+    """
+    return bars_count >= period + 2
+
+
 def compute_adx(
-    highs: list[float], lows: list[float], closes: list[float], period: int = 14
+    highs: list[float], lows: list[float], closes: list[float], period: int = ADX_PERIOD
 ) -> float:
-    """Compute Average Directional Index. Returns 25.0 (neutral) if insufficient data."""
+    """Compute Average Directional Index.
+
+    Returns ADX_NEUTRAL (25.0) when there is not enough data. Callers that are
+    making a decision on the result must gate on `adx_is_computable` first;
+    the sentinel is above the usual trend threshold, so treating it as a
+    reading silently converts "unknown" into "trending".
+    """
     if len(highs) < period + 2 or len(lows) < period + 2 or len(closes) < period + 2:
-        return 25.0
+        return ADX_NEUTRAL
 
     tr_list: list[float] = []
     plus_dm_list: list[float] = []
@@ -162,7 +191,7 @@ def compute_adx(
         minus_dm_list.append(minus_dm)
 
     if len(tr_list) < period:
-        return 25.0
+        return ADX_NEUTRAL
 
     # Wilder smoothing
     atr = sum(tr_list[:period])
@@ -182,7 +211,7 @@ def compute_adx(
         dx_list.append(dx)
 
     if not dx_list:
-        return 25.0
+        return ADX_NEUTRAL
 
     # ADX = Wilder-smoothed DX
     adx = sum(dx_list[:period]) / period if len(dx_list) >= period else sum(dx_list) / len(dx_list)
@@ -306,7 +335,7 @@ def build_ta_summary(symbol: str, bars: list[OHLCVBar], data_source: str = "unkn
             as_of=datetime.now(timezone.utc),
             bars_count=0,
             indicators=TechnicalIndicators(),
-            adx=25.0,
+            adx=ADX_NEUTRAL,
             patterns=[],
             signal_tags=[],
             trend_direction="neutral",

@@ -3,7 +3,7 @@ name = "attribution"
 version = "0.1.0"
 description = "Post-trade attribution and counterfactuals over the point-in-time archive."
 requires-python = ">=3.11"
-dependencies = ["journal"]
+dependencies = ["journal", "market_data"]
 
 [build-system]
 requires = ["hatchling"]

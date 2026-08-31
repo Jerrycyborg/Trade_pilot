@@ -217,12 +217,6 @@ Closed.** The JSON registry is deleted. A second implementation of the roster
 is exactly the failure the roster prevents, and both callers now read the
 shared authority. With none configured, nothing attempts an entry.
 
-**Journal health remains approximate.** `Journal.completeness` and
-`store.record_journal_health` exist and are used by evidence derivation, but
-nothing runs them on a timer, so "block new entries after a configured safety
-grace period" on a journal gap is enforced at promotion and not yet in the
-live loop. This is the largest remaining gap against requirement E.
-
 **~~Live decay metrics are thin.~~ Closed.** `_live_metrics` now pairs realised
 round trips through `libs/attribution` and compares live performance against
 the out-of-sample figure recorded in the sleeve's own promotion snapshot —
@@ -238,6 +232,30 @@ blunt question — losing money, over enough trades, at a low win rate —
 directly. It still waits for a sample, and a losing sleeve that wins half its
 trades is deliberately left to the other two, being a sizing or exit problem
 rather than a broken strategy.
+
+**~~Regime attribution is not implemented.~~ Closed.** The decomposition
+separated signal from execution and could not say whether the signal was wrong
+or merely applied in conditions it was not built for — two findings implying
+completely different fixes. `attribution.regime` classifies the regime at each
+end of a trade from bars knowable at that moment, and the report groups results
+by the regime each trade was *entered* into.
+
+Wiring it found a live defect. `compute_adx` returns 25.0 when the series is
+too short to measure one, and 25.0 sits **above** the strategy worker's own
+trend threshold of 20 — so the filter that exists to keep trend entries out of
+a range was passing on a fabricated number precisely when nothing was known
+about the regime, including when there was no market snapshot at all. The
+worker now refuses a trend entry it cannot measure the regime for, and
+`market_data` exposes `adx_is_computable` so no caller has to know that 25.0
+is sometimes a reading and sometimes an absence. Two tests fail without the
+fix, one of them by sending a real order on six bars of history.
+
+The classifier's own thresholds are conventions and are named as such: ADX 20
+because that is what the live filter uses, and a volatility band measured
+against the symbol's own recent range rather than an absolute number that
+cannot hold across a $3 stock and a $900 one. Regime stays a diagnostic and
+never enters the identity — a label with a threshold in it is an opinion, and
+the three price components have to add up regardless.
 
 **Health thresholds are conventions.** 15% drawdown, 2.0 Sharpe decay, a 20%
 win rate, 20 trades, a 60-minute journal-gap grace. Each is defensible and none

@@ -139,6 +139,23 @@ Each phase gated on the previous one being reviewed.
   paper archive it separated "the signal earned X, execution took most of it"
   from "the strategy lost money" — a distinction the realised number alone
   cannot make, and the reason this phase comes first.
+
+  Regime attribution (`attribution.regime`) closes the one thing L0 shipped
+  without. The price decomposition cannot distinguish a wrong rule from a right
+  rule applied in the wrong conditions, and those imply different work: a rule
+  to change, or a filter to add. Each trade now carries the regime at both
+  ends, classified from `bars_as_of` at the moment being classified — the entry
+  from the entry-time series, since a revision that arrived during the hold was
+  not knowable when the entry was decided — and results are grouped by the
+  regime each trade was entered into. On the demonstration archive the headline
+  read `+335 realised` while the slices read `+603` in a trend and `-268` in a
+  range.
+
+  This is also the gate on L1 in a way worth stating plainly. L1's specialists
+  are supposed to argue about market conditions; if the archive cannot classify
+  a condition well enough to say which regime a trade was taken in, an LLM
+  narrating one is generating text, not reading data. Regime slices are the
+  cheap version of that check, and they had to work first.
 - **L1 — specialist artifacts.** The typed roles, producing structured
   assessments with provenance. Still no proposals. Purpose: establish whether
   the arguments are reproducible from the archive.

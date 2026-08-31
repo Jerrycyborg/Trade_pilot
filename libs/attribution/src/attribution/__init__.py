@@ -20,6 +20,7 @@ from .counterfactual import (
     stop_at,
 )
 from .models import Attribution, CoverageReport, Leg, RoundTrip
+from .regime import RegimeReading, RegimeSlice, classify, describe_shift
 from .report import build_report, performance_from_trades, realized_series
 from .roundtrips import load_round_trips, pair_round_trips
 
@@ -28,8 +29,12 @@ __all__ = [
     "Counterfactual",
     "CoverageReport",
     "Leg",
+    "RegimeReading",
+    "RegimeSlice",
     "RoundTrip",
     "attribute",
+    "classify",
+    "describe_shift",
     "build_report",
     "performance_from_trades",
     "realized_series",

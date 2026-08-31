@@ -288,3 +288,257 @@ class TestTheCoverageReport:
             )
         coverage = build_report(journal, with_counterfactuals=False)["coverage"]
         assert coverage["environments"] == {"paper": 1, "live": 1}
+
+
+class TestRegimeIsClassifiedNotGuessed:
+    """The gap L0 shipped with: the decomposition separated signal from
+    execution but could not say whether the signal was wrong or merely applied
+    in conditions it was not built for.
+
+    The load-bearing property here is that an unmeasurable regime reports
+    itself as unmeasurable. `compute_adx` returns 25.0 on a short series, which
+    sits above every trend threshold in this codebase — so a classifier that
+    trusted it would label thin data "trending" and quietly turn the absence of
+    evidence into evidence.
+    """
+
+    def _series(self, closes, *, start=NOW, minutes=15, spread=0.5):
+        return [
+            {
+                "bar_ts": start + timedelta(minutes=minutes * i),
+                "open": c,
+                "high": c + spread,
+                "low": c - spread,
+                "close": c,
+            }
+            for i, c in enumerate(closes)
+        ]
+
+    def test_a_short_series_is_unknown_not_neutral(self) -> None:
+        from attribution import classify
+
+        reading = classify(self._series([100.0 + i for i in range(6)]), NOW + timedelta(hours=3))
+
+        assert reading.available is False
+        assert reading.label == "unknown"
+        assert reading.adx is None, "the 25.0 sentinel must not be reported as a measurement"
+        assert "16 bars" in reading.reason
+
+    def test_a_rising_series_is_trending_up(self) -> None:
+        from attribution import classify
+
+        bars = self._series([100.0 + i for i in range(40)])
+        reading = classify(bars, bars[-1]["bar_ts"])
+
+        assert reading.available is True
+        assert reading.label == "trending_up"
+        assert reading.net_move_pct > 0
+
+    def test_a_falling_series_is_trending_down(self) -> None:
+        from attribution import classify
+
+        bars = self._series([140.0 - i for i in range(40)])
+        reading = classify(bars, bars[-1]["bar_ts"])
+
+        assert reading.label == "trending_down"
+        assert reading.net_move_pct < 0
+
+    def test_a_flat_series_is_ranging(self) -> None:
+        from attribution import classify
+
+        bars = self._series([100.0] * 40)
+        reading = classify(bars, bars[-1]["bar_ts"])
+
+        assert reading.label == "ranging"
+        assert reading.adx < 20.0
+
+    def test_classification_never_reads_a_bar_from_the_future(self) -> None:
+        """A regime is what was knowable then. Reading past the moment being
+        classified is the same hindsight the point-in-time archive exists to
+        prevent, and here it would be invisible: the label would simply be
+        better than it should be."""
+        from attribution import classify
+
+        bars = self._series([100.0] * 20 + [100.0 + 4 * i for i in range(1, 21)])
+        cutoff = bars[19]["bar_ts"]
+
+        as_known_then = classify(bars, cutoff)
+        with_the_future = classify(bars, bars[-1]["bar_ts"])
+
+        assert as_known_then.bars_used == 20
+        assert as_known_then.label == "ranging"
+        assert with_the_future.label == "trending_up", "the rally is real, just later"
+
+    def test_a_regime_change_under_a_trade_is_reported(self) -> None:
+        from attribution import classify, describe_shift
+
+        # The range oscillates rather than being dead flat: bars with zero
+        # directional movement leave Wilder's +DI/-DI ratio frozen, so a
+        # perfectly flat tail keeps whatever DX preceded it. A real range
+        # moves, and this is what one looks like.
+        rally = [100.0 + i for i in range(30)]
+        chop = [130.0 + (2.0 if i % 2 else -2.0) for i in range(60)]
+        bars = self._series(rally + chop)
+        entry = classify(bars, bars[29]["bar_ts"])
+        exit_ = classify(bars, bars[-1]["bar_ts"])
+        shift = describe_shift(entry, exit_)
+
+        assert entry.label == "trending_up"
+        assert exit_.label == "ranging"
+        assert shift["changed"] is True
+        assert shift["from"] == "trending_up" and shift["to"] == "ranging"
+
+    def test_a_shift_is_none_rather_than_false_when_it_cannot_be_known(self) -> None:
+        """False would say "the regime held". The truth is that one end could
+        not be classified, and those are different findings."""
+        from attribution import classify, describe_shift
+
+        short = classify(self._series([100.0] * 4), NOW + timedelta(hours=1))
+        full = classify(self._series([100.0] * 40), NOW + timedelta(days=1))
+
+        assert describe_shift(short, full)["changed"] is None
+
+    def test_volatility_is_relative_to_the_symbol_itself(self) -> None:
+        """An absolute ATR threshold is a claim about the universe. A $3 stock
+        and a $900 one do not share one."""
+        from attribution import classify
+
+        calm = self._series([100.0] * 40, spread=0.05)
+        wild = self._series([100.0] * 40, spread=5.0)
+
+        assert classify(calm, calm[-1]["bar_ts"]).atr_pct < classify(
+            wild, wild[-1]["bar_ts"]
+        ).atr_pct
+
+    def test_an_agitated_tail_reads_as_agitated(self) -> None:
+        from attribution import classify
+
+        bars = self._series([100.0] * 30, spread=0.2) + self._series(
+            [100.0] * 20,
+            start=NOW + timedelta(minutes=15 * 30),
+            spread=2.0,
+        )
+        assert classify(bars, bars[-1]["bar_ts"]).volatility == "agitated"
+
+
+class TestRegimeReachesTheReport:
+    def _bars(self, journal, closes, timeframe="15m"):
+        """A series ending at the present moment.
+
+        `record_execution` stamps `recorded_at` itself and there is no override
+        — deliberately, since a caller that could backdate an execution could
+        rewrite trading history. So the bars are placed around now instead, and
+        the trade lands at the end of the series.
+        """
+        from types import SimpleNamespace
+
+        end = datetime.now(timezone.utc)
+        journal.record_bars(
+            "AAPL",
+            timeframe,
+            [
+                SimpleNamespace(
+                    timestamp=end - timedelta(minutes=15 * (len(closes) - i)),
+                    open=c, high=c + 0.5, low=c - 0.5, close=c, volume=1000.0,
+                )
+                for i, c in enumerate(closes)
+            ],
+            source="test",
+        )
+
+    def test_trades_are_grouped_by_the_regime_they_were_entered_into(self, journal) -> None:
+        """The finding L0 could not previously produce: not "the strategy
+        loses" but "the strategy loses in one regime", which points at a
+        filter rather than at the rule."""
+        self._bars(journal, [100.0 + i for i in range(60)])
+        journal.record_execution(
+            symbol="AAPL", side="BUY", qty=10, decision_price=140.0, fill_price=140.0,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+        journal.record_execution(
+            symbol="AAPL", side="SELL", qty=10, decision_price=155.0, fill_price=155.0,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+
+        report = build_report(journal, with_counterfactuals=False)
+        slices = {s["regime"]: s for s in report["by_regime"]["slices"]}
+
+        assert list(slices) == ["trending_up"]
+        assert slices["trending_up"]["trades"] == 1
+        assert slices["trending_up"]["realized"] == pytest.approx(150.0)
+        assert slices["trending_up"]["win_rate"] == 1.0
+
+    def test_a_trade_with_no_bars_lands_in_its_own_slice(self, journal) -> None:
+        """Not a residual bucket that resembles a real regime. "We could not
+        tell" has to be visible as its own row or it gets read as a finding."""
+        journal.record_execution(
+            symbol="AAPL", side="BUY", qty=10, decision_price=100.0, fill_price=100.0,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+        journal.record_execution(
+            symbol="AAPL", side="SELL", qty=10, decision_price=110.0, fill_price=110.0,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+
+        report = build_report(journal, with_counterfactuals=False)
+        slices = {s["regime"]: s for s in report["by_regime"]["slices"]}
+
+        assert list(slices) == ["unknown"]
+        assert report["by_regime"]["regime_shift"]["classifiable_trades"] == 0
+
+    def test_the_entry_regime_is_read_from_the_entry_series(self, journal) -> None:
+        """Filtering the exit-time series by timestamp is not point-in-time: it
+        drops future bars but keeps revisions of past ones that arrived during
+        the hold. This asserts the report fetches bars_as_of(entry) rather than
+        slicing, which is the difference between classifying the conditions a
+        decision was made in and classifying them with data that arrived
+        afterwards."""
+        asked: list[datetime] = []
+        real_bars_as_of = journal.bars_as_of
+
+        def _spy(symbol, timeframe, as_of, *args, **kwargs):
+            asked.append(as_of)
+            return real_bars_as_of(symbol, timeframe, as_of, *args, **kwargs)
+
+        journal.bars_as_of = _spy  # type: ignore[method-assign]
+
+        journal.record_execution(
+            symbol="AAPL", side="BUY", qty=10, decision_price=100.0, fill_price=100.0,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+        journal.record_execution(
+            symbol="AAPL", side="SELL", qty=10, decision_price=110.0, fill_price=110.0,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+
+        report = build_report(journal, with_counterfactuals=False)
+        trade = report["attributions"][0]
+        entry_at = datetime.fromisoformat(trade["entry_at"])
+        exit_at = datetime.fromisoformat(trade["exit_at"])
+
+        assert entry_at in asked, "the entry regime must be read as of the entry"
+        assert exit_at in asked
+        assert entry_at != exit_at
+
+    def test_regime_is_a_diagnostic_and_never_enters_the_identity(self, journal) -> None:
+        """A label with a threshold in it is an opinion. The three price
+        components have to add up whatever anyone thinks about ADX."""
+        self._bars(journal, [100.0 + i for i in range(60)])
+        journal.record_execution(
+            symbol="AAPL", side="BUY", qty=10, decision_price=140.0, fill_price=140.4,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+        journal.record_execution(
+            symbol="AAPL", side="SELL", qty=10, decision_price=155.0, fill_price=154.6,
+            strategy_id="ema_rsi_macd", environment="paper",
+        )
+
+        report = build_report(journal, with_counterfactuals=False)
+
+        assert report["coverage"]["identity_failures"] == 0
+        assert report["totals"]["identity_matches_realized"] is True
+        attribution = report["attributions"][0]
+        assert attribution["diagnostics"]["entry_regime"]["available"] is True
+        # The regime lives in diagnostics only — nothing about it appears among
+        # the summed components.
+        assert set(attribution) & {"entry_regime", "regime_shift"} == set()

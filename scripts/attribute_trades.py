@@ -101,12 +101,65 @@ def _render(report: dict) -> None:
     if report["exit_reasons"]:
         print(f"\n  Exit reasons               {report['exit_reasons']}")
 
+    _render_regime(report.get("by_regime") or {})
+
     print(
         f"\n  {DIM}Counterfactuals are computed against the archive as it stood when "
         f"each\n  trade closed, not the corrected series — a revision the system never "
         f"saw\n  must not decide that a different exit was better. They are questions "
         f"for\n  a later phase, not recommendations: this stage proposes nothing.{RESET}\n"
     )
+
+
+def _render_regime(by_regime: dict) -> None:
+    """Which conditions the strategy was actually run in, and how each went.
+
+    The price decomposition says how much came from the signal. It cannot say
+    whether the signal was wrong or merely applied where it does not work, and
+    those imply completely different fixes: one is a rule to change, the other
+    a filter to add.
+    """
+    slices = by_regime.get("slices") or []
+    if not slices:
+        return
+
+    print(f"\n{'-' * 66}")
+    print("  BY ENTRY REGIME")
+    print(f"{'-' * 66}")
+    print(f"  {'regime':<18}{'trades':>7}{'realised':>13}{'signal':>12}{'win rate':>11}")
+    for slot in slices:
+        rate = slot["win_rate"]
+        print(
+            f"  {slot['regime']:<18}{slot['trades']:>7}"
+            f"{_money(slot['realized']):>22}{_money(slot['from_signal']):>21}"
+            f"{(f'{rate:.0%}' if rate is not None else 'n/a'):>11}"
+        )
+        if slot["incomplete"]:
+            print(
+                f"  {DIM}{'':<18}{slot['incomplete']} of those could not be fully "
+                f"decomposed.{RESET}"
+            )
+
+    unknown = next((s for s in slices if s["regime"] == "unknown"), None)
+    if unknown:
+        print(
+            f"\n  {YELLOW}! {unknown['trades']} trade(s) had no classifiable regime.{RESET}"
+        )
+        print(
+            f"  {DIM}Too little archived history around the entry to measure one. That "
+            f"is a\n  gap in what was recorded, not a neutral market — the two are not "
+            f"the\n  same finding and are deliberately not merged.{RESET}"
+        )
+
+    shift = by_regime.get("regime_shift") or {}
+    if shift.get("classifiable_trades"):
+        print(
+            f"\n  Regime changed under      {shift['changed']} of "
+            f"{shift['classifiable_trades']} trade(s)"
+        )
+        print(f"    realised when it changed {_money(shift['realized_when_changed'])}")
+        print(f"    realised when it held    {_money(shift['realized_when_steady'])}")
+        print(f"  {DIM}{shift['note']}{RESET}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -123,6 +176,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=float, default=90.0)
     parser.add_argument("--timeframe", default="15m")
     parser.add_argument("--no-counterfactuals", action="store_true")
+    parser.add_argument(
+        "--no-regime",
+        action="store_true",
+        help="skip regime classification (one extra archive read per trade)",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -138,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         window_start=datetime.now(timezone.utc) - timedelta(days=args.days),
         timeframe=args.timeframe,
         with_counterfactuals=not args.no_counterfactuals,
+        with_regime=not args.no_regime,
     )
 
     if args.json:
