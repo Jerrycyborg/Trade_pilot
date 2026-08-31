@@ -193,7 +193,13 @@ def _record_unplaced(session, request, routed, idempotency_key: str, payload_has
         idempotency_key=idempotency_key,
         payload_hash=payload_hash,
         status=OrderStatus.REJECTED.value,
-        external_order_id=None,
+        # No broker was contacted, so there is no broker id — but the column is
+        # NOT NULL and UNIQUE, and a rejection from the broker gets a uuid too.
+        # A prefixed uuid keeps the convention and makes it obvious in the table
+        # that nothing was ever sent. Passing None here failed on PostgreSQL
+        # (NotNullViolation) while passing on the simulated-only routers the
+        # tests used, which is how it reached CI.
+        external_order_id=f"unplaced-{uuid4()}",
         rejection_reason=f"{routed.decision.route.value}: {routed.decision.reason}",
     )
     session.add(order)
