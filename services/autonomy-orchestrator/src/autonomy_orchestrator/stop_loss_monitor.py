@@ -8,14 +8,59 @@ fetcher.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 import httpx
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+def load_records(path: Path | None, model: type[BaseModel], label: str) -> dict:
+    """Tracked risk records from disk, or an empty book.
+
+    A corrupt or unreadable state file starts the monitor empty — the same
+    protection a restart gave before persistence existed — but says so at
+    ERROR: the positions it named are unwatched until re-registered, and
+    that must not be silent.
+    """
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            str(symbol).upper(): model.model_validate(row)
+            for symbol, row in dict(payload.get("records", {})).items()
+        }
+    except Exception as exc:
+        logger.error(
+            "%s: state file %s unreadable (%s) — starting with no tracked "
+            "records; positions it named are UNWATCHED until re-registered",
+            label, path, exc,
+        )
+        return {}
+
+
+def save_records(path: Path | None, records: dict, label: str) -> None:
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"records": {s: r.model_dump(mode="json") for s, r in records.items()}},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        # The in-memory record still protects the position for this process's
+        # life; only restart durability is degraded. Loud, not fatal.
+        logger.error("%s: could not persist records to %s: %s", label, path, exc)
 
 
 class PriceSourceProtocol(Protocol):
@@ -40,16 +85,34 @@ class StopLossRecord(BaseModel):
 
 
 class StopLossMonitor:
-    """Client-side stop-loss polling monitor."""
+    """Client-side stop-loss polling monitor.
 
-    def __init__(self, broker_url: str, internal_key: str) -> None:
+    Records persist to `state_path` when one is given: they used to live only
+    in this dict, so every orchestrator restart silently orphaned the stops of
+    every open position — the position survived in the broker, the thing
+    watching it did not. Found by the first orchestrator drill, which left a
+    pre-restart lot unwatched while a fresh lot's stop fired correctly.
+    """
+
+    def __init__(
+        self, broker_url: str, internal_key: str, state_path: Path | str | None = None
+    ) -> None:
         self._broker_url = broker_url
         self._internal_key = internal_key
-        self._stops: dict[str, StopLossRecord] = {}
+        self._state_path = Path(state_path) if state_path is not None else None
+        self._stops: dict[str, StopLossRecord] = load_records(
+            self._state_path, StopLossRecord, "StopLossMonitor"
+        )
+        if self._stops:
+            logger.info(
+                "StopLossMonitor: restored %d tracked stop(s) from %s: %s",
+                len(self._stops), self._state_path, sorted(self._stops),
+            )
 
     def register(self, record: StopLossRecord) -> None:
         """Add or overwrite stop for a symbol."""
         self._stops[record.symbol.upper()] = record
+        save_records(self._state_path, self._stops, "StopLossMonitor")
         logger.info(
             "StopLossMonitor: registered stop for %s at %.4f (entry=%.4f)",
             record.symbol,
@@ -62,6 +125,7 @@ class StopLossMonitor:
 
     def remove(self, symbol: str) -> None:
         self._stops.pop(symbol.upper(), None)
+        save_records(self._state_path, self._stops, "StopLossMonitor")
 
     def records(self) -> dict[str, StopLossRecord]:
         """Snapshot of tracked stops. check_all() removes them as they fire, so

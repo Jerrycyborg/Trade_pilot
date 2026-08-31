@@ -169,9 +169,12 @@ re-runs identical.
   blocked entries while keeping exits, and the stop fired 37 seconds after
   the breach quote and flattened the lot. Two findings remain open: stop
   records are in-memory only, so positions opened before an orchestrator
-  restart are unwatched until re-registered; and the monitor and the broker
-  can price from different snapshots under lenient freshness limits (the
-  drill's stop fired on 185 while the exit filled from a cached 220).
+  restart are unwatched until re-registered *(since fixed: both monitors
+  persist their books to state files — STOP_LOSS_STATE_PATH /
+  TAKE_PROFIT_STATE_PATH — restored on startup, with a corrupt file starting
+  empty and naming the orphaned symbols at ERROR)*; and the monitor and the
+  broker can price from different snapshots under lenient freshness limits
+  (the drill's stop fired on 185 while the exit filled from a cached 220).
 - **Regime classification is empty for daily-cadence runs** *(resolved)*:
   `attribute_trades.py --timeframe 1d` classifies the run's trade as
   ranging/agitated (ADX 16.2, matching the specialist report) — the plumbing

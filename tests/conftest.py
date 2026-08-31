@@ -92,6 +92,10 @@ def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
     _active_prices = source
     monkeypatch.setenv("PAPER_STATE_PATH", str(tmp_path / "paper-broker-state.json"))
     monkeypatch.setenv("PAPER_SLIPPAGE_BPS", "0")
+    # The risk monitors persist tracked stops/targets; keep test state out of
+    # the developer's working directory, like the paper ledger above.
+    monkeypatch.setenv("STOP_LOSS_STATE_PATH", str(tmp_path / "stop-loss-state.json"))
+    monkeypatch.setenv("TAKE_PROFIT_STATE_PATH", str(tmp_path / "take-profit-state.json"))
     # Each test gets its own archive. Without this the suite would append to the
     # developer's real journal.db and pollute the research record with fixtures.
     monkeypatch.setenv("JOURNAL_PATH", str(tmp_path / "journal.db"))

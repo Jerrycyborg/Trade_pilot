@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 import httpx
 from pydantic import BaseModel
+
+from .stop_loss_monitor import load_records, save_records
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +36,28 @@ class TakeProfitRecord(BaseModel):
 
 
 class TakeProfitMonitor:
-    def __init__(self, broker_url: str, internal_key: str) -> None:
+    """Mirrors StopLossMonitor, restart durability included: a target that
+    lives only in process memory dies with the process while its position
+    does not."""
+
+    def __init__(
+        self, broker_url: str, internal_key: str, state_path: Path | str | None = None
+    ) -> None:
         self._broker_url = broker_url
         self._key = internal_key
-        self._records: dict[str, TakeProfitRecord] = {}
+        self._state_path = Path(state_path) if state_path is not None else None
+        self._records: dict[str, TakeProfitRecord] = load_records(
+            self._state_path, TakeProfitRecord, "TakeProfitMonitor"
+        )
+        if self._records:
+            logger.info(
+                "TakeProfitMonitor: restored %d tracked target(s) from %s: %s",
+                len(self._records), self._state_path, sorted(self._records),
+            )
 
     def register(self, record: TakeProfitRecord) -> None:
         self._records[record.symbol.upper()] = record
+        save_records(self._state_path, self._records, "TakeProfitMonitor")
 
     def get(self, symbol: str) -> TakeProfitRecord | None:
         return self._records.get(symbol.upper())
@@ -75,7 +93,8 @@ class TakeProfitMonitor:
                         record.target_price,
                     )
                     if await self._trigger_close(record):
-                        del self._records[symbol]
+                        self._records.pop(symbol, None)
+                        save_records(self._state_path, self._records, "TakeProfitMonitor")
                         triggered.append(symbol)
             except Exception as exc:
                 logger.warning("Take-profit check failed for %s: %s", symbol, exc)

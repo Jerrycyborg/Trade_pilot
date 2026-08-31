@@ -296,13 +296,18 @@ async def _start_price_stream() -> None:
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
+    # State paths so tracked stops and targets survive a restart. Without
+    # them every restart silently orphaned the stops of every open position —
+    # the position survived at the broker, the thing watching it did not.
     state.stop_loss_monitor = StopLossMonitor(
         broker_url=settings.broker_url,
         internal_key=settings.internal_api_key,
+        state_path=os.getenv("STOP_LOSS_STATE_PATH", "./stop-loss-state.json"),
     )
     state.take_profit_monitor = TakeProfitMonitor(
         broker_url=settings.broker_url,
         internal_key=settings.internal_api_key,
+        state_path=os.getenv("TAKE_PROFIT_STATE_PATH", "./take-profit-state.json"),
     )
     now = datetime.now(timezone.utc)
     state.monthly_reset_month = now.month
