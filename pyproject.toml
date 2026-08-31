@@ -10,6 +10,7 @@ dependencies = [
   "attribution",
   "lifecycle",
   "market_data",
+  "challengers",
   "specialists",
   "veto",
   "brokers",
@@ -41,6 +42,7 @@ members = [
   "libs/attribution",
   "libs/lifecycle",
   "libs/market_data",
+  "libs/challengers",
   "libs/specialists",
   "libs/veto",
   "libs/brokers",
@@ -63,6 +65,7 @@ journal = { workspace = true }
 attribution = { workspace = true }
 lifecycle = { workspace = true }
 market_data = { workspace = true }
+challengers = { workspace = true }
 specialists = { workspace = true }
 veto = { workspace = true }
 brokers = { workspace = true }

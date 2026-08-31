@@ -1,10 +1,11 @@
 # ADR 0001 — A constrained offline improvement loop
 
 **Status:** Partially implemented. L0 (attribution), L1 (specialist artifacts)
-and L2 (the risk veto) are built. All three are read-only: nothing among them
-proposes a change, and the veto can only refuse. L3 (bounded challengers) is
-the first phase that would propose anything and is not started. Each remaining
-phase is gated on review of the previous one.
+L2 (the risk veto) and L3 (bounded challengers) are built. L0-L2 are
+read-only. L3 proposes, and can do nothing else: its output is a frozen object
+with no lifecycle state and no path to registration or promotion. L4
+(champion/challenger in paper) is not started. Each remaining phase is gated on
+review of the previous one.
 
 **Date:** 2026-08-31
 
@@ -232,8 +233,54 @@ Each phase gated on the previous one being reviewed.
   days ago has an empty 48-hour window, so the deadest symbol in the archive
   drew no objection while a merely-late one was caught. Staleness now comes
   from the freshest bar actually held rather than from the windowed view.
-- **L3 — bounded challengers.** Parameter and weight proposals within declared
-  ranges, evaluated by purged walk-forward and deflated Sharpe.
+- **L3 — bounded challengers. Implemented** (`libs/challengers`). The first
+  phase that proposes anything. What keeps that safe is not the generator being
+  careful — it is that a proposal has nowhere to go. A `Challenger` is frozen,
+  carries no lifecycle state, no sleeve id and no environment, and has no
+  method that writes; there is nothing on it for a promotion path to read, and
+  a test asserts the package never imports the lifecycle authority.
+
+  **Clamping, not validation.** A validator rejects and lets the caller retry,
+  which under a generator means it eventually proposes whatever it wanted. An
+  out-of-range value is pulled to the bound and the adjustment is recorded, so
+  a challenger that kept pressing against a limit is visible as exactly that
+  rather than arriving looking like it chose the boundary on merit. A parameter
+  with *no* declared bound is refused outright rather than defaulted —
+  otherwise the bounds only constrain the fields somebody remembered to list.
+  Position sizing and risk ceilings are absent from the bounds by design: those
+  are safety policy, and constraint 2 puts them out of reach of anything
+  automated. A `max_size_pct` field would be the first step to it being
+  fillable.
+
+  **The trial count is pooled across the campaign**, which is the consequence
+  this ADR named and the way this phase would otherwise go wrong. A
+  walk-forward deflates its winner against the configurations *that run* tried.
+  Run it eight times over eight challengers and report each winner's own
+  deflated ratio, and every one of those numbers still answers the
+  one-run question — while the search actually performed was eight times
+  larger. `evaluate_campaign` pools every trial Sharpe from every challenger
+  and re-deflates each result against the pooled set. Both figures are
+  reported, along with the gap between them, because that gap is the size of
+  the error pooling corrects. The gate reads the pooled one, and there is no
+  fallback to the per-run figure when pooling cannot be computed: substituting
+  it would put the overstated number in the one field that decides.
+
+  Challengers are content-addressed, so re-proposing an identical
+  configuration cannot inflate the trial count its siblings are judged against.
+  A challenger that failed to evaluate contributes no trials, because it
+  searched nothing — but it is reported rather than dropped.
+
+  On a synthetic series, four one-axis perturbations produced deflated ratios
+  of 0.73–0.89 against their own grids and 0.68–0.86 pooled — the correction
+  is real and in the right direction — and nothing cleared 0.95. That is the
+  expected outcome of most campaigns and is reported as a result, since the
+  alternative is a search that always finds something.
+
+  **Deliberately stricter than this ADR permits, and one gap it leaves.**
+  Constraint 1 allows the learner to write validation artifacts. This
+  implementation writes nothing at all, which is safer but means a campaign
+  result is not persisted — so L4's champion/challenger comparison, which needs
+  a durable record of what was proposed and when, has that to build first.
 - **L4 — champion/challenger in paper.** Both running, both recorded,
   compared. Human-approved promotion only.
 
@@ -252,10 +299,14 @@ failure.
 reviewer to approve them. Mitigation: the loop should propose rarely and
 justify heavily, and proposal volume should itself be monitored.
 
-**Risk.** The deflated Sharpe ratio's trial count already under-counts human
-iterations. A generator that produces hundreds of challengers makes that worse
-unless every one is counted. Every challenger evaluated must increment the
-trial count for every other, or the statistic becomes decorative.
+**Risk, addressed at L3.** The deflated Sharpe ratio's trial count already
+under-counts human iterations. A generator that produces hundreds of
+challengers makes that worse unless every one is counted.
+`evaluate_campaign` pools every trial from every challenger and re-deflates
+each result against the pooled set, and the campaign size is capped in the
+bounds — an unbounded generator does not find more good ideas, it makes all of
+them statistically indefensible. The under-counting of *human* iterations
+before any of this remains, and no formula fixes it.
 
 **Answered at L1: no, not for the roles that are buildable today.** The two
 roles with an archive — market and technical — make claims that are arithmetic

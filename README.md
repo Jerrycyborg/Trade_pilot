@@ -950,6 +950,50 @@ exactly like one that ran them all and found nothing.
 > exists for — so a symbol dead for three days passed cleanly while a
 > merely-late one was caught. Staleness now comes from the freshest bar held.
 
+### Bounded challengers, and the trial count that makes them arguable
+
+L3 (`libs/challengers`) — the first phase that proposes anything. What keeps
+that safe is not the generator being careful; it is that a proposal has nowhere
+to go. A `Challenger` is frozen, carries no lifecycle state, no sleeve id and
+no environment, and has no method that writes. A test asserts the package never
+imports the lifecycle authority.
+
+**Clamped, not validated.** A validator rejects and lets the caller retry,
+which under a generator means it eventually proposes whatever it wanted. An
+out-of-range value is pulled to the bound and *the adjustment is recorded*, so
+a challenger pressing against a limit is visible as that rather than as one
+that chose the boundary on merit. A parameter with no declared bound is refused
+outright — otherwise the bounds only constrain the fields somebody remembered
+to list. Position sizing and risk ceilings are deliberately absent: those are
+safety policy, out of reach of anything automated.
+
+**The trial count is pooled across the campaign.** This is the part that makes
+the statistics mean anything:
+
+```text
+challenger            OOS Sharpe   DSR own  DSR pooled  overstated
+  chal-0c0c473d4099        1.635     0.732       0.684      +0.047
+  chal-3cd8122dee4c        3.188     0.886       0.857      +0.029
+  chal-56fa2d8872b0        1.599     0.755       0.702      +0.052
+  chal-58d6724698c9        1.635     0.732       0.684      +0.047
+
+survivors: []
+```
+
+A walk-forward deflates its winner against the configurations *that run* tried.
+Run it eight times and report each winner's own deflated ratio, and every one
+of those numbers still answers the one-run question — while the search actually
+performed was eight times larger. `evaluate_campaign` pools every trial from
+every challenger and re-deflates against the pooled set. The gate reads the
+pooled figure, and there is no fallback to the per-run one when pooling can't
+be computed: substituting it would put the overstated number in the single
+field that decides.
+
+Challengers are content-addressed, so re-proposing the same configuration under
+a new name cannot inflate the bar its siblings are judged against. Nothing
+survived above — the expected outcome of most campaigns, reported as a result,
+because the alternative is a search that always finds something.
+
 ## Pattern Day Trader (PDT) Protection
 
 Intraday trading in the US runs into a rule that automated systems breach
