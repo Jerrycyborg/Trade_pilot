@@ -19,7 +19,7 @@ research contaminated by hindsight.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     DateTime,
@@ -38,12 +38,29 @@ class Base(DeclarativeBase):
 
 
 class BarObservation(Base):
-    """One OHLCV bar, as delivered by a provider."""
+    """One OHLCV bar **as observed**, not one bar per timestamp.
+
+    Providers revise bars. The original identity was
+    ``(symbol, timeframe, bar_ts)`` with ``ON CONFLICT DO NOTHING``, so the
+    first version seen won permanently and a correction was discarded without
+    trace. That makes the archive able to answer "what did we see first?" and
+    unable to answer "what did we know at 14:35?" — which is the only question
+    it exists for.
+
+    Identity now includes the payload hash, so a revision is a new row rather
+    than a dropped one. A re-fetch of an unchanged bar still deduplicates,
+    because the hash is unchanged. Point-in-time reconstruction is then "the
+    latest observation of each bar_ts whose observed_at is at or before the
+    decision time" — see ``Journal.bars_as_of``.
+    """
 
     __tablename__ = "bar_observations"
     __table_args__ = (
-        UniqueConstraint("symbol", "timeframe", "bar_ts", name="uq_bar_identity"),
+        UniqueConstraint(
+            "symbol", "timeframe", "bar_ts", "payload_hash", name="uq_bar_observation"
+        ),
         Index("ix_bar_symbol_ts", "symbol", "bar_ts"),
+        Index("ix_bar_observed", "symbol", "timeframe", "bar_ts", "observed_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -52,6 +69,9 @@ class BarObservation(Base):
     """e.g. "1m", "15m", "1d" — the resolution actually returned, not requested."""
 
     bar_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    """When the market printed this bar. Never substituted — a bar without a
+    usable market timestamp is rejected, not stamped with the fetch time."""
+
     open: Mapped[float] = mapped_column(Float, nullable=False)
     high: Mapped[float] = mapped_column(Float, nullable=False)
     low: Mapped[float] = mapped_column(Float, nullable=False)
@@ -60,6 +80,23 @@ class BarObservation(Base):
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     """When this system first stored the bar — not when the market printed it."""
+
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    """When this system learned of *this version*. A revision observed later
+    has a later observed_at, which is what makes point-in-time queries work."""
+
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    """sha256 over the OHLCV values. Two observations of the same bar_ts with
+    different hashes are a revision; with the same hash, a re-fetch."""
+
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    """0 for the first observation of a bar_ts, incrementing per revision."""
+
+    provider_meta: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    """Provider request identity and any feed metadata, as JSON. Without it two
+    observations of the same bar cannot be attributed or compared."""
 
 
 class PriceObservation(Base):
@@ -108,6 +145,42 @@ class ExecutionQuality(Base):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # --- scope -----------------------------------------------------------
+    # Without these, paper, live and test fills are indistinguishable rows and
+    # any performance figure computed over them mixes environments silently.
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="paper")
+    """backtest | paper | live. The single most important column here."""
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default")
+    portfolio_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default")
+    broker: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+
+    # --- traceability ------------------------------------------------------
+    decision_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    order_intent_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    """Links the order back to the decision that asked for it, so a post-trade
+    attribution can ask why rather than only what."""
+
+    requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """Three timestamps, not one: the gap between requested and submitted is
+    the system's own latency, and between submitted and filled is the venue's."""
+
+    # --- cost breakdown ----------------------------------------------------
+    fees: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    spread_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    """Partial fills are the normal case at size; a boolean filled flag cannot
+    express one."""
+    cancelled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rejected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     order_type: Mapped[str] = mapped_column(String(16), nullable=False, default="MARKET")
     limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)

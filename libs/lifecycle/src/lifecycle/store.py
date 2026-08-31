@@ -830,3 +830,98 @@ class PostgresLifecycleStore:
             "gap_count": gap_count,
         }
 
+
+    # ------------------------------------------------------------------
+    # Validation artifacts — written when a validation runs, cited later
+    # ------------------------------------------------------------------
+    def record_validation_artifact(
+        self,
+        *,
+        kind: str,
+        strategy_id: str,
+        symbol: str,
+        environment: str,
+        window_start: datetime,
+        window_end: datetime,
+        payload: dict[str, Any],
+        strategy_version: str = "",
+        asset_class: str = "equity",
+        account_id: str | None = None,
+        data_version: str = "",
+        model_version: str = "",
+        produced_by: str = "",
+    ) -> int:
+        """Store a validation result so a later promotion can cite it.
+
+        Written when the validation actually runs. A promotion names the id; it
+        does not carry the numbers, which is the whole point — see
+        `lifecycle.evidence`.
+        """
+        account = account_id or self._settings.account_id
+        content_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "kind": kind,
+                    "strategy_id": strategy_id,
+                    "strategy_version": strategy_version,
+                    "symbol": symbol.upper(),
+                    "environment": environment,
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "payload": payload,
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        artifact = Table("validation_artifact", self._meta, autoload_with=self._engine)
+        with self._engine.begin() as conn:
+            new_id = conn.execute(
+                artifact.insert()
+                .values(
+                    kind=kind,
+                    strategy_id=strategy_id,
+                    strategy_version=strategy_version,
+                    symbol=symbol.upper(),
+                    asset_class=asset_class,
+                    environment=environment,
+                    account_id=account,
+                    window_start=window_start,
+                    window_end=window_end,
+                    data_version=data_version,
+                    model_version=model_version,
+                    payload=payload,
+                    content_hash=content_hash,
+                    produced_by=produced_by,
+                )
+                .returning(artifact.c.id)
+            ).scalar_one()
+        return int(new_id)
+
+    def validation_artifact(self, artifact_id: int) -> dict[str, Any] | None:
+        artifact = Table("validation_artifact", self._meta, autoload_with=self._engine)
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(artifact).where(artifact.c.id == artifact_id)
+            ).first()
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "kind": row.kind,
+            "strategy_id": row.strategy_id,
+            "strategy_version": row.strategy_version,
+            "symbol": row.symbol,
+            "asset_class": row.asset_class,
+            "environment": row.environment,
+            "account_id": row.account_id,
+            "window_start": _aware(row.window_start),
+            "window_end": _aware(row.window_end),
+            "data_version": row.data_version,
+            "model_version": row.model_version,
+            "payload": row.payload,
+            "content_hash": row.content_hash,
+            "produced_by": row.produced_by,
+            "created_at": _aware(row.created_at),
+        }

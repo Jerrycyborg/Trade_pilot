@@ -7,6 +7,8 @@ can walk around is worse than no control, because it creates confidence that
 is not warranted. Both paths read the same roster from the same state file.
 """
 
+from .evidence import DerivedEvidence, derive_backtest_evidence, derive_paper_evidence
+from .gates import GateThresholds, evaluate_to_live, evaluate_to_paper
 from .registry import (
     ACTIVE_STATES,
     DEFAULT_LIVE_STRATEGY,
@@ -25,6 +27,12 @@ from .registry import (
 )
 
 __all__ = [
+    "DerivedEvidence",
+    "GateThresholds",
+    "derive_backtest_evidence",
+    "derive_paper_evidence",
+    "evaluate_to_live",
+    "evaluate_to_paper",
     "ACTIVE_STATES",
     "DEFAULT_LIVE_STRATEGY",
     "TRADING_STATES",
