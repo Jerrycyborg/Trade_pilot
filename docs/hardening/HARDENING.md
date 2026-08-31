@@ -162,12 +162,30 @@ call, so "the paper broker was used" cannot pass while the live one was also
 touched. No test contacts a broker or a data provider. Every migration is
 additive; no existing table is altered, truncated or back-filled.
 
-### Not verified
+### Verified on CI
 
-**The `compose-paper-trading` CI job has never run.** This sandbox has the
-docker client but no daemon, so the stack has not been built or started. The
-job is written from the service definitions and should be treated as unproven
-until a runner executes it once.
+All three jobs green on run 3
+([33405778790](https://github.com/Jerrycyborg/Trade_pilot/actions/runs/33405778790)),
+including `compose-paper-trading` — the stack builds, applies its migrations,
+refuses an order for an unregistered sleeve, and has live mode off. That job
+could not be run in the development sandbox (docker client, no daemon) and was
+shipped as unproven; it is proven now.
+
+Getting there took three runs, and each failure was real rather than a CI
+configuration problem:
+
+| Run | Result | What it found |
+|---|---|---|
+| [1](https://github.com/Jerrycyborg/Trade_pilot/actions/runs/33397057895) | lint ok, tests failed, compose failed | Two integration tests only passed because `INTERNAL_API_KEY` was unset locally; `build_router` latched the simulated-only fallback at import; the compose curl raced the container |
+| [2](https://github.com/Jerrycyborg/Trade_pilot/actions/runs/33405209428) | lint ok, tests ok, compose failed | A blocked order could not be persisted on PostgreSQL — `external_order_id` is NOT NULL and UNIQUE, and the insert passed None |
+| [3](https://github.com/Jerrycyborg/Trade_pilot/actions/runs/33405778790) | **all green** | — |
+
+The second and third findings were defects in this hardening work, not in the
+pre-existing code. Both were invisible locally: the suite runs on SQLite by
+default and every execution-service test used a simulated-only router, so the
+blocked-order path never touched a database at all. That gap is now covered by
+`tests/hardening/test_unplaced_orders_persist.py`, parametrised over both
+backends.
 
 ---
 
