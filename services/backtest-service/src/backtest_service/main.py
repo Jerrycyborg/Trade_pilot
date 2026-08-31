@@ -17,8 +17,11 @@ from .models import (
     CostSensitivityResult,
     ParameterGrid,
     ParameterSensitivityResult,
+    PortfolioResult,
     WalkForwardResult,
 )
+from .portfolio import ALLOCATIONS, build_sleeves, run_portfolio
+from .strategies import REGISTRY, strategy_names
 from .validation import parameter_sensitivity, walk_forward
 
 logger = logging.getLogger(__name__)
@@ -144,5 +147,78 @@ async def parameter_sensitivity_endpoint(
     bars = _bars_or_422(request)
     try:
         return parameter_sensitivity(request, bars, grid=request.grid)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/backtest/strategies")
+def list_strategies() -> dict[str, object]:
+    """The strategies this service can run, and what each one bets on."""
+    return {
+        "strategies": [
+            {
+                "name": strategy.name,
+                "description": strategy.description,
+                "parameters": list(strategy.param_fields),
+            }
+            for strategy in (REGISTRY[name] for name in strategy_names())
+        ]
+    }
+
+
+class PortfolioRequest(BacktestRequest):
+    """Run several strategies over several symbols and combine them.
+
+    `symbol` is inherited from BacktestRequest and ignored here; `symbols` is
+    what gets traded.
+    """
+
+    symbol: str = "PORTFOLIO"
+    symbols: list[str] = Field(min_length=1)
+    strategies: list[str] = Field(default_factory=lambda: list(strategy_names()))
+    allocation: str = Field(default="equal", pattern="^(equal|inverse_volatility)$")
+    considered_count: int | None = Field(default=None, ge=1)
+    """How many (symbol, strategy) combinations you actually looked at before
+    settling on this list. Defaults to the number of sleeves, which is only
+    correct if you never dropped any — screening fifty symbols and running the
+    best three is a fifty-trial search, and the deflated Sharpe ratio can only
+    price that in if you say so."""
+
+
+@app.post("/backtest/portfolio", response_model=PortfolioResult)
+async def portfolio_endpoint(request: PortfolioRequest) -> PortfolioResult:
+    """Simulate each sleeve, combine them, and report whether combining helped.
+
+    Read `max_correlation` and `diversification_ratio` before the return. Two
+    sleeves correlating near 1.0 are one position paying two sets of costs.
+    """
+    for name in request.strategies:
+        if name not in REGISTRY:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown strategy {name!r}. Available: {', '.join(strategy_names())}",
+            )
+    if request.allocation not in ALLOCATIONS:
+        raise HTTPException(status_code=422, detail=f"Unknown allocation {request.allocation!r}")
+
+    bars_by_symbol: dict[str, list[OHLCVBar]] = {}
+    for symbol in request.symbols:
+        per_symbol = request.model_copy(update={"symbol": symbol})
+        try:
+            bars_by_symbol[symbol.upper()] = load_bars(per_symbol)
+        except DataUnavailableError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"Market data unavailable for {symbol}: {exc}"
+            ) from exc
+
+    sleeves = build_sleeves(request.symbols, request.strategies, request.params)
+    try:
+        return run_portfolio(
+            request,
+            sleeves,
+            bars_by_symbol,
+            allocation=request.allocation,
+            n_trials=request.considered_count or len(sleeves),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

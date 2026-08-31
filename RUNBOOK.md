@@ -336,6 +336,69 @@ symbol is consistently trimmed hard it is too thin for the size you are
 trading — reduce the position size or drop the symbol. Raising the cap does not
 make the liquidity appear; it moves the cost from the trim into the fill price.
 
+## Adding or Combining Strategies
+
+### Seeing what is available
+
+```bash
+curl http://localhost:8011/backtest/strategies
+```
+
+### Before adding a strategy to the portfolio
+
+Run it on its own first, then in combination. A strategy that fails
+walk-forward alone does not become viable by being averaged with others.
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT --portfolio
+```
+
+Then check one thing above all: `max_correlation`. If the new strategy
+correlates above 0.7 with one already in the portfolio, it is not a new
+strategy — it is the existing one at a different size, and adding it doubles
+the cost without changing the risk.
+
+### "[FAIL] Sleeves actually diversify"
+
+Diversification ratio near 1.0. The sleeves move together. Causes, in order:
+
+1. **Same idea, different parameters.** Two trend rules will correlate whatever
+   their lookbacks. Check `/backtest/strategies` — the two shipped rules read
+   disjoint parameters precisely so this cannot happen by accident.
+2. **Same symbol.** Two strategies on one symbol share its moves. Spread across
+   symbols before adding strategies.
+3. **Correlated symbols.** Three large-cap US tech names are close to one
+   position. The report cannot know that from prices alone over a short window
+   — you have to.
+
+### "[FAIL] Beats its best sleeve"
+
+The combination did worse than one of its parts. This is not automatically a
+reason to drop the others: the best sleeve is only knowable in hindsight, and
+choosing it after the fact is the selection error this whole section exists to
+prevent. What it *is* a reason to do:
+
+- Check whether the losing sleeves failed walk-forward individually. If so,
+  they should not have been in the portfolio.
+- Check the trade counts. A sleeve with four trades has not demonstrated
+  anything either way.
+
+### "[FAIL] Survives the search"
+
+Same meaning as in walk-forward, and here the trial count is usually the
+problem: it defaults to the number of sleeves. If you screened a watchlist and
+kept the best performers, pass `--considered <how many you looked at>` and read
+the result again. It will be worse, and it will be correct.
+
+### A strategy was dropped from the run
+
+The report names it and why — either no bars were supplied for the symbol, or
+there were fewer bars than the strategy's warm-up needs. `bollinger_reversion`
+warms up faster than `ema_rsi_macd` (no MACD), so a short window can produce a
+portfolio where only one strategy ran. Check the sleeve list matches what you
+asked for before reading any of the numbers.
+
 ## Position Break — "New entries paused"
 
 The ledger and the broker disagree about what is held. Exits still work; only

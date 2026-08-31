@@ -31,7 +31,13 @@ from dataclasses import dataclass
 
 from market_data.models import OHLCVBar
 
-from .engine import _compute_signals, _max_drawdown, _profit_factor, _simulate, periods_per_year_for
+from .engine import (
+    _compute_signals,
+    _max_drawdown,
+    _profit_factor,
+    _simulate,
+    periods_per_year_for,
+)
 from .models import (
     BacktestRequest,
     FoldResult,
@@ -49,6 +55,7 @@ from .stats import (
     sharpe_ratio,
     stdev,
 )
+from .strategies import get_strategy
 
 # A configuration that never traded in the training window tells us nothing
 # about how it will trade out of sample. Selecting one because its flat equity
@@ -145,6 +152,9 @@ class _SignalCache:
         self._cache: dict[str, list[str]] = {}
 
     def for_params(self, params: StrategyParams) -> list[str]:
+        # The full label, not the strategy-scoped one: two configurations that
+        # a strategy cannot tell apart still must not share a cache entry if
+        # some other field differs, and over-keying only costs a little memory.
         key = params.label()
         if key not in self._cache:
             variant = self._request.model_copy(update={"params": params})
@@ -211,11 +221,12 @@ def walk_forward(
     are included for one purpose: to show the size of the drop.
     """
     grid = grid or ParameterGrid()
-    combos = grid.combinations()
+    combos = grid.combinations(request.strategy)
     if not combos:
         raise ValueError("Parameter grid is empty — every combination was invalid")
 
-    warmup = max(p.min_warmup_bars for p in combos)
+    strategy = get_strategy(request.strategy)
+    warmup = max(strategy.warmup_bars(p) for p in combos)
     embargo = warmup if embargo_bars is None else embargo_bars
     # A training window shorter than a few multiples of the warm-up cannot
     # produce enough trades to choose between configurations.
@@ -280,6 +291,7 @@ def walk_forward(
                 test_start=bars[fold.test_start].timestamp,
                 test_end=bars[min(fold.test_end, len(bars)) - 1].timestamp,
                 selected_params=params,
+                selected_label=strategy.label(params),
                 in_sample_sharpe=round(annualise(is_sharpe, periods), 4),
                 in_sample_trades=is_trades,
                 out_of_sample_sharpe=round(annualise(oos_sharpe, periods), 4),
@@ -323,7 +335,7 @@ def walk_forward(
             "to be — treat every figure here as an anecdote, not a measurement."
         )
 
-    stability = _parameter_stability(selected)
+    stability = _parameter_stability(selected, strategy.param_fields)
     if stability < 0.5 and len(selected) > 1:
         warnings.append(
             f"Parameter stability {stability:.0%}: the folds disagree about which "
@@ -357,7 +369,9 @@ def _rounded(value: float | None) -> float | None:
     return None if value is None else round(value, 4)
 
 
-def _parameter_stability(selected: list[StrategyParams]) -> float:
+def _parameter_stability(
+    selected: list[StrategyParams], fields: tuple[str, ...] | None = None
+) -> float:
     """Share of folds that chose the single most-chosen configuration.
 
     1.0 means every fold independently landed on the same parameters, which is
@@ -368,7 +382,7 @@ def _parameter_stability(selected: list[StrategyParams]) -> float:
         return 0.0
     counts: dict[str, int] = {}
     for params in selected:
-        key = params.label()
+        key = params.label(fields)
         counts[key] = counts.get(key, 0) + 1
     return max(counts.values()) / len(selected)
 
@@ -386,11 +400,12 @@ def parameter_sensitivity(
     Sharpe says.
     """
     grid = grid or ParameterGrid()
-    combos = grid.combinations()
+    combos = grid.combinations(request.strategy)
     if not combos:
         raise ValueError("Parameter grid is empty — every combination was invalid")
 
-    warmup = max(p.min_warmup_bars for p in combos)
+    strategy = get_strategy(request.strategy)
+    warmup = max(strategy.warmup_bars(p) for p in combos)
     if len(bars) <= warmup + 2:
         raise ValueError(
             f"Need more than {warmup + 2} bars to score this grid, got {len(bars)}"
@@ -403,8 +418,9 @@ def parameter_sensitivity(
         sharpe, total_return, trades, pf, _ = _score(
             request, bars, params, start_index=warmup, end_index=len(bars), signals=signals
         )
-        scores[params.label()] = ParamScore(
+        scores[strategy.label(params)] = ParamScore(
             params=params,
+            label=strategy.label(params),
             sharpe_ratio=round(annualise(sharpe, periods), 4),
             total_return_pct=round(total_return, 4),
             total_trades=trades,
@@ -415,7 +431,9 @@ def parameter_sensitivity(
     best = ranked[0]
 
     neighbours = [
-        scores[n.label()] for n in grid.neighbours(best.params) if n.label() in scores
+        scores[strategy.label(n)]
+        for n in grid.neighbours(best.params, request.strategy)
+        if strategy.label(n) in scores
     ]
     neighbour_sharpes = [n.sharpe_ratio for n in neighbours]
     neighbour_mean = sum(neighbour_sharpes) / len(neighbour_sharpes) if neighbour_sharpes else None

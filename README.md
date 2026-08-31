@@ -431,6 +431,122 @@ Being explicit, because these checks are easy to over-read:
   strategy you would actually run.
 - **Passing is not a green light.** It removes one specific way of being wrong.
 
+## Strategies and the Portfolio
+
+One strategy on one symbol is a bet on one regime. When that regime ends the
+rule does not stop producing signals — it starts producing losing ones. The
+standard answer is to run several, but that only helps if they lose money at
+*different times*. Two momentum rules with different lookbacks are one strategy
+with a typo, and combining them adds cost and complexity without adding any
+protection.
+
+### The two strategies
+
+```bash
+curl http://localhost:8011/backtest/strategies
+```
+
+| Name | Bets on | Reads |
+|---|---|---|
+| `ema_rsi_macd` | **Strength.** Dual-EMA trend with RSI and MACD confirmation. | `ema_fast`, `ema_slow`, `rsi_buy_min`, `rsi_buy_max`, `macd_hist_min` |
+| `bollinger_reversion` | **Weakness.** Buys a close below the lower Bollinger band with RSI oversold; exits on a return to the mean. | `bb_period`, `bb_std`, `rsi_oversold`, `rsi_overbought` |
+
+They are deliberately opposed: one buys what is going up, the other buys what
+has fallen. Their parameter sets do not overlap at all, which the test suite
+enforces — an overlap would make them variants of one rule rather than two
+rules.
+
+`request.strategy` used to be a label nothing read, so a request for any other
+strategy silently ran the momentum one. It now resolves through a registry and
+an unknown name is an error that lists the alternatives.
+
+Adding a third: write a signal function, declare which parameters it reads, and
+register it. Walk-forward, sensitivity, the portfolio and the deflated Sharpe
+ratio all work against the registry, so it gets validated the same way the
+existing two do without further work.
+
+### Running them together
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT,NVDA --portfolio
+```
+
+A **sleeve** is one (strategy, symbol, parameters) triple. Sleeves are
+simulated independently, aligned by timestamp, and combined by weight.
+
+```
+  sleeve                        weight   sharpe     return  trades
+  AAA:bollinger_reversion       16.7%     1.06     1.13%       4
+  AAA:ema_rsi_macd              16.7%     0.02    -0.34%      18
+  BBB:ema_rsi_macd              16.7%    -1.05    -4.07%      19
+  ...
+
+  Combined Sharpe                   -4.29
+  Best single sleeve                 1.06  (AAA:bollinger_reversion)
+  Diversification ratio              2.32
+
+  [FAIL] Beats its best sleeve        -4.29 vs 1.06
+  [PASS] Sleeves actually diversify   diversification ratio 2.32
+  [PASS] No redundant pair            highest correlation +0.04
+```
+
+The numbers to read, in order:
+
+1. **`max_correlation`.** This is the entire mechanism. A pair above 0.7 is one
+   position held in two accounts, paying two sets of costs. The report names
+   the offending pair.
+2. **`diversification_ratio`** — weighted average sleeve volatility over the
+   volatility of the combination. Above 1.0 means the whole is calmer than its
+   parts. At 1.0 the sleeves are the same bet.
+3. **`best_sleeve_sharpe`** — the question an operator actually has: would I
+   have been better off just running that one? Note the trap: picking it in
+   hindsight is its own selection error.
+
+**Diversification reduces variance. It does not create return.** This is the
+most common misreading of a good diversification ratio, and it is asserted as a
+test: on uncorrelated sleeves the combined return sits *inside* the range of
+its parts, always. What it buys is a smaller drawdown than the average sleeve —
+a smoother ride to the same place, not a better place.
+
+### Allocation
+
+`--allocation equal` (default) or `inverse_volatility`, which weights calmer
+sleeves more heavily. Be clear about what the second one is: weights computed
+from the same data you are evaluating on are fitted in-sample, and the
+improvement they show is partly the fit. Validate the allocation the same way
+you validate a parameter — on data it was not chosen from.
+
+### Counting the search honestly
+
+Phase 2 flagged this and the portfolio is where it bites: running a strategy on
+twenty symbols and reporting the best three is a twenty-symbol search, and the
+deflated Sharpe ratio can only price that in if you tell it.
+
+```bash
+# screened 50 symbols, running the best 3
+uv run python scripts/run_backtest.py --symbols AAA,BBB,CCC --portfolio --considered 50
+```
+
+Without `--considered` the trial count defaults to the number of sleeves, which
+is only correct if you never dropped a candidate.
+
+### What the portfolio result does not model
+
+Stated plainly, because each of these flatters the number:
+
+- **Each sleeve gets its own capital.** They are simulated independently and
+  never compete for it. A real account has one balance, so six sleeves either
+  run at a sixth of the size or fail to fill each other's orders. Read the
+  combined return as an upper bound.
+- **No portfolio-level risk limits.** The live loop has position caps, sector
+  concentration limits and the PDT guard; the portfolio backtest has none of
+  them, so it will happily hold six correlated longs.
+- **Correlation is measured on the sample.** Correlations rise in a selloff —
+  the moment diversification is supposed to help is the moment it stops. A
+  backtest over a calm period will overstate it.
+- **Costs are still assumed.** Six sleeves trade roughly six times as often.
+  Feed the measured `mean_shortfall_bps` in before believing the return.
+
 ## Pattern Day Trader (PDT) Protection
 
 Intraday trading in the US runs into a rule that automated systems breach

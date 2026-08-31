@@ -27,7 +27,6 @@ from datetime import datetime, timezone
 from market_data.indicators import compute_atr
 from market_data.models import OHLCVBar
 
-from . import indicator_series
 from .models import (
     TRADING_DAYS_PER_YEAR,
     US_SESSION_MINUTES,
@@ -37,6 +36,7 @@ from .models import (
     CostSensitivityResult,
     TradeRecord,
 )
+from .strategies import get_strategy
 
 # Sessions are grouped in market time so a bar at 21:30 UTC lands on the US
 # trading day it actually belongs to.
@@ -80,40 +80,17 @@ def periods_per_year_for(request: BacktestRequest, bars: list[OHLCVBar]) -> floa
 
 
 def _compute_signals(bars: list[OHLCVBar], request: BacktestRequest) -> list[str]:
-    """BUY/SELL/HOLD per bar, using only data available at that bar."""
-    params = request.params
-    warmup = params.min_warmup_bars
-    closes = [b.close for b in bars]
-    # One pass for the whole series rather than one per bar. Verified
-    # value-for-value against market_data.indicators in
-    # tests/backtest/test_indicator_series.py.
-    series = indicator_series.build(closes, params.ema_fast, params.ema_slow)
+    """BUY/SELL/HOLD per bar, using only data available at that bar.
 
-    signals: list[str] = []
-    for i in range(len(bars)):
-        if i + 1 < warmup:
-            signals.append("HOLD")
-            continue
+    The rule itself lives in `strategies`; this resolves which one the request
+    asked for. `request.strategy` used to be a label that nothing read, so a
+    request for any other strategy silently ran the momentum one.
+    """
+    return get_strategy(request.strategy).signals(bars, request.params)
 
-        ema_fast = series.ema_fast[i]
-        ema_slow = series.ema_slow[i]
-        rsi = series.rsi[i]
-        macd_hist = series.macd_hist[i]
 
-        buy = (
-            ema_fast > ema_slow
-            and params.rsi_buy_min < rsi < params.rsi_buy_max
-            and macd_hist > params.macd_hist_min
-        )
-        sell = (
-            ema_fast < ema_slow
-            and params.rsi_sell_min < rsi < params.rsi_sell_max
-            and macd_hist < -params.macd_hist_min
-        )
-
-        signals.append("BUY" if buy else "SELL" if sell else "HOLD")
-
-    return signals
+def _warmup_for(request: BacktestRequest) -> int:
+    return get_strategy(request.strategy).warmup_bars(request.params)
 
 
 @dataclass
@@ -355,7 +332,7 @@ def _max_drawdown(equity_curve: list[float]) -> float:
 
 def run_backtest(request: BacktestRequest, bars: list[OHLCVBar]) -> BacktestResult:
     """Simulate the strategy, reporting net and gross results side by side."""
-    warmup = request.params.min_warmup_bars
+    warmup = _warmup_for(request)
     if len(bars) < warmup + 1:
         raise ValueError(
             f"Need at least {warmup + 1} bars for indicator warm-up, got {len(bars)}"

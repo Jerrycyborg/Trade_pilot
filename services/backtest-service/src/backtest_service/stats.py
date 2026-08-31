@@ -183,6 +183,7 @@ def expected_max_sharpe(n_trials: int, trial_sharpe_variance: float) -> float:
 def deflated_sharpe_ratio(
     returns: list[float],
     trial_sharpes: list[float],
+    n_trials: int | None = None,
 ) -> float | None:
     """Probability the strategy's Sharpe survives the search that found it.
 
@@ -213,7 +214,12 @@ def deflated_sharpe_ratio(
     if not trial_sharpes:
         return probabilistic_sharpe_ratio(returns, 0.0)
 
-    benchmark = expected_max_sharpe(len(trial_sharpes), stdev(trial_sharpes) ** 2)
+    # `n_trials` covers the case where more configurations were searched than
+    # are represented in `trial_sharpes` — a portfolio, say, where each sleeve
+    # ran its own grid but only the sleeve-level Sharpes are to hand. The count
+    # sets the bar; the list supplies the dispersion to scale it by.
+    count = len(trial_sharpes) if n_trials is None else max(n_trials, len(trial_sharpes))
+    benchmark = expected_max_sharpe(count, stdev(trial_sharpes) ** 2)
     return probabilistic_sharpe_ratio(returns, benchmark)
 
 

@@ -113,7 +113,7 @@ class TestParameterGrid:
         is an artefact of the grid, not a caller error."""
         grid = ParameterGrid(ema_fast=[10, 60], ema_slow=[40, 50], rsi_buy_min=[45.0],
                              rsi_buy_max=[70.0], macd_hist_min=[0.0])
-        labels = [p.label() for p in grid.combinations()]
+        labels = [p.label() for p in grid.combinations("ema_rsi_macd")]
         assert len(labels) == 2  # 60/40 and 60/50 are both invalid
         assert all("ema10" in label for label in labels)
 
@@ -125,7 +125,7 @@ class TestParameterGrid:
     def test_neighbours_differ_in_exactly_one_dimension(self) -> None:
         grid = ParameterGrid()
         base = StrategyParams()
-        for neighbour in grid.neighbours(base):
+        for neighbour in grid.neighbours(base, "ema_rsi_macd"):
             differences = sum(
                 1
                 for field in ("ema_fast", "ema_slow", "rsi_buy_min", "rsi_buy_max", "macd_hist_min")
@@ -142,7 +142,20 @@ class TestParameterGrid:
             ema_fast=[20], ema_slow=[50], rsi_buy_min=[45.0], rsi_buy_max=[70.0],
             macd_hist_min=[0.0],
         )
-        assert grid.neighbours(StrategyParams()) == []
+        assert grid.neighbours(StrategyParams(), "ema_rsi_macd") == []
+
+    def test_axes_a_strategy_ignores_are_collapsed(self) -> None:
+        """Varying a parameter a rule never reads is the same rule counted
+        twice — it would inflate the trial count and deflate the Sharpe ratio
+        against a bar built from duplicates."""
+        grid = ParameterGrid()
+        assert len(grid.combinations("bollinger_reversion")) < len(grid.combinations())
+        assert len(grid.combinations("ema_rsi_macd")) == 81
+
+    def test_each_strategy_sees_only_its_own_axes(self) -> None:
+        reversion = grid_combos = ParameterGrid().combinations("bollinger_reversion")
+        assert len({(p.ema_fast, p.ema_slow) for p in reversion}) == 1
+        assert len({(p.bb_period, p.bb_std) for p in grid_combos}) > 1
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +313,27 @@ class TestWalkForward:
         result = walk_forward(_request(), _bars(1_500, seed=1), n_splits=3, embargo_bars=25)
         assert result.embargo_bars == 25
 
+    def test_the_same_inputs_give_the_same_result(self) -> None:
+        """Selection breaks ties by grid order, so a run is reproducible. A
+        result that moves between runs cannot be validated by anyone."""
+        bars = _bars(1_200, seed=1)
+        first = walk_forward(_request(), bars, n_splits=3)
+        second = walk_forward(_request(), bars, n_splits=3)
+        assert first.out_of_sample_sharpe == second.out_of_sample_sharpe
+        assert [f.selected_label for f in first.folds] == [
+            f.selected_label for f in second.folds
+        ]
+
+    def test_fold_labels_only_show_parameters_the_strategy_reads(self) -> None:
+        """A mean-reversion fold labelled with EMA settings implies they were
+        part of the result. They were not — the rule never reads them."""
+        result = walk_forward(
+            _request(strategy="bollinger_reversion"), _bars(1_200, seed=1), n_splits=3
+        )
+        for fold in result.folds:
+            assert "bb" in fold.selected_label
+            assert "ema" not in fold.selected_label
+
     def test_dropped_folds_are_disclosed(self) -> None:
         """Silently running fewer folds than asked would overstate the test."""
         result = walk_forward(_request(), _bars(1_500, seed=1), n_splits=8)
@@ -314,7 +348,7 @@ class TestParameterSensitivity:
     def test_every_grid_point_is_scored(self) -> None:
         grid = ParameterGrid()
         result = parameter_sensitivity(_request(), _bars(800, seed=5), grid=grid)
-        assert result.grid_size == len(grid.combinations())
+        assert result.grid_size == len(grid.combinations("ema_rsi_macd"))
         assert len(result.scores) == result.grid_size
 
     def test_scores_are_ranked_best_first(self) -> None:
@@ -322,6 +356,13 @@ class TestParameterSensitivity:
         sharpes = [s.sharpe_ratio for s in result.scores]
         assert sharpes == sorted(sharpes, reverse=True)
         assert result.best.sharpe_ratio >= result.worst.sharpe_ratio
+
+    def test_scores_are_labelled_by_the_parameters_that_mattered(self) -> None:
+        result = parameter_sensitivity(
+            _request(strategy="bollinger_reversion"), _bars(800, seed=5)
+        )
+        assert all("bb" in score.label for score in result.scores)
+        assert all("ema" not in score.label for score in result.scores)
 
     def test_the_neighbourhood_of_the_best_is_measured(self) -> None:
         result = parameter_sensitivity(_request(), _bars(800, seed=5))

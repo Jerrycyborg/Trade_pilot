@@ -16,7 +16,7 @@ import random
 
 import pytest
 from backtest_service import indicator_series
-from market_data.indicators import compute_ema, compute_macd, compute_rsi
+from market_data.indicators import compute_bollinger, compute_ema, compute_macd, compute_rsi
 
 TOLERANCE = 1e-9
 
@@ -94,3 +94,27 @@ def test_short_data_uses_the_same_fallbacks_as_the_originals() -> None:
     assert series.rsi == [50.0, 50.0, 50.0]
     assert series.macd_hist == [0.0, 0.0, 0.0]
     assert series.ema_fast == closes
+
+
+@pytest.mark.parametrize("shape", sorted(PRICE_SHAPES))
+def test_bollinger_matches_at_every_prefix(shape: str) -> None:
+    closes = PRICE_SHAPES[shape]
+    bands = indicator_series.bollinger(closes, 20, 2.0)
+
+    for i in range(len(closes)):
+        upper, middle, lower = compute_bollinger(closes[: i + 1], 20, 2.0)
+        assert bands.upper[i] == pytest.approx(upper, abs=TOLERANCE), f"{shape} upper at {i}"
+        assert bands.middle[i] == pytest.approx(middle, abs=TOLERANCE), f"{shape} middle at {i}"
+        assert bands.lower[i] == pytest.approx(lower, abs=TOLERANCE), f"{shape} lower at {i}"
+
+
+@pytest.mark.parametrize("period,std", [(10, 1.5), (20, 2.0), (30, 2.5)])
+def test_bollinger_matches_across_the_grid(period: int, std: float) -> None:
+    closes = _random_walk(250, 3)
+    bands = indicator_series.bollinger(closes, period, std)
+
+    for i in range(len(closes)):
+        upper, middle, lower = compute_bollinger(closes[: i + 1], period, std)
+        assert bands.upper[i] == pytest.approx(upper, abs=TOLERANCE)
+        assert bands.middle[i] == pytest.approx(middle, abs=TOLERANCE)
+        assert bands.lower[i] == pytest.approx(lower, abs=TOLERANCE)

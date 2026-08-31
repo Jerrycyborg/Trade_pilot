@@ -42,6 +42,15 @@ class IndicatorSeries:
     macd_hist: list[float]
 
 
+@dataclass(frozen=True)
+class BollingerSeries:
+    """Bollinger bands at every bar, aligned to the input closes."""
+
+    upper: list[float]
+    middle: list[float]
+    lower: list[float]
+
+
 def _ema_series(closes: list[float], period: int) -> list[float]:
     """compute_ema(closes[:i+1], period) for every i."""
     out: list[float] = []
@@ -151,3 +160,33 @@ def build(closes: list[float], ema_fast_period: int, ema_slow_period: int) -> In
         rsi=_rsi_series(closes),
         macd_hist=_macd_hist_series(closes),
     )
+
+
+def bollinger(closes: list[float], period: int, std_dev: float) -> BollingerSeries:
+    """compute_bollinger(closes[:i+1], period, std_dev) for every i.
+
+    Unlike the recursive indicators this one is a plain rolling window, so the
+    only thing being avoided here is the repeated slicing — but it keeps the
+    whole signal pass to one shape, and the equality test covers it the same
+    way.
+    """
+    upper: list[float] = []
+    middle: list[float] = []
+    lower: list[float] = []
+
+    for i in range(len(closes)):
+        if i + 1 < period:
+            # Matches the original's "not enough data" return.
+            upper.append(0.0)
+            middle.append(0.0)
+            lower.append(0.0)
+            continue
+        window = closes[i + 1 - period : i + 1]
+        mean = sum(window) / period
+        variance = sum((price - mean) ** 2 for price in window) / period
+        spread = std_dev * variance**0.5
+        upper.append(mean + spread)
+        middle.append(mean)
+        lower.append(mean - spread)
+
+    return BollingerSeries(upper=upper, middle=middle, lower=lower)
