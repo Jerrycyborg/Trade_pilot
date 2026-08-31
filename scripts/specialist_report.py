@@ -134,6 +134,16 @@ def main(argv: list[str] | None = None) -> int:
         help="ISO timestamp to reason as of; defaults to now. Reading a past "
              "moment uses only what the archive held then.",
     )
+    parser.add_argument(
+        "--timeframe",
+        default="15m",
+        help="bar cadence to read from the archive (e.g. 15m, 1d). Must name "
+             "what was actually archived: the wrong slice reports a "
+             "well-stocked archive as empty. The veto's gap detection reads "
+             "its cadence from VETO_EXPECTED_INTERVAL_MINUTES and its "
+             "freshness floor from VETO_MAX_STALE_MINUTES — set those to "
+             "match, this flag does not silently retune the veto.",
+    )
     parser.add_argument("--no-reproducibility-check", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -153,12 +163,16 @@ def main(argv: list[str] | None = None) -> int:
         symbols,
         as_of=as_of,
         check_reproducibility=not args.no_reproducibility_check,
+        timeframe=args.timeframe,
     )
 
     # The veto runs on the journal and the symbol alone. It is never handed
     # `report`, so it cannot be influenced by the conclusions it exists to
     # check independently — and there is no flag to skip it.
-    vetoes = {s: veto_review(get_journal(), s, as_of=as_of) for s in symbols}
+    vetoes = {
+        s: veto_review(get_journal(), s, as_of=as_of, timeframe=args.timeframe)
+        for s in symbols
+    }
 
     if args.json:
         print(

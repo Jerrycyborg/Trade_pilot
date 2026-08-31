@@ -22,8 +22,7 @@ from .models import Leg, RoundTrip
 
 logger = logging.getLogger(__name__)
 
-OPENING_SIDES = {"BUY"}
-CLOSING_SIDES = {"SELL"}
+_SIDE_DIRECTION = {"BUY": 1, "SELL": -1}
 
 
 def _leg(row: Any) -> Leg:
@@ -42,9 +41,18 @@ def _leg(row: Any) -> Leg:
 def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
     """Match opening fills to closing fills, FIFO, within each scope.
 
+    Direction comes from netting, not from the side label: a SELL with nothing
+    open (or with shorts open) opens a short lot, and the BUY that offsets it
+    closes the round trip. The first live paper run's only clean trade was a
+    short, and a pairing that hard-coded BUY-opens/SELL-closes reported "no
+    closed round trips" over an archive that held one — every downstream model
+    was already direction-aware; the trips just never reached it.
+
     Only filled orders participate: a limit that missed has no position to
     attribute. Unmatched openings are still open and are left out rather than
-    closed at a guessed price.
+    closed at a guessed price. The netting reading has one honest limit: a
+    close whose opening fill predates the archive window looks like a fresh
+    opening in the opposite direction, so windows should start flat.
     """
     groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -64,21 +72,21 @@ def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
     trips: list[RoundTrip] = []
     for (strategy_id, symbol, environment, account_id), scoped in groups.items():
         scoped.sort(key=lambda r: r["recorded_at"])
+        # All open lots in a scope share one direction at any moment: an
+        # opposing fill nets against them FIFO before anything new opens.
         open_legs: deque[tuple[Leg, float]] = deque()
+        open_direction = 0
 
         for row in scoped:
             leg = _leg(row)
             if leg.qty <= 0:
                 continue
-
-            if leg.side in OPENING_SIDES:
-                open_legs.append((leg, leg.qty))
-                continue
-            if leg.side not in CLOSING_SIDES:
+            leg_direction = _SIDE_DIRECTION.get(leg.side)
+            if leg_direction is None:
                 continue
 
             remaining = leg.qty
-            while remaining > 0 and open_legs:
+            while remaining > 0 and open_legs and leg_direction == -open_direction:
                 entry, available = open_legs[0]
                 matched = min(available, remaining)
                 trips.append(
@@ -99,12 +107,13 @@ def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
                     open_legs[0] = (entry, available - matched)
 
             if remaining > 0:
-                # A close with nothing open in this scope. Not attributable, and
-                # not something to invent an entry for.
-                logger.debug(
-                    "Unmatched close of %g %s in %s/%s", remaining, symbol,
-                    strategy_id, environment,
-                )
+                # Whatever the offsets left over opens (or extends) a position
+                # in this fill's own direction — including the flip through
+                # flat when it closed the other side entirely.
+                open_legs.append((leg, remaining))
+                open_direction = leg_direction
+            elif not open_legs:
+                open_direction = 0
 
     trips.sort(key=lambda t: t.exit.at)
     return trips

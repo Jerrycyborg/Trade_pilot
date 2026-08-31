@@ -53,7 +53,12 @@ class ReproductionResult:
 
 
 def reproduce(
-    specialist: Any, journal: Any, symbol: str, as_of: datetime, runs: int = 3
+    specialist: Any,
+    journal: Any,
+    symbol: str,
+    as_of: datetime,
+    runs: int = 3,
+    timeframe: str = "15m",
 ) -> ReproductionResult:
     """Run one role several times over a freshly built archive each time.
 
@@ -65,11 +70,15 @@ def reproduce(
         role=getattr(specialist, "role", "unknown"), symbol=symbol, as_of=as_of, runs=runs
     )
     for _ in range(runs):
-        assessment = specialist.assess(PointInTimeArchive(journal, as_of), symbol)
+        assessment = specialist.assess(
+            PointInTimeArchive(journal, as_of, timeframe), symbol
+        )
         result.digests.append(assessment.digest())
     return result
 
 
-def assess_at(specialist: Any, journal: Any, symbol: str, as_of: datetime) -> Assessment:
+def assess_at(
+    specialist: Any, journal: Any, symbol: str, as_of: datetime, timeframe: str = "15m"
+) -> Assessment:
     """One assessment through a fresh point-in-time archive."""
-    return specialist.assess(PointInTimeArchive(journal, as_of), symbol)
+    return specialist.assess(PointInTimeArchive(journal, as_of, timeframe), symbol)

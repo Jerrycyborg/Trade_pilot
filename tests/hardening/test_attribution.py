@@ -120,6 +120,46 @@ class TestPairing:
     def test_an_open_position_is_not_closed_at_a_guess(self) -> None:
         assert pair_round_trips([_row("BUY", 100.0, 100.0, 0)]) == []
 
+    def test_a_short_round_trip_pairs_sell_then_buy(self) -> None:
+        """The first live paper run's only clean trade was a short — SELL to
+        open, BUY to flatten. A pairing that hard-coded BUY-opens/SELL-closes
+        reported "no closed round trips" over an archive that held one, so L0
+        coverage over a real run read as empty. Direction comes from netting,
+        not from the side label."""
+        trips = pair_round_trips(
+            [_row("SELL", 110.0, 110.0, 0), _row("BUY", 100.0, 100.0, 60)]
+        )
+        assert len(trips) == 1
+        trip = trips[0]
+        assert trip.direction == -1
+        assert trip.realized_per_share == pytest.approx(10.0)
+        assert attribute(trip).identity_holds()
+
+    def test_short_lots_close_fifo_like_long_ones(self) -> None:
+        trips = pair_round_trips(
+            [
+                _row("SELL", 110.0, 110.0, 0, qty=5),
+                _row("SELL", 120.0, 120.0, 10, qty=5),
+                _row("BUY", 100.0, 100.0, 60, qty=5),
+            ]
+        )
+        assert len(trips) == 1
+        assert trips[0].entry.fill_price == 110.0
+
+    def test_a_buy_that_overshoots_the_short_flips_to_a_long(self) -> None:
+        """Closing a 7-lot short with a 12-lot BUY leaves a 5-lot long open —
+        one closed short trip, and the remainder is a position, not an error
+        and not a second trip until something sells it."""
+        trips = pair_round_trips(
+            [
+                _row("SELL", 110.0, 110.0, 0, qty=7),
+                _row("BUY", 100.0, 100.0, 60, qty=12),
+                _row("SELL", 105.0, 105.0, 120, qty=5),
+            ]
+        )
+        assert [(t.direction, t.qty) for t in trips] == [(-1, 7.0), (1, 5.0)]
+        assert trips[1].entry.fill_price == 100.0, "the flip remainder is the entry"
+
 
 class TestTheDecompositionIsExact:
     def test_the_decomposition_reconstructs_the_result(self) -> None:

@@ -26,6 +26,7 @@ def build_argument(
     symbol: str,
     as_of: datetime | None = None,
     roster: list[Any] | None = None,
+    timeframe: str = "15m",
 ) -> Argument:
     """Every role's reading of one symbol at one moment."""
     moment = as_of or datetime.now(timezone.utc)
@@ -34,7 +35,7 @@ def build_argument(
         # A fresh archive per role, so one role's reads never appear in
         # another's provenance trail.
         argument.assessments.append(
-            specialist.assess(PointInTimeArchive(journal, moment), symbol)
+            specialist.assess(PointInTimeArchive(journal, moment, timeframe), symbol)
         )
     return argument
 
@@ -45,11 +46,19 @@ def build_report(
     as_of: datetime | None = None,
     check_reproducibility: bool = True,
     roster: list[Any] | None = None,
+    timeframe: str = "15m",
 ) -> dict[str, Any]:
-    """Arguments for each symbol, plus what the archive could not support."""
+    """Arguments for each symbol, plus what the archive could not support.
+
+    `timeframe` must name the cadence that was actually archived: the roles
+    read one timeframe's slice of the bar store, and reading the wrong one
+    reports a well-stocked archive as empty.
+    """
     moment = as_of or datetime.now(timezone.utc)
     active = roster or default_roster()
-    arguments = [build_argument(journal, s, moment, active) for s in symbols]
+    arguments = [
+        build_argument(journal, s, moment, active, timeframe=timeframe) for s in symbols
+    ]
 
     reproductions: list[dict[str, Any]] = []
     if check_reproducibility:
@@ -58,7 +67,9 @@ def build_report(
                 if isinstance(specialist, UnarchivedRole):
                     continue
                 reproductions.append(
-                    reproduce(specialist, journal, symbol, moment).to_dict()
+                    reproduce(
+                        specialist, journal, symbol, moment, timeframe=timeframe
+                    ).to_dict()
                 )
 
     blocked = {

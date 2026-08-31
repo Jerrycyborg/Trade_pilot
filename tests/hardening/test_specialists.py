@@ -95,6 +95,28 @@ class TestTheArchiveIsTheOnlyWayIn:
         assert archive.bars(SYMBOL) == []
         assert archive.queries[0].rows == 0
 
+    def test_the_archive_reads_the_timeframe_it_was_built_for(
+        self, journal, archive_start
+    ) -> None:
+        """The first live paper run archived daily bars, and every role read
+        the (empty) 15m slice: 41 real bars per symbol reported as zero and
+        the veto refused subjects the archive covered. The cadence is fixed
+        at construction, like the moment — the caller knows what was
+        archived; the role must not mix slices mid-argument."""
+        journal.record_bars(
+            SYMBOL, "1d", _bars(_rising(), start=archive_start, step_minutes=1440)
+        )
+        now = datetime.now(timezone.utc) + timedelta(days=90)
+
+        daily = PointInTimeArchive(journal, now, timeframe="1d")
+        assert len(daily.bars(SYMBOL)) == 90
+        assert PointInTimeArchive(journal, now).bars(SYMBOL) == []
+
+        report = build_report(
+            journal, [SYMBOL], as_of=now, check_reproducibility=False, timeframe="1d"
+        )
+        assert "technical" in report["arguments"][0]["roles_reporting"]
+
 
 class TestClaimsCarryTheirEvidence:
     def test_a_claim_without_evidence_is_refused_at_construction(self) -> None:

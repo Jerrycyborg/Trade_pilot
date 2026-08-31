@@ -47,11 +47,17 @@ class PointInTimeArchive:
     `journal` property, no `as_of` override per call, no "latest" read.
     """
 
-    def __init__(self, journal: Any, as_of: datetime) -> None:
+    def __init__(self, journal: Any, as_of: datetime, timeframe: str = "15m") -> None:
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=timezone.utc)
         self._journal = journal
         self._as_of = as_of
+        # The cadence this archive answers in, fixed at construction like the
+        # moment is: a role must not mix timeframes mid-argument, and the
+        # caller — not the role — knows what cadence was actually archived.
+        # The first live paper run archived daily bars and every role read the
+        # (empty) 15m slice, so 41 real bars per symbol reported as zero.
+        self._timeframe = timeframe
         self._queries: list[Query] = []
 
     @property
@@ -63,17 +69,18 @@ class PointInTimeArchive:
         """Every read served, in order. The provenance trail."""
         return list(self._queries)
 
-    def bars(self, symbol: str, timeframe: str = "15m") -> list[dict[str, Any]]:
-        """The series as the system held it at `as_of`.
+    def bars(self, symbol: str) -> list[dict[str, Any]]:
+        """The series as the system held it at `as_of`, in this archive's cadence.
 
         `bars_as_of` returns, for each market timestamp, the most recent
         observation received *by* the cutoff — so a correction that arrived
         afterwards is correctly absent rather than silently improving the
-        analysis.
+        analysis. There is deliberately no per-call timeframe, for the same
+        reason there is no per-call as-of.
         """
         rows = self._safe(
-            lambda: self._journal.bars_as_of(symbol, timeframe, self._as_of),
-            f"bars_as_of({symbol}, {timeframe})",
+            lambda: self._journal.bars_as_of(symbol, self._timeframe, self._as_of),
+            f"bars_as_of({symbol}, {self._timeframe})",
             "bar_observations",
         )
         return rows
