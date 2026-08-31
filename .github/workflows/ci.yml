@@ -1,0 +1,128 @@
+# CI for the trading stack.
+#
+# Runs with no secrets and no third-party network access: no broker, no market
+# data provider, no API keys. Every job here must be reproducible by anyone who
+# clones the repository, which is the point — before this workflow existed,
+# every guarantee in the repo depended on somebody running pytest by hand and
+# remembering the result.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  # Deliberately fake. Nothing in CI may reach a real broker or data provider,
+  # and a test that needs a real credential is a test that must not exist.
+  INTERNAL_API_KEY: ci-internal-key
+  ADMIN_API_KEY: ci-admin-key
+  BROKER: paper
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-packages
+      - name: Ruff
+        run: uv run ruff check .
+
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trading_stack
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trading_stack"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      TEST_LIFECYCLE_POSTGRES_URL: postgresql+psycopg://postgres:postgres@localhost:5432/trading_stack
+      LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/trading_stack
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-packages
+
+      - name: Migration smoke test
+        # Apply, re-apply (must be a no-op), roll back, re-apply. A broken down
+        # script fails here rather than in production.
+        run: |
+          uv run python tools/migrate.py up
+          uv run python tools/migrate.py up
+          uv run python tools/migrate.py status
+          uv run python tools/migrate.py down --steps 1
+          uv run python tools/migrate.py up
+
+      - name: Full test suite
+        run: uv run pytest -q
+
+      - name: Concurrent lifecycle transitions
+        # Called out separately from the suite so a regression in the
+        # optimistic locking is obvious in the job list rather than buried in
+        # a count of passing tests.
+        run: uv run pytest tests/hardening/test_shared_lifecycle_state.py -q
+
+      - name: Restart and persistence
+        run: |
+          uv run pytest tests/hardening/test_shared_lifecycle_state.py \
+            -k "Restart or survives" -q
+
+      - name: Execution routing and evidence
+        run: |
+          uv run pytest tests/hardening/test_execution_routing.py \
+                        tests/hardening/test_promotion_evidence.py -q
+
+  compose-paper-trading:
+    # Builds the stack and proves it comes up on shared state, applies its
+    # migrations, and routes an order to the paper broker and nowhere else.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start the stack
+        run: docker compose up -d --build --wait postgres migrate execution-service
+
+      - name: Migrations applied
+        run: |
+          docker compose exec -T postgres \
+            psql -U postgres -d trading_stack -c "\dt lifecycle.*"
+
+      - name: An unregistered sleeve places no order
+        # The roster refuses anything it has not admitted, so a stack that has
+        # just come up trades nothing until a sleeve is registered and promoted.
+        run: |
+          code=$(curl -s -o /tmp/body.json -w '%{http_code}' \
+            -X POST http://localhost:8002/v1/orders \
+            -H "Content-Type: application/json" \
+            -H "Idempotency-Key: ci-$RANDOM" \
+            -H "X-Internal-Key: ${INTERNAL_API_KEY:-dev-internal-key}" \
+            -d '{"signal_id":"ci-1","symbol":"AAPL","side":"BUY","qty":1,
+                 "order_type":"MARKET","strategy_id":"ema_rsi_macd"}')
+          echo "HTTP $code"; cat /tmp/body.json
+          grep -q "sleeve_not_registered" /tmp/body.json
+
+      - name: Live mode is off by default
+        run: |
+          docker compose exec -T postgres psql -U postgres -d trading_stack -tAc \
+            "SELECT count(*) FROM lifecycle.execution_environment
+             WHERE live_mode_enabled" | grep -qx 0
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

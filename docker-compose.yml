@@ -1,3 +1,26 @@
+# The full stack, on shared PostgreSQL state.
+#
+# Previously this defined six services and omitted the autonomy orchestrator —
+# the main loop — so the composed stack could not actually trade. Every service
+# is now represented, and the ones holding authoritative state point at the
+# same database rather than at their own SQLite files.
+#
+# Real-money execution is off here and cannot be turned on by this file:
+# BROKER=paper, and the live-mode switch lives in the database as an audited
+# row that an operator has to set.
+
+x-common-env: &common-env
+  # The shared lifecycle authority. Every service that can place or gate an
+  # order reads the roster from here, so they cannot disagree about what is
+  # permitted to trade.
+  LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+  TRADING_ACCOUNT_ID: default
+  # Paper only. The route is enforced server-side by execution-service; this is
+  # belt and braces for anything that still reads the environment.
+  BROKER: paper
+  INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-internal-key}
+  ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -9,62 +32,165 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Everything else waits on this: a service that starts before the
+      # database is ready fails its first lifecycle read and, by design,
+      # refuses to trade.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading_stack"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Applies the additive lifecycle migrations, then exits. Everything that
+  # needs the schema waits for it to complete successfully.
+  migrate:
+    build:
+      context: .
+      dockerfile: services/policy-service/Dockerfile
+    environment:
+      LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+    command: ["uv", "run", "python", "tools/migrate.py", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   policy-service:
     build:
       context: .
       dockerfile: services/policy-service/Dockerfile
-    env_file:
-      - .env.example
+    env_file: [.env.example]
     environment:
+      <<: *common-env
       POLICY_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
     depends_on:
-      - postgres
-    ports:
-      - "8001:8001"
+      migrate: {condition: service_completed_successfully}
+    ports: ["8001:8001"]
 
   execution-service:
     build:
       context: .
       dockerfile: services/execution-service/Dockerfile
-    env_file:
-      - .env.example
+    env_file: [.env.example]
     environment:
+      <<: *common-env
       EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
     depends_on:
-      - postgres
-    ports:
-      - "8002:8002"
-
-  portfolio-service:
-    build:
-      context: .
-      dockerfile: services/portfolio-service/Dockerfile
-    env_file:
-      - .env.example
-    environment:
-      PORTFOLIO_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
-      PORTFOLIO_EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
-    depends_on:
-      - postgres
-    ports:
-      - "8004:8004"
+      migrate: {condition: service_completed_successfully}
+    ports: ["8002:8002"]
 
   strategy-service:
     build:
       context: .
       dockerfile: services/strategy-service/Dockerfile
-    ports:
-      - "8003:8003"
+    env_file: [.env.example]
+    environment:
+      <<: *common-env
+      STRATEGY_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8003:8003"]
+
+  portfolio-service:
+    build:
+      context: .
+      dockerfile: services/portfolio-service/Dockerfile
+    env_file: [.env.example]
+    environment:
+      <<: *common-env
+      PORTFOLIO_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      PORTFOLIO_EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8004:8004"]
+
+  research-service:
+    build:
+      context: .
+      dockerfile: services/research-service/Dockerfile
+    env_file: [.env.example]
+    environment:
+      <<: *common-env
+      RESEARCH_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8005:8005"]
+
+  audit-logger:
+    build:
+      context: .
+      dockerfile: services/audit-logger/Dockerfile
+    env_file: [.env.example]
+    environment:
+      <<: *common-env
+      AUDIT_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8006:8006"]
+
+  # The main loop. Absent from this file before, which meant the documented
+  # stack could be started and would never place an order.
+  autonomy-orchestrator:
+    build:
+      context: .
+      dockerfile: services/autonomy-orchestrator/Dockerfile
+    env_file: [.env.example]
+    environment:
+      <<: *common-env
+      EXECUTION_SERVICE_URL: http://execution-service:8002
+      POLICY_SERVICE_URL: http://policy-service:8001
+      PORTFOLIO_SERVICE_URL: http://portfolio-service:8004
+      STRATEGY_SERVICE_URL: http://strategy-service:8003
+      AUDIT_SERVICE_URL: http://audit-logger:8006
+      NOTIFICATION_SERVICE_URL: http://notification-service:8009
+      APPROVAL_SERVICE_URL: http://approval-gateway:8010
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      execution-service: {condition: service_started}
+      policy-service: {condition: service_started}
+    ports: ["8007:8007"]
+
+  sentiment-aggregator:
+    build:
+      context: .
+      dockerfile: services/sentiment-aggregator/Dockerfile
+    env_file: [.env.example]
+    environment: *common-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8008:8008"]
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    env_file: [.env.example]
+    environment: *common-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8009:8009"]
+
+  approval-gateway:
+    build:
+      context: .
+      dockerfile: services/approval-gateway/Dockerfile
+    env_file: [.env.example]
+    environment:
+      <<: *common-env
+      APPROVAL_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8010:8010"]
 
   backtest-service:
     build:
       context: .
       dockerfile: services/backtest-service/Dockerfile
-    ports:
-      - "8011:8011"
-    env_file: .env
-    restart: unless-stopped
+    env_file: [.env.example]
+    environment: *common-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["8011:8011"]
 
 volumes:
   postgres-data:
