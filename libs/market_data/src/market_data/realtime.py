@@ -27,6 +27,22 @@ from .models import OHLCVBar, PriceSnapshot
 logger = logging.getLogger(__name__)
 
 
+def _archive_price(snapshot: PriceSnapshot, accepted: bool) -> None:
+    """Record a resolved price, accepted or refused. Never raises."""
+    try:
+        from journal import get_journal
+
+        get_journal().record_price(
+            snapshot.symbol,
+            snapshot.price,
+            price_ts=snapshot.timestamp,
+            source=snapshot.source,
+            accepted=accepted,
+        )
+    except Exception as exc:  # pragma: no cover - archiving is best effort
+        logger.debug("Price archiving skipped for %s: %s", snapshot.symbol, exc)
+
+
 class LivePriceCache:
     """Thread-safe most-recent-price-per-symbol store."""
 
@@ -134,10 +150,14 @@ class RealtimePriceSource:
         self._cache.record(snapshot)
 
         age = snapshot.age_seconds()
-        if age > limit:
+        accepted = age <= limit
+        # Archived either way: a price we refused explains a trade we did not
+        # make, which a later post-mortem otherwise cannot account for.
+        _archive_price(snapshot, accepted)
+        if not accepted:
             logger.warning(
-                "Refusing %s price for %s: %.0fs old via %s, limit is %.0fs",
-                "stale", symbol, age, snapshot.source, limit,
+                "Refusing stale price for %s: %.0fs old via %s, limit is %.0fs",
+                symbol, age, snapshot.source, limit,
             )
             return None
         return snapshot

@@ -14,3 +14,8 @@ paper-broker-state.json
 paper-broker-state.tmp
 day-trade-state.json
 day-trade-state.tmp
+
+# Journal / point-in-time archive (Phase 0)
+journal.db
+journal.db-wal
+journal.db-shm

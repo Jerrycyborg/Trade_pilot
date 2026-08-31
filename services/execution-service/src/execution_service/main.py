@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from contracts import (
     AccountInfo,
+    BrokerPosition,
     ClosePositionRequest,
     ExecutionEvent,
     ExecutionOrderRequest,
@@ -29,6 +30,7 @@ from .logging_utils import log_event
 from .models import ExecutionEventRecord, FillRecord as FillRecordModel, OrderRecord
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 Base.metadata.create_all(bind=engine)
@@ -233,6 +235,22 @@ def list_execution_events() -> list[ExecutionEvent]:
     with SessionLocal() as session:
         events = session.scalars(select(ExecutionEventRecord)).all()
         return [_to_event_response(event) for event in events]
+
+
+@app.get("/v1/positions", response_model=list[BrokerPosition])
+def list_broker_positions() -> list[BrokerPosition]:
+    """Positions as the BROKER reports them.
+
+    Distinct from portfolio-service's /v1/portfolio/positions, which derives
+    holdings from our own fill history. The broker is authoritative; the derived
+    view is a cache. Reconciliation compares the two, and cannot run without
+    this endpoint.
+    """
+    try:
+        return broker.get_positions()
+    except Exception as exc:
+        logger.error("Broker position lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"broker_unavailable: {exc}") from exc
 
 
 @app.get("/v1/account", response_model=AccountInfo)

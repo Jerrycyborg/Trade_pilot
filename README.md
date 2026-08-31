@@ -307,6 +307,71 @@ a holiday week a day trade can expire one session early (set
 `PDT_MAX_DAY_TRADES=2` for margin); and crypto round trips are counted even
 though FINRA's rule covers securities, which is conservative rather than unsafe.
 
+## The Point-in-Time Archive
+
+Every bar, every price and every decision the system makes is recorded to a
+single SQLite file (`JOURNAL_PATH`, default `./journal.db`). Three tables:
+
+| Table | Records | Deduplicated? |
+|---|---|---|
+| `bar_observations` | OHLCV as delivered by a provider | Yes, on (symbol, timeframe, bar time) |
+| `price_observations` | Every price resolved — **including ones refused as stale** | No |
+| `decisions` | Each pipeline stage, with the inputs that produced it | No |
+
+The distinction that matters is between **when the market printed a value** and
+**when this system learned of it** (`bar_ts` vs `recorded_at`, `price_ts` vs
+`observed_at`). Research that conflates the two is research contaminated by
+hindsight, and you cannot recover the difference after the fact — which is why
+this is worth capturing from the first day rather than the first loss.
+
+Refused prices are archived deliberately: a price rejected as stale explains a
+trade the system did *not* make, and a post-mortem that only sees fills cannot
+account for it.
+
+```bash
+curl http://localhost:8007/v1/orchestrator/journal        # coverage + recent decisions
+```
+
+The file is plain SQLite — open it with any client, or load it into pandas:
+
+```python
+import pandas as pd, sqlite3
+bars = pd.read_sql("SELECT * FROM bar_observations", sqlite3.connect("journal.db"))
+```
+
+Journalling never blocks trading. Every write is best-effort: a full disk
+degrades research, it does not halt the loop or raise mid-order.
+
+## Position Reconciliation
+
+**The broker is the source of truth.** `portfolio-service` derives holdings from
+our own fill history, which makes it a cache — and a cache that silently
+diverges will eventually trade against a position that does not exist, or leave
+a real position with nothing watching it.
+
+A scheduled job compares the two and reports three kinds of break:
+
+| Kind | Meaning |
+|---|---|
+| `untracked_position` | The broker holds something we do not know about |
+| `phantom_position` | We think we hold something the broker does not — a stop watching nothing |
+| `quantity_mismatch` | Both know the position, sizes disagree |
+
+```bash
+curl "http://localhost:8007/v1/orchestrator/reconciliation?refresh=true"
+```
+
+Two design choices worth knowing:
+
+- **A single mismatch does not halt anything.** A fill in flight legitimately
+  appears at the broker before it appears in our fills. Only a break that
+  survives `RECONCILE_BREAKS_BEFORE_HALT` consecutive checks is believed.
+- **Only entries are blocked, never exits.** Refusing to close a position you
+  cannot account for is strictly worse than closing it.
+
+An unreachable service is not treated as a divergence — otherwise every
+container restart would stop trading.
+
 ## Enabling Live Mode (Step-by-Step)
 
 ⚠️ Only proceed after at least 30 days of demo/paper trading with no policy violations.

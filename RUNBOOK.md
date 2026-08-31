@@ -202,6 +202,72 @@ only loses money quicker.
 so there is nothing to evaluate. Lengthen `--days` or check the warm-up (EMA-50
 needs 51 bars before any signal is possible).
 
+## Position Break — "New entries paused"
+
+The ledger and the broker disagree about what is held. Exits still work; only
+new entries are blocked.
+
+```bash
+curl "http://localhost:8007/v1/orchestrator/reconciliation?refresh=true"
+```
+
+Act on the `kind` field:
+
+- **`phantom_position`** — we think we hold something the broker does not. Most
+  urgent: a stop-loss is watching a position that is not there. Usually a close
+  that succeeded at the broker without a fill being recorded. Check
+  `/v1/fills`, then re-run `POST /v1/portfolio/reconcile`.
+- **`untracked_position`** — the broker holds something we do not know about.
+  Either a manual trade placed outside the system, or an order that filled
+  after our record of it failed. **Decide manually whether to keep or close
+  it** — do not let the system adopt it silently.
+- **`quantity_mismatch`** — usually a partial fill. Compare `/v1/fills` for the
+  symbol against the broker's own quantity.
+
+Once resolved, the next check clears the halt automatically. To clear a break
+you have judged to be spurious, restart the orchestrator — the counter is
+in-memory by design, so a halt never outlives an operator decision.
+
+If reconciliation reports `ok: false` with an `error` rather than breaks, a
+service is unreachable. That is not a divergence and does not halt trading.
+
+## Reading the Archive
+
+```bash
+curl http://localhost:8007/v1/orchestrator/journal          # coverage + decisions
+curl "http://localhost:8007/v1/orchestrator/journal?symbol=AAPL&limit=50"
+```
+
+To ask why a specific trade happened, find its `correlation_id` (the signal id)
+and read every stage of that signal's journey:
+
+```sql
+SELECT ts, stage, outcome, reason, inputs_json
+FROM decisions WHERE correlation_id = '<signal-id>' ORDER BY ts;
+```
+
+To find what the system refused and why:
+
+```sql
+SELECT symbol, COUNT(*), reason FROM decisions
+WHERE outcome = 'rejected' GROUP BY symbol, reason ORDER BY 2 DESC;
+```
+
+Stale-price refusals live in `price_observations` with `accepted = 0`. A run of
+those explains a quiet day better than any log will.
+
+### The archive is growing too fast
+
+At minute resolution across a large allowlist the file grows steadily. Bars
+deduplicate, so growth is bounded by real market time, not by cycle frequency.
+Prices and decisions are append-only. To trim, delete old rows rather than the
+file — losing history costs you the research you are capturing it for:
+
+```sql
+DELETE FROM price_observations WHERE observed_at < date('now', '-90 days');
+VACUUM;
+```
+
 ## Emergency Procedures
 
 ### Service crash

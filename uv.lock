@@ -19,6 +19,7 @@ members = [
     "brokers",
     "contracts",
     "execution-service",
+    "journal",
     "market-data",
     "notification-service",
     "policy-service",
@@ -158,6 +159,7 @@ dependencies = [
     { name = "contracts" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "journal" },
     { name = "market-data" },
     { name = "pyyaml" },
     { name = "uvicorn" },
@@ -169,6 +171,7 @@ requires-dist = [
     { name = "contracts", editable = "libs/contracts" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "journal", editable = "libs/journal" },
     { name = "market-data", editable = "libs/market_data" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "uvicorn", specifier = ">=0.34.0" },
@@ -694,11 +697,23 @@ wheels = [
 ]
 
 [[package]]
+name = "journal"
+version = "0.1.0"
+source = { editable = "libs/journal" }
+dependencies = [
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "sqlalchemy", specifier = ">=2.0.39" }]
+
+[[package]]
 name = "market-data"
 version = "0.1.0"
 source = { editable = "libs/market_data" }
 dependencies = [
     { name = "alpaca-py" },
+    { name = "journal" },
     { name = "numpy" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "pandas", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
@@ -709,6 +724,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alpaca-py", specifier = ">=0.38.0" },
+    { name = "journal", editable = "libs/journal" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
@@ -1568,6 +1584,7 @@ dependencies = [
     { name = "brokers" },
     { name = "contracts" },
     { name = "execution-service" },
+    { name = "journal" },
     { name = "market-data" },
     { name = "notification-service" },
     { name = "policy-service" },
@@ -1594,6 +1611,7 @@ requires-dist = [
     { name = "brokers", editable = "libs/brokers" },
     { name = "contracts", editable = "libs/contracts" },
     { name = "execution-service", editable = "services/execution-service" },
+    { name = "journal", editable = "libs/journal" },
     { name = "market-data", editable = "libs/market_data" },
     { name = "notification-service", editable = "services/notification-service" },
     { name = "policy-service", editable = "services/policy-service" },

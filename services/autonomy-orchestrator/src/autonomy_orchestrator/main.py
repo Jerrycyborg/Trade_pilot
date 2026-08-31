@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from .config import settings
 from .day_trade_tracker import DayTradeTracker
+from .reconciliation import Reconciler
 from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
@@ -58,6 +59,7 @@ class OrchestratorState:
     monthly_reset_month: int = 0
     monthly_reset_year: int = 0
     price_source: RealtimePriceSource | None = None
+    reconciler: Reconciler | None = None
     stream_manager: StreamManager | None = None
     market_settings: MarketDataSettings | None = None
     day_trades: DayTradeTracker | None = None
@@ -124,6 +126,14 @@ def _start_scheduler() -> None:
         "interval",
         seconds=_risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES"),
         id="stop_loss_check",
+        replace_existing=True,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(_run_reconciliation()),
+        "interval",
+        seconds=int(os.getenv("RECONCILE_INTERVAL_SECONDS", "300")),
+        id="position_reconciliation",
         replace_existing=True,
         coalesce=True,
     )
@@ -290,6 +300,31 @@ def realtime_status() -> dict[str, object]:
             for symbol in source.cache.symbols()
             if (snapshot := source.cache.peek(symbol)) is not None
         },
+    }
+
+
+@app.get("/v1/orchestrator/reconciliation")
+async def reconciliation_status(refresh: bool = False) -> dict[str, object]:
+    """Last ledger-vs-broker comparison. `refresh=true` runs a fresh check."""
+    reconciler = _reconciler()
+    if refresh or reconciler.last_result is None:
+        result = await reconciler.check()
+    else:
+        result = reconciler.last_result
+    return {
+        **result.to_dict(),
+        "entries_blocked": reconciler.entries_blocked,
+        "breaks_before_halt": int(os.getenv("RECONCILE_BREAKS_BEFORE_HALT", "2")),
+    }
+
+
+@app.get("/v1/orchestrator/journal")
+def journal_status(limit: int = 25, symbol: str | None = None) -> dict[str, object]:
+    """Archive coverage and the most recent decisions, with their inputs."""
+    archive = _journal()
+    return {
+        "archive": archive.stats(),
+        "recent_decisions": archive.recent_decisions(limit=limit, symbol=symbol),
     }
 
 
@@ -476,6 +511,28 @@ async def run_cycle() -> dict[str, object]:
         # is done once, but the decision is re-taken per signal: every accepted
         # entry increments open_today, which the budget is gated on.
         account_equity = await _account_equity()
+        # A ledger that disagrees with the broker is not a safe basis for a new
+        # position. Exits stay enabled: refusing to close something we cannot
+        # account for is worse than closing it.
+        reconciliation = await _reconciler().check()
+        summary["reconciliation"] = {
+            "ok": reconciliation.ok,
+            "breaks": len(reconciliation.breaks),
+            "halted": reconciliation.halted,
+        }
+        if reconciliation.halted:
+            _journal().record_decision(
+                stage="reconcile",
+                outcome="rejected",
+                reason="position break persisted — new entries blocked",
+                inputs=reconciliation.to_dict(),
+            )
+            await _notify_smart(
+                "reconciliation_break",
+                "\u26d4 Broker and ledger disagree — new entries paused. Exits unaffected.",
+                tier=3,
+            )
+
         pdt = _day_trades().check_entry(account_equity)
         summary["pdt"] = {
             "allowed": pdt.allowed,
@@ -493,9 +550,25 @@ async def run_cycle() -> dict[str, object]:
 
         for signal in signals:
             summary["signals"] += 1
+            if reconciliation.halted:
+                summary["rejected"] += 1
+                continue
             pdt = _day_trades().check_entry(account_equity)
             if not pdt.allowed:
                 summary["rejected"] += 1
+                _journal().record_decision(
+                    stage="pdt",
+                    outcome="rejected",
+                    symbol=signal.symbol,
+                    action=str(signal.candidate_action),
+                    reason=pdt.reason,
+                    inputs={
+                        "day_trades_used": pdt.day_trades_used,
+                        "open_today": pdt.open_today,
+                        "equity": pdt.equity,
+                    },
+                    correlation_id=signal.signal_id,
+                )
                 await _audit(
                     AuditEvent(
                         event_type="signal.rejected",
@@ -511,6 +584,21 @@ async def run_cycle() -> dict[str, object]:
             risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
             if not risk.approved:
                 summary["rejected"] += 1
+                _journal().record_decision(
+                    stage="risk",
+                    outcome="rejected",
+                    symbol=signal.symbol,
+                    action=str(signal.candidate_action),
+                    reason=risk.reason,
+                    inputs={
+                        "size_pct": signal.size_pct,
+                        "confidence": signal.confidence,
+                        "risk_score": signal.risk_score,
+                        "bars": len(price_bars or []),
+                    },
+                    outputs={"tier": risk.tier},
+                    correlation_id=signal.signal_id,
+                )
                 await _audit(
                     AuditEvent(
                         event_type="signal.rejected",
@@ -545,6 +633,27 @@ async def run_cycle() -> dict[str, object]:
                     )
                     continue
                 _day_trades().record_open(signal.symbol)
+                _journal().record_decision(
+                    stage="order",
+                    outcome="executed",
+                    symbol=signal.symbol,
+                    action=_side_of(signal.candidate_action),
+                    reason="order_submitted",
+                    inputs={
+                        "confidence": signal.confidence,
+                        "risk_score": signal.risk_score,
+                        "adjusted_size_pct": risk.adjusted_size_pct,
+                        "policy_decision": policy.get("decision"),
+                        "research": (signal.research_summary or "")[:400],
+                    },
+                    outputs={
+                        "qty": order.get("qty"),
+                        "entry_price": order.get("entry_price"),
+                        "amount_usd": order.get("amount_usd"),
+                        "order_id": order.get("order_id"),
+                    },
+                    correlation_id=signal.signal_id,
+                )
                 _register_stop_loss(
                     signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
                 )
@@ -805,6 +914,23 @@ def _side_of(action: object) -> str:
     return str(getattr(action, "value", action)).upper()
 
 
+def _reconciler() -> Reconciler:
+    if state.reconciler is None:
+        state.reconciler = Reconciler(
+            execution_url=settings.execution_service_url,
+            portfolio_url=settings.portfolio_service_url,
+            internal_key=settings.internal_api_key,
+        )
+    return state.reconciler
+
+
+def _journal():
+    """Process-wide decision journal; a stub if journalling is unavailable."""
+    from journal import get_journal
+
+    return get_journal()
+
+
 def _order_accepted(order: dict[str, object]) -> bool:
     """Whether the broker actually took the order.
 
@@ -928,6 +1054,31 @@ def _realized_pnl(record, exit_price: float | None) -> float | None:
         return None
     direction = -1.0 if str(getattr(record, "side", "BUY")).upper() == "SELL" else 1.0
     return (exit_price - entry) * qty * direction
+
+
+async def _run_reconciliation() -> None:
+    """Scheduled ledger-vs-broker check, independent of the trading cycle.
+
+    Runs on its own timer so a break is noticed even when no signals are being
+    produced — a position that appears at the broker outside the loop is exactly
+    the case worth catching.
+    """
+    result = await _reconciler().check()
+    if result.breaks:
+        await _audit(
+            AuditEvent(
+                event_type="reconciliation.break",
+                decision="ALERT",
+                reasoning="; ".join(b.describe() for b in result.breaks[:5]),
+                metadata=result.to_dict(),
+            )
+        )
+        _journal().record_decision(
+            stage="reconcile",
+            outcome="rejected" if result.halted else "skipped",
+            reason=f"{len(result.breaks)} position break(s)",
+            inputs=result.to_dict(),
+        )
 
 
 async def _run_stop_loss_check() -> None:

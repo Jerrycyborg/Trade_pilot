@@ -377,6 +377,16 @@ def get_fetcher(settings: MarketDataSettings) -> AlpacaFetcher | YahooFinanceFet
     return YahooFinanceFetcher()
 
 
+def _archive(symbol: str, bars: list[OHLCVBar], timeframe: str, source: str) -> None:
+    """Record bars to the point-in-time archive. Never raises."""
+    try:
+        from journal import get_journal
+
+        get_journal().record_bars(symbol, timeframe, bars, source=source)
+    except Exception as exc:  # pragma: no cover - archiving is best effort
+        logger.debug("Bar archiving skipped for %s: %s", symbol, exc)
+
+
 def fetch_bars(symbol: str, settings: MarketDataSettings) -> list[OHLCVBar]:
     """Fetch bars at the configured timeframe.
 
@@ -386,15 +396,20 @@ def fetch_bars(symbol: str, settings: MarketDataSettings) -> list[OHLCVBar]:
     because it silently changes what every downstream indicator means.
     """
     fetcher = get_fetcher(settings)
+    provider = type(fetcher).__name__
     if not settings.is_intraday:
-        return fetcher.fetch(symbol, period_days=settings.default_lookback_days)
+        daily = fetcher.fetch(symbol, period_days=settings.default_lookback_days)
+        _archive(symbol, daily, "1d", provider)
+        return daily
 
     try:
-        return fetcher.fetch_intraday(
+        intraday = fetcher.fetch_intraday(
             symbol,
             period_days=settings.intraday_lookback_days,
             timeframe_minutes=settings.intraday_minutes,
         )
+        _archive(symbol, intraday, f"{settings.intraday_minutes}m", provider)
+        return intraday
     except DataUnavailableError as exc:
         logger.warning(
             "Intraday fetch failed for %s via %s: %s", symbol, type(fetcher).__name__, exc
@@ -403,11 +418,13 @@ def fetch_bars(symbol: str, settings: MarketDataSettings) -> list[OHLCVBar]:
     if isinstance(fetcher, AlpacaFetcher):
         try:
             logger.warning("Falling back to Yahoo intraday for %s", symbol)
-            return YahooFinanceFetcher().fetch_intraday(
+            fallback = YahooFinanceFetcher().fetch_intraday(
                 symbol,
                 period_days=settings.intraday_lookback_days,
                 timeframe_minutes=settings.intraday_minutes,
             )
+            _archive(symbol, fallback, f"{settings.intraday_minutes}m", "YahooFinanceFetcher")
+            return fallback
         except DataUnavailableError as exc:
             logger.warning("Yahoo intraday fallback also failed for %s: %s", symbol, exc)
 
@@ -416,7 +433,9 @@ def fetch_bars(symbol: str, settings: MarketDataSettings) -> list[OHLCVBar]:
         "Indicators and stops are no longer intraday.",
         symbol,
     )
-    return fetcher.fetch(symbol, period_days=settings.default_lookback_days)
+    degraded = fetcher.fetch(symbol, period_days=settings.default_lookback_days)
+    _archive(symbol, degraded, "1d", provider)
+    return degraded
 
 
 def latest_price(symbol: str, settings: MarketDataSettings) -> PriceSnapshot | None:

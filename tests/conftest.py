@@ -85,6 +85,12 @@ def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
     _active_prices = source
     monkeypatch.setenv("PAPER_STATE_PATH", str(tmp_path / "paper-broker-state.json"))
     monkeypatch.setenv("PAPER_SLIPPAGE_BPS", "0")
+    # Each test gets its own archive. Without this the suite would append to the
+    # developer's real journal.db and pollute the research record with fixtures.
+    monkeypatch.setenv("JOURNAL_PATH", str(tmp_path / "journal.db"))
+    from journal import reset_journal
+
+    reset_journal(None)
     if request.node.get_closest_marker("real_price_source"):
         # Tests of the resolver itself inject their own fetcher, so they never
         # reach the network either.
