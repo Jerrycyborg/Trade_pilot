@@ -617,6 +617,29 @@ class Journal:
             "last_at": max(stamps).isoformat(),
         }
 
+    def bar_timeframes(self, symbol: str) -> dict[str, int]:
+        """Which cadences the archive holds for a symbol, with bar counts.
+
+        Every as-of read takes a timeframe, and reading the wrong one reports
+        a well-stocked archive as empty — the first live paper run archived
+        daily bars and both the specialists and the veto read the (empty) 15m
+        slice. This exists so an empty read can say what the archive *does*
+        hold instead of leaving the operator to guess.
+        """
+        if not self.enabled:
+            return {}
+        try:
+            with self._session_factory() as session:  # type: ignore[misc]
+                rows = session.execute(
+                    select(BarObservation.timeframe, func.count())
+                    .where(BarObservation.symbol == symbol.upper())
+                    .group_by(BarObservation.timeframe)
+                ).all()
+            return {str(tf): int(n) for tf, n in rows}
+        except Exception as exc:
+            logger.warning("Bar timeframe listing failed: %s", exc)
+            return {}
+
     def net_position(
         self,
         *,

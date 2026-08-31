@@ -151,13 +151,17 @@ re-runs identical.
   protection and scheduled reconciliation have still never run against real
   data. The flatten that closed the day was an operator action, not a
   stop — the −$0.61 exit cost above is what an unmanaged exit looks like.
-- **Regime classification is empty for daily-cadence runs**: attribution's
-  regime slice reads 15m bars around each entry; a daily archive classifies
-  every trade "unknown". The timeframe plumbing now exists in the specialist
-  archive; the regime classifier needs the same.
+- **Regime classification is empty for daily-cadence runs** *(resolved)*:
+  `attribute_trades.py --timeframe 1d` classifies the run's trade as
+  ranging/agitated (ADX 16.2, matching the specialist report) — the plumbing
+  existed; the default was wrong for this archive. The remaining gap was
+  discoverability, fixed below.
 - **The veto's defaults are intraday-tuned**: correct behaviour, but a daily
   archive fails its staleness and gap checks until the documented env
-  overrides are set. Cadence-aware defaults would remove a foot-gun.
+  overrides are set. Mitigated: an empty timeframe slice now names what the
+  archive *does* hold ("0 archived bars for NVDA at 15m … the archive does
+  hold 41 at 1d — was this the intended timeframe?"), so the refusal carries
+  its own diagnosis. The thresholds themselves stay explicit configuration.
 
 ## Reproducing the read-back
 

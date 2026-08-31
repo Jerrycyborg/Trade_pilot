@@ -61,8 +61,10 @@ def review(
             Objection(
                 rule="insufficient_history",
                 detail=(
-                    f"{len(bars)} archived bars for {subject}; nothing downstream "
-                    f"can rest on fewer than {active.min_archived_bars}"
+                    f"{len(bars)} archived bars for {subject} at {timeframe}; "
+                    f"nothing downstream can rest on fewer than "
+                    f"{active.min_archived_bars}"
+                    + _other_timeframes_hint(journal, subject, timeframe)
                 ),
                 measure=float(len(bars)),
                 threshold=float(active.min_archived_bars),
@@ -138,6 +140,27 @@ def review(
         objections=tuple(objections),
         unchecked=tuple(unchecked),
     )
+
+
+def _other_timeframes_hint(journal: Any, symbol: str, timeframe: str) -> str:
+    """What the archive does hold, when the requested slice is thin.
+
+    The first live paper run archived daily bars while every reader asked for
+    the 15m slice, and "0 archived bars" sent the operator hunting for a feed
+    problem that did not exist. A refusal stands either way — this only makes
+    the message carry its own diagnosis. Best-effort: an archive without the
+    listing, or one that errors, changes nothing.
+    """
+    try:
+        held = dict(journal.bar_timeframes(symbol) or {})
+    except Exception:
+        return ""
+    held.pop(timeframe, None)
+    held = {tf: n for tf, n in held.items() if n}
+    if not held:
+        return ""
+    listing = ", ".join(f"{n} at {tf}" for tf, n in sorted(held.items()))
+    return f" (the archive does hold {listing} — was this the intended timeframe?)"
 
 
 def _read(journal: Any, method: str, symbol: str, timeframe: str, moment: datetime):

@@ -119,6 +119,26 @@ class TestItRejectsForReasonsItCanShow:
         assert rule.rule == "insufficient_history"
         assert rule.measure == 10.0 and rule.threshold == 60.0
 
+    def test_an_empty_slice_names_what_the_archive_does_hold(self, journal) -> None:
+        """The first live paper run archived daily bars while the veto read the
+        15m slice, and "0 archived bars" sent the operator hunting for a feed
+        problem that did not exist. The refusal stands — fail closed — but the
+        message now carries its own diagnosis."""
+        journal.record_bars(SYMBOL, "1d", _bars(41, step_minutes=1440))
+        decision = review(journal, SYMBOL)  # default timeframe: 15m
+
+        assert decision.verdict == REJECTED
+        rule = decision.objections[0]
+        assert rule.rule == "insufficient_history"
+        assert "at 15m" in rule.detail
+        assert "41 at 1d" in rule.detail
+
+    def test_a_truly_empty_archive_gets_no_misleading_hint(self, journal) -> None:
+        decision = review(journal, SYMBOL)
+        rule = decision.objections[0]
+        assert rule.rule == "insufficient_history"
+        assert "does hold" not in rule.detail
+
     def test_a_stale_series_is_refused(self, journal) -> None:
         """Reasoning about a symbol whose series stopped two days ago is
         reasoning about a memory."""

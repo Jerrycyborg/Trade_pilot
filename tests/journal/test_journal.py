@@ -362,3 +362,25 @@ class TestNetPosition:
         assert dead.net_position(
             strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
         ) is None
+
+
+class TestBarTimeframes:
+    def test_holdings_are_listed_per_cadence(self, archive: Journal) -> None:
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        now = datetime.now(timezone.utc)
+        daily = [
+            SimpleNamespace(
+                timestamp=now - timedelta(days=i),
+                open=100.0, high=101.0, low=99.0, close=100.0, volume=1000.0,
+            )
+            for i in range(3)
+        ]
+        archive.record_bars("NVDA", "1d", daily)
+        archive.record_bars("NVDA", "15m", daily[:1])
+        assert archive.bar_timeframes("NVDA") == {"1d": 3, "15m": 1}
+        assert archive.bar_timeframes("AAPL") == {}
+
+    def test_a_disabled_journal_lists_nothing(self, tmp_path: Path) -> None:
+        assert Journal(path=tmp_path / "off.db", enabled=False).bar_timeframes("NVDA") == {}
