@@ -656,6 +656,10 @@ class Journal:
         span_minutes = (
             _utc(window_end) - _utc(window_start)
         ).total_seconds() / 60.0
+        # Reported, not used to decide completeness. It assumes the market is
+        # open for every minute of the window, so any span crossing an
+        # overnight close or a weekend looks catastrophically short. Halting on
+        # that would stop trading every morning.
         expected = (
             max(1, int(span_minutes / expected_interval_minutes))
             if expected_interval_minutes > 0
@@ -677,6 +681,25 @@ class Journal:
                     }
                 )
 
+        # Staleness: how long since the most recent bar. An interior hole and a
+        # series that simply stopped are both losses of coverage, and only the
+        # first shows up as a gap between consecutive bars.
+        stale_minutes = None
+        if stamps:
+            stale_minutes = round(
+                (_utc(window_end) - _read_utc(stamps[-1])).total_seconds() / 60.0, 2
+            )
+
+        stale = stale_minutes is not None and stale_minutes > tolerance
+        complete = bool(stamps) and len(gaps) == 0 and not stale
+
+        last_gap_at = gaps[-1]["to"] if gaps else None
+        if stale and stamps:
+            # A trailing hole has no "to" bar, so date it from the last one we
+            # do have — otherwise a series that stopped can never age out of
+            # its grace period.
+            last_gap_at = _read_utc(stamps[-1]).isoformat()
+
         return {
             "available": True,
             "symbol": symbol.upper(),
@@ -685,8 +708,10 @@ class Journal:
             "actual_observations": actual,
             "gap_count": len(gaps),
             "gaps": gaps[:20],
-            "complete": len(gaps) == 0 and actual >= expected,
-            "last_gap_at": gaps[-1]["to"] if gaps else None,
+            "stale_minutes": stale_minutes,
+            "stale": stale,
+            "complete": complete,
+            "last_gap_at": last_gap_at,
         }
 
     def execution_quality(self, limit: int = 200) -> dict[str, object]:

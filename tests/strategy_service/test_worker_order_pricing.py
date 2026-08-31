@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from contracts import CandidateAction, ExecutionOrderRequest, PortfolioContext, SignalCandidate
-from lifecycle import DEFAULT_LIVE_STRATEGY, Evidence, LifecycleRegistry, State
 from market_data.models import OHLCVBar
 from strategy_service.config import settings as worker_settings
 from strategy_service.worker import TradeWorker, WorkerRunResult
@@ -42,38 +41,37 @@ def _signal(action: CandidateAction = CandidateAction.BUY) -> SignalCandidate:
     )
 
 
-def _make_live(strategy: str = DEFAULT_LIVE_STRATEGY, symbol: str = "AAPL") -> None:
-    """Put a sleeve on the roster as live, so orders are permitted."""
-    registry = LifecycleRegistry()
-    registry.register(strategy, symbol)
-    registry.promote(
-        strategy,
-        symbol,
-        Evidence(
-            deflated_sharpe_ratio=0.97,
-            out_of_sample_sharpe=1.4,
-            out_of_sample_return_pct=0.08,
-            out_of_sample_trades=45,
-        ),
-    )
-    registry.promote(
-        strategy,
-        symbol,
-        Evidence(
-            paper_started_at=datetime.now(timezone.utc) - timedelta(days=30),
-            paper_decisions=40,
-            measured_shortfall_bps=2.5,
-            max_correlation_with_live=0.2,
-        ),
-    )
-    assert registry.get(strategy, symbol).state is State.LIVE
+class _AlwaysLive:
+    """Stands in for the shared lifecycle authority, answering "yes".
+
+    These tests are about sizing and limit pricing, not about the roster, so
+    the gate is stubbed rather than driven through a real promotion. The tests
+    that exercise the gate itself are in tests/hardening.
+    """
+
+    configured = True
+
+    def __init__(self, permitted: bool = True, reason: str = "live") -> None:
+        self._permitted = permitted
+        self._reason = reason
+
+    def may_open(self, strategy_id: str, symbol: str, account_id: str | None = None):
+        from lifecycle.service import GateAnswer
+
+        return GateAnswer(self._permitted, self._reason)
+
+
+def _make_live(monkeypatch, permitted: bool = True, reason: str = "live") -> None:
+    from lifecycle.service import reset_lifecycle_service
+
+    reset_lifecycle_service(_AlwaysLive(permitted, reason))
 
 
 @pytest.fixture
 def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
     """Drive _process_symbol with every collaborator stubbed, capturing the order."""
     stub_prices.set("AAPL", 200.0)
-    _make_live()
+    _make_live(monkeypatch)
     captured: list[ExecutionOrderRequest] = []
 
     async def run(
@@ -200,33 +198,19 @@ async def test_a_symbol_too_thin_to_trade_submits_nothing(
 # The roster gates this path too
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_an_unregistered_sleeve_places_no_order(worker_run, monkeypatch) -> None:
-    """The worker posts to execution-service directly, so it has to enforce the
-    roster itself — otherwise it walks around the orchestrator's gate."""
-    from strategy_service.worker import reset_lifecycle
-
-    monkeypatch.setenv("LIFECYCLE_STATE_PATH", "/nonexistent/roster.json")
-    reset_lifecycle()
+async def test_a_refused_sleeve_places_no_order(worker_run, monkeypatch) -> None:
+    """The worker posts to execution-service directly, so it asks the shared
+    authority before doing so — otherwise a refusal is only discovered
+    downstream, stripped of the context this worker has."""
+    _make_live(monkeypatch, permitted=False, reason="sleeve_paper")
     assert await worker_run() is None
 
 
 @pytest.mark.asyncio
-async def test_a_paper_sleeve_places_no_order(worker_run, monkeypatch, tmp_path) -> None:
-    from strategy_service.worker import reset_lifecycle
+async def test_an_unavailable_authority_places_no_order(worker_run, monkeypatch) -> None:
+    """Losing the roster blocks entries. It used to be a per-process JSON file,
+    so an outage was invisible and the worker carried on from a stale copy."""
+    from lifecycle.service import LifecycleService, reset_lifecycle_service
 
-    monkeypatch.setenv("LIFECYCLE_STATE_PATH", str(tmp_path / "paper.json"))
-    reset_lifecycle()
-    registry = LifecycleRegistry()
-    registry.register(DEFAULT_LIVE_STRATEGY, "AAPL")
-    registry.promote(
-        DEFAULT_LIVE_STRATEGY,
-        "AAPL",
-        Evidence(
-            deflated_sharpe_ratio=0.97,
-            out_of_sample_return_pct=0.08,
-            out_of_sample_trades=45,
-        ),
-    )
-    assert registry.get(DEFAULT_LIVE_STRATEGY, "AAPL").state is State.PAPER
-    reset_lifecycle()
+    reset_lifecycle_service(LifecycleService(store=None))
     assert await worker_run() is None

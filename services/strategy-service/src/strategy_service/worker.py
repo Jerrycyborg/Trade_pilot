@@ -24,7 +24,8 @@ from contracts.execution import (
     marketable_limit_price,
     participation_capped_qty,
 )
-from lifecycle import DEFAULT_LIVE_STRATEGY, LifecycleRegistry
+from lifecycle import DEFAULT_LIVE_STRATEGY
+from lifecycle.service import get_lifecycle_service, reset_lifecycle_service
 from market_data import (
     MarketDataSettings,
     RealtimePriceSource,
@@ -38,21 +39,16 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# One roster per process, shared by every cycle.
-_registry: LifecycleRegistry | None = None
-
-
-def _lifecycle() -> LifecycleRegistry:
-    global _registry
-    if _registry is None:
-        _registry = LifecycleRegistry()
-    return _registry
+def _lifecycle():
+    """The shared roster. Not a per-process copy: this worker used to hold a
+    JSON registry loaded once at boot, so it could believe a sleeve was live
+    long after another process demoted it."""
+    return get_lifecycle_service()
 
 
 def reset_lifecycle() -> None:
-    """Drop the cached roster — for tests, and after an out-of-band edit."""
-    global _registry
-    _registry = None
+    """Drop the cached authority — for tests, and after an out-of-band change."""
+    reset_lifecycle_service(None)
 
 
 @dataclass
@@ -280,12 +276,22 @@ class TradeWorker:
             )
 
     def _lifecycle_gate(self, signal: SignalCandidate) -> str | None:
-        """Why this signal may not reach the broker, or None if it may."""
-        registry = _lifecycle()
+        """Why this signal may not reach the broker, or None if it may.
+
+        Advisory — execution-service resolves and enforces the route whatever
+        this says. Asking here is what lets the refusal be journalled with the
+        context this worker has, instead of arriving downstream without it.
+        """
         strategy = getattr(signal, "strategy", None) or DEFAULT_LIVE_STRATEGY
-        if registry.can_trade(strategy, signal.symbol):
+        answer = _lifecycle().may_open(strategy, signal.symbol)
+        if answer.permitted:
             return None
-        return registry.gate_reason(strategy, signal.symbol)
+        if not answer.available:
+            logger.error(
+                "Lifecycle authority unavailable (%s) — refusing to open %s",
+                answer.reason, signal.symbol,
+            )
+        return answer.reason
 
     def _record_gated_decision(
         self,

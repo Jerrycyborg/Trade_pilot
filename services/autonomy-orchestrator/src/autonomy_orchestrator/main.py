@@ -26,13 +26,10 @@ from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from lifecycle import (
-    DEFAULT_LIVE_STRATEGY,
-    Evidence,
-    LifecycleRegistry,
-    State,
-    summarise,
-)
+from lifecycle import DEFAULT_LIVE_STRATEGY
+from lifecycle.health import run_health_sweep
+from lifecycle.service import LifecycleService, get_lifecycle_service
+from lifecycle.store import STATES, LifecycleUnavailableError
 from market_data import (
     LivePriceCache,
     MarketDataSettings,
@@ -42,7 +39,7 @@ from market_data import (
 )
 from market_data.fetcher import OHLCVFetcherProtocol  # noqa: F401 - kept for type hints
 from market_data.indicators import compute_atr
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import settings
 from .day_trade_tracker import DayTradeTracker
@@ -80,7 +77,8 @@ class OrchestratorState:
     stream_manager: StreamManager | None = None
     market_settings: MarketDataSettings | None = None
     day_trades: DayTradeTracker | None = None
-    lifecycle: LifecycleRegistry | None = None
+    lifecycle: LifecycleService | None = None
+    last_health_sweep: dict[str, object] | None = None
 
 
 state = OrchestratorState()
@@ -163,12 +161,56 @@ def _start_scheduler() -> None:
         replace_existing=True,
         coalesce=True,
     )
+    # Demotion triggers and journal completeness. Scheduled rather than left to
+    # an operator calling an endpoint: a safety control that only runs when
+    # somebody remembers is not a safety control.
+    scheduler.add_job(
+        lambda: asyncio.create_task(_run_health_sweep()),
+        "interval",
+        seconds=int(os.getenv("HEALTH_SWEEP_INTERVAL_SECONDS", "900")),
+        id="lifecycle_health_sweep",
+        replace_existing=True,
+        coalesce=True,
+    )
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return
     scheduler.start()
     state.scheduler = scheduler
+
+
+async def _run_health_sweep() -> dict[str, object]:
+    """Check every live sleeve, demote what has stopped working, halt on gaps.
+
+    Runs on a timer. Failures are logged and recorded rather than raised: a
+    health check that crashes the scheduler removes the very thing that was
+    watching.
+    """
+    try:
+        result = run_health_sweep(_lifecycle(), _journal())
+    except Exception as exc:  # pragma: no cover - the sweep must never crash
+        logger.exception("Health sweep failed: %s", exc)
+        state.last_health_sweep = {"error": str(exc)}
+        return state.last_health_sweep
+
+    state.last_health_sweep = {
+        **result.to_dict(),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    for demotion in result.demoted:
+        await _audit(
+            AuditEvent(
+                event_type="lifecycle.demoted",
+                symbol=demotion.split(":")[0],
+                signal_id="health-sweep",
+                decision="DEMOTE",
+                reasoning=demotion,
+                metadata={"source": "health_sweep"},
+            )
+        )
+    return state.last_health_sweep
+
 
 
 async def _check_dependency(name: str, url: str) -> dict[str, object]:
@@ -347,34 +389,106 @@ def journal_status(limit: int = 25, symbol: str | None = None) -> dict[str, obje
 @app.get("/v1/orchestrator/lifecycle")
 def lifecycle_status() -> dict[str, object]:
     """The strategy roster: what is live, what is on paper, and why."""
-    return summarise(_lifecycle())
+    service = _lifecycle()
+    if not service.configured:
+        return {
+            "available": False,
+            "reason": "no LIFECYCLE_DATABASE_URL — no shared authority",
+            "sleeves": [],
+            "trading": [],
+        }
+    try:
+        sleeves = service.all()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"lifecycle_unavailable: {exc}") from exc
+
+    counts: dict[str, int] = {}
+    for sleeve in sleeves:
+        counts[sleeve.state] = counts.get(sleeve.state, 0) + 1
+    return {
+        "available": True,
+        "counts": counts,
+        "trading": [s.key for s in sleeves if s.state == "live"],
+        "live_mode_enabled": service.store.live_mode_enabled(),
+        "sleeves": [
+            {
+                "key": s.key,
+                "strategy": s.strategy_id,
+                "strategy_version": s.strategy_version,
+                "symbol": s.symbol,
+                "state": s.state,
+                "version": s.version,
+                "since": s.since.isoformat() if s.since else None,
+                "reason": s.reason,
+                "probation_count": s.probation_count,
+                "position_environment": s.position_environment,
+            }
+            for s in sleeves
+        ],
+    }
 
 
 @app.post("/v1/orchestrator/lifecycle/register")
 def lifecycle_register(
-    strategy: str, symbol: str, _: None = Depends(verify_internal_key)
+    strategy: str,
+    symbol: str,
+    strategy_version: str = "",
+    _: None = Depends(verify_internal_key),
 ) -> dict[str, object]:
     """Add a sleeve as a candidate. It cannot trade until it earns each step."""
-    record = _lifecycle().register(strategy, sanitize_symbol(symbol))
-    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+    try:
+        record = _lifecycle().register(
+            strategy, sanitize_symbol(symbol), strategy_version=strategy_version
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"sleeve": record.key, "state": record.state, "reason": record.reason}
+
+
+class PromotionRequest(BaseModel):
+    """What a promotion may say. Note what is absent: any performance number.
+
+    The caller names the sleeve and the validation runs to read. Every figure
+    the gates evaluate is derived by the server from those stored artifacts and
+    from the journal. This request cannot assert that a strategy is good.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_ids: list[int] = Field(default_factory=list)
+    """Walk-forward artifacts, for candidate -> paper."""
+    correlation_artifact_id: int | None = None
+    """Portfolio correlation artifact, for paper -> live."""
+    paper_window_days: float | None = None
 
 
 @app.post("/v1/orchestrator/lifecycle/promote")
 def lifecycle_promote(
     strategy: str,
     symbol: str,
-    evidence: Evidence,
+    request: PromotionRequest | None = None,
     _: None = Depends(verify_admin_key),
 ) -> dict[str, object]:
-    """Move a sleeve up one step, if the evidence supports it.
+    """Move a sleeve up one step, if the stored evidence supports it.
 
-    Admin-gated because the upper step of this ladder is real money. Every gate
-    fails closed: a missing measurement is a refusal, not a pass.
+    Admin-gated because the top of this ladder is real money. Every gate fails
+    closed: a missing measurement is a refusal, not a pass — and the
+    measurements are read from durable records, not from this request.
     """
-    record, result = _lifecycle().promote(strategy, sanitize_symbol(symbol), evidence)
+    body = request or PromotionRequest()
+    try:
+        record, result = _lifecycle().promote(
+            strategy,
+            sanitize_symbol(symbol),
+            artifact_ids=body.artifact_ids,
+            correlation_artifact_id=body.correlation_artifact_id,
+            paper_window_days=body.paper_window_days,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "sleeve": record.key if record else None,
-        "state": record.state.value if record else None,
+        "state": record.state if record else None,
         "promoted": result.allowed,
         "passed": result.passed,
         "failed": result.failed,
@@ -391,35 +505,49 @@ def lifecycle_demote(
     _: None = Depends(verify_internal_key),
 ) -> dict[str, object]:
     """Take a sleeve out of live. Never gated — safety must not need approval."""
-    try:
-        target = State(to)
-    except ValueError:
+    if to not in STATES:
         raise HTTPException(
             status_code=422,
-            detail=f"Unknown state {to!r}. Available: {', '.join(s.value for s in State)}",
-        ) from None
-    record = _lifecycle().demote(strategy, sanitize_symbol(symbol), target, reason)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Sleeve is not registered")
-    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+            detail=f"Unknown state {to!r}. Available: {', '.join(STATES)}",
+        )
+    try:
+        record = _lifecycle().demote(strategy, sanitize_symbol(symbol), to, reason)
+    except LifecycleUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"sleeve": record.key, "state": record.state, "reason": record.reason}
 
 
-@app.post("/v1/orchestrator/lifecycle/health")
-def lifecycle_health(
-    strategy: str,
-    symbol: str,
-    evidence: Evidence,
-    _: None = Depends(verify_internal_key),
+@app.post("/v1/orchestrator/lifecycle/live-mode")
+def lifecycle_live_mode(
+    enabled: bool,
+    reason: str = "",
+    actor: str = "operator",
+    _: None = Depends(verify_admin_key),
 ) -> dict[str, object]:
-    """Check a live sleeve against its demotion triggers, and act on the answer."""
-    check = _lifecycle().check_health(strategy, sanitize_symbol(symbol), evidence)
-    record = _lifecycle().get(strategy, sanitize_symbol(symbol))
-    return {
-        "sleeve": record.key if record else None,
-        "healthy": check.healthy,
-        "state": record.state.value if record else None,
-        "reasons": check.reasons,
-    }
+    """The operator switch for real-money execution.
+
+    A database row rather than an environment variable, so it is audited, is
+    shared by every process at once, and cannot be flipped by a redeploy.
+    """
+    service = _lifecycle()
+    if not service.configured:
+        raise HTTPException(status_code=503, detail="no lifecycle authority configured")
+    enabled_now = service.store.set_live_mode(enabled, actor=actor, reason=reason)
+    return {"live_mode_enabled": enabled_now, "actor": actor, "reason": reason}
+
+
+@app.get("/v1/orchestrator/health-sweep")
+def health_sweep_status() -> dict[str, object]:
+    """The last scheduled health sweep, and what it did."""
+    return state.last_health_sweep or {"status": "not_run_yet"}
+
+
+@app.post("/v1/orchestrator/health-sweep")
+async def health_sweep_now(_: None = Depends(verify_internal_key)) -> dict[str, object]:
+    """Run the sweep immediately. Same code path as the scheduled one."""
+    return await _run_health_sweep()
 
 
 @app.get("/v1/orchestrator/day-trades")
@@ -1077,20 +1205,31 @@ def _strategy_of(signal: SignalCandidate) -> str:
 def _lifecycle_gate(signal: SignalCandidate) -> str | None:
     """Why this signal may not reach the broker, or None if it may.
 
-    Extracted from the cycle so the decision can be tested on its own. Buried
-    inside a hundred-line loop it could only be verified by re-implementing it
-    in the test, which tests the test.
+    Advisory: execution-service resolves and enforces the route regardless.
+    Asking here means a refused signal gets journalled with the context the
+    orchestrator has — confidence, sizing, the risk tier — instead of arriving
+    downstream stripped of it.
+
+    This used to consult a per-process JSON registry loaded once at boot, so
+    the orchestrator could believe a sleeve was live minutes after it had been
+    demoted elsewhere. It now reads the shared authority, and an unreachable
+    authority is a refusal rather than a pass.
     """
-    strategy_name = _strategy_of(signal)
-    registry = _lifecycle()
-    if registry.can_trade(strategy_name, signal.symbol):
+    answer = _lifecycle().may_open(_strategy_of(signal), signal.symbol)
+    if answer.permitted:
         return None
-    return registry.gate_reason(strategy_name, signal.symbol)
+    if not answer.available:
+        logger.error(
+            "Lifecycle authority unavailable (%s) — refusing to open %s",
+            answer.reason, signal.symbol,
+        )
+    return answer.reason
 
 
-def _lifecycle() -> LifecycleRegistry:
-    if state.lifecycle is None:
-        state.lifecycle = LifecycleRegistry()
+def _lifecycle() -> LifecycleService:
+    """The shared authority. Reconnects on demand rather than caching a failure."""
+    if state.lifecycle is None or not state.lifecycle.configured:
+        state.lifecycle = get_lifecycle_service()
     return state.lifecycle
 
 

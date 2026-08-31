@@ -53,6 +53,11 @@ DEFAULT_ACCOUNT = "default"
 #: the database is the authority, this is here to fail earlier and clearer.
 STATES = ("candidate", "paper", "live", "probation", "retired")
 
+
+def sleeve_key(strategy_id: str, symbol: str) -> str:
+    """The display identity of a sleeve. Symbol first, so a roster sorts by it."""
+    return f"{symbol.upper()}:{strategy_id}"
+
 #: Entering these states sets where the sleeve's positions live, so a later
 #: reduce-only exit knows which broker to reach even after a demotion.
 POSITION_ON_ENTRY = {"paper": POSITION_SIMULATED, "live": POSITION_LIVE}
@@ -718,6 +723,46 @@ class PostgresLifecycleStore:
                 "ENTRIES HALTED for %s/%s/%s: %s. Exits remain available.",
                 account, broker, environment, halt_reason,
             )
+        return self.reconciliation_state(broker, environment, account)
+
+    def halt_entries(
+        self,
+        *,
+        broker: str,
+        environment: str,
+        reason: str,
+        account_id: str | None = None,
+    ) -> ReconciliationHalt:
+        """Latch the entry halt immediately, for a cause already proven persistent.
+
+        `record_reconciliation` deliberately requires a break to survive several
+        consecutive checks, because a single mismatch is normal while a fill is
+        in flight. A journal gap that has outlived its grace period has already
+        met that bar by a different route, and routing it through the counter
+        again would delay the halt by another sweep interval or two. Clearing it
+        still takes a named operator.
+        """
+        account = account_id or self._settings.account_id
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO lifecycle.reconciliation_state "
+                    "(account_id, broker, environment, halted, consecutive_breaks, "
+                    " first_failure_at, last_checked_at, last_error, halt_reason, updated_at) "
+                    "VALUES (:a, :b, :e, TRUE, 1, now(), now(), :r, :r, now()) "
+                    "ON CONFLICT (account_id, broker, environment) DO UPDATE SET "
+                    "halted = TRUE, "
+                    "first_failure_at = COALESCE("
+                    "    lifecycle.reconciliation_state.first_failure_at, now()), "
+                    "last_checked_at = now(), last_error = EXCLUDED.last_error, "
+                    "halt_reason = EXCLUDED.halt_reason, updated_at = now()"
+                ),
+                {"a": account, "b": broker, "e": environment, "r": reason},
+            )
+        logger.error(
+            "ENTRIES HALTED for %s/%s/%s: %s. Exits remain available.",
+            account, broker, environment, reason,
+        )
         return self.reconciliation_state(broker, environment, account)
 
     def clear_reconciliation_halt(
