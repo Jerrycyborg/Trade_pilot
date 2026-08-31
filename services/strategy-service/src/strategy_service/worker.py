@@ -38,6 +38,7 @@ from market_data import (
 
 from .ai_pipeline import AISignalPipeline, _build_deterministic_signal
 from .config import settings
+from .rule_engine import evaluate_rules
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,25 @@ class TradeWorker:
             signal = _build_deterministic_signal(symbol)
 
         ta, bars = self._get_market_snapshot(symbol)
+        self._apply_entry_gates(signal, ta, bars)
+
+        result.signals_generated += 1
+
+        # The champion first, and unconditionally: a failure anywhere in the
+        # challenger pass below must never cost the champion its cycle.
+        if signal.candidate_action == "HOLD":
+            logger.debug("HOLD signal for %s — skipping", symbol)
+        else:
+            await self._execute_signal(
+                signal, symbol, bars, result, strategy_id=DEFAULT_LIVE_STRATEGY
+            )
+
+        await self._process_challengers(symbol, ta, bars, result)
+
+    def _apply_entry_gates(self, signal, ta, bars) -> None:
+        """The regime and volume gates, applied to champion and challenger
+        alike. A challenger proposes thresholds inside the rule; it does not
+        get to skip the filters that sit in front of the rule."""
         if signal.candidate_action == "BUY":
             # compute_adx returns ADX_NEUTRAL (25.0) when the series is too
             # short, and 25.0 sits *above* this filter's threshold — so on thin
@@ -173,13 +193,95 @@ class TradeWorker:
                     logger.debug("volume_confirm: below avg, suppressing BUY")
                     signal.candidate_action = CandidateAction.HOLD
 
-        result.signals_generated += 1
+    async def _process_challengers(self, symbol: str, ta, bars, result) -> None:
+        """Run each paper challenger's own parameters through the same pipeline.
 
-        # Skip HOLD signals
-        if signal.candidate_action == "HOLD":
-            logger.debug("HOLD signal for %s — skipping", symbol)
+        This is what makes the L4 comparison mean something: without it a
+        challenger sleeve sits on the roster while the worker trades one global
+        parameter set, and the comparison has no divergent fills to read.
+
+        Three properties, held deliberately:
+
+        - Parameters come from the recorded proposal and nowhere else. A
+          challenger with no proposal row trades nothing — trading it on
+          guessed parameters would record evidence for a strategy nobody
+          proposed.
+        - Every challenger goes through the identical pipeline: the same entry
+          gates, the same policy service, the same sizing, the same PDT budget,
+          the same lifecycle gate. A challenger is not a way around any of
+          them; it is a different rule inside all of them.
+        - A failure in one challenger is contained. The champion has already
+          run, and the remaining challengers still get their turn.
+        """
+        if settings.use_ai:
+            # The challenger pass is deterministic by definition: a challenger
+            # is a parameter set, and only the deterministic rule takes
+            # parameters. The AI path has no challengers to run.
+            return
+        if ta is None:
+            # No snapshot means no rule evaluation. The champion's hash-based
+            # fallback exists for continuity of its own long-running record; a
+            # challenger has no such record to preserve and gets no fallback.
             return
 
+        for sleeve in _lifecycle().paper_challengers(symbol):
+            try:
+                await self._process_one_challenger(sleeve, symbol, ta, bars, result)
+            except Exception as exc:
+                logger.error(
+                    "Challenger %s failed and was skipped: %s",
+                    sleeve.strategy_id, exc,
+                )
+
+    async def _process_one_challenger(self, sleeve, symbol, ta, bars, result) -> None:
+        parameters = _lifecycle().challenger_parameters(sleeve.strategy_version)
+        if parameters is None:
+            logger.warning(
+                "Challenger %s has no recorded proposal — trading nothing. "
+                "Its parameters live in lifecycle.challenger_proposal and "
+                "nowhere else.",
+                sleeve.strategy_id,
+            )
+            return
+
+        rule_signal = evaluate_rules(
+            ta,
+            config={"sentiment_block_threshold": settings.sentiment_block_threshold},
+            bars=bars,
+            parameters=parameters,
+        )
+        signal = SignalCandidate(
+            signal_id=str(uuid4()),
+            symbol=symbol.upper(),
+            ts=datetime.now(timezone.utc),
+            candidate_action=rule_signal.action,
+            confidence=rule_signal.confidence,
+            size_pct=rule_signal.size_pct,
+            model_version=f"challenger:{sleeve.strategy_version}",
+            risk_score=rule_signal.risk_score,
+        )
+        self._apply_entry_gates(signal, ta, bars)
+        result.signals_generated += 1
+        if signal.candidate_action == "HOLD":
+            return
+        await self._execute_signal(
+            signal, symbol, bars, result, strategy_id=sleeve.strategy_id
+        )
+
+    async def _execute_signal(
+        self,
+        signal: SignalCandidate,
+        symbol: str,
+        bars: list,
+        result: WorkerRunResult,
+        *,
+        strategy_id: str,
+    ) -> None:
+        """Policy, sizing, the lifecycle gate, and submission — one pipeline
+        for every sleeve. `strategy_id` names the sleeve this order belongs to;
+        it decides which roster row gates it and which broker route
+        execution-service resolves, so it is threaded explicitly rather than
+        defaulted."""
         # 2. Get account buying power (best-effort)
         buying_power = await self._get_buying_power()
 
@@ -244,7 +346,7 @@ class TradeWorker:
         # safety control one code path can bypass is worse than none, because
         # it creates confidence that is not warranted. Both paths read the same
         # roster from the same state file.
-        gate = self._lifecycle_gate(signal)
+        gate = self._lifecycle_gate(signal, strategy_id)
         if gate is not None:
             logger.info(
                 "Not trading %s %s: %s (signal recorded, no order placed)",
@@ -278,6 +380,7 @@ class TradeWorker:
             time_in_force=time_in_force,
             limit_price=limit_price,
             decision_price=reference_price,
+            strategy_id=strategy_id,
         )
         submitted = await self._submit_order(
             order_req, idempotency_key=f"worker-{signal.signal_id}"
@@ -288,15 +391,14 @@ class TradeWorker:
                 "Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action
             )
 
-    def _lifecycle_gate(self, signal: SignalCandidate) -> str | None:
+    def _lifecycle_gate(self, signal: SignalCandidate, strategy_id: str) -> str | None:
         """Why this signal may not reach the broker, or None if it may.
 
         Advisory — execution-service resolves and enforces the route whatever
         this says. Asking here is what lets the refusal be journalled with the
         context this worker has, instead of arriving downstream without it.
         """
-        strategy = getattr(signal, "strategy", None) or DEFAULT_LIVE_STRATEGY
-        answer = _lifecycle().may_open(strategy, signal.symbol)
+        answer = _lifecycle().may_open(strategy_id, signal.symbol)
         if answer.permitted:
             return None
         if not answer.available:

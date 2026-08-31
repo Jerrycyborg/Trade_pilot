@@ -104,19 +104,35 @@ class LifecycleService:
 
         if sleeve is None:
             return GateAnswer(False, "sleeve_not_registered")
-        if sleeve.state != "live":
+        if sleeve.state not in ("paper", "live"):
             return GateAnswer(False, f"sleeve_{sleeve.state}")
 
+        # Paper is permitted, and this used to be the ladder's missing rung.
+        # The router already sends a paper sleeve to the simulator and nowhere
+        # else — but this advisory gate refused everything below live, so the
+        # signal loop never *submitted* for a paper sleeve, and the simulated
+        # fills that derive_paper_evidence reads were never produced. Every
+        # promotion to live requires paper evidence, so the ladder could not be
+        # climbed through normal operation at all: paper fills existed only
+        # where someone posted orders to execution-service by hand.
+        #
+        # The live-mode switch is deliberately not consulted for paper. It
+        # gates real-money routes; a paper sleeve cannot reach one whatever
+        # this gate says, and tying paper trading to the live switch would
+        # stop evidence accumulating exactly when it is safest to accumulate.
         try:
-            if not self._store.live_mode_enabled(account_id):
+            if sleeve.state == "live" and not self._store.live_mode_enabled(account_id):
                 return GateAnswer(False, "live_mode_disabled_by_operator")
             halt = self._store.reconciliation_state("live", "live", account_id)
         except Exception as exc:
             return GateAnswer(False, f"lifecycle_unavailable: {exc}", available=False)
 
         if halt.halted:
+            # The halt latch still covers paper entries: a journal gap or a
+            # reconciliation break makes the record unreliable, and paper
+            # evidence built on an unreliable record is not evidence.
             return GateAnswer(False, halt.halt_reason or "entries_halted")
-        return GateAnswer(True, "live")
+        return GateAnswer(True, sleeve.state)
 
     # ------------------------------------------------------------------
     # Roster operations
@@ -129,6 +145,42 @@ class LifecycleService:
 
     def all(self, account_id: str | None = None) -> list[Sleeve]:
         return self._require().all(account_id)
+
+    def paper_challengers(self, symbol: str) -> list[Sleeve]:
+        """Challenger sleeves under paper comparison for this symbol.
+
+        Empty when no authority is configured or it cannot be reached: the
+        challenger pass is research, and losing it must degrade research and
+        never the champion's own processing.
+        """
+        if self._store is None:
+            return []
+        try:
+            return self._store.paper_challengers(symbol)
+        except Exception as exc:
+            logger.error("Challenger roster unreadable: %s", exc)
+            return []
+
+    def challenger_parameters(self, challenger_id: str) -> dict[str, float] | None:
+        """The recorded proposal a challenger trades, or None.
+
+        The proposal row is the *only* source of a challenger's parameters —
+        never an environment variable, never a default, never something the
+        caller supplies. A challenger whose proposal cannot be found trades
+        nothing, because trading it on guessed parameters would record evidence
+        for a strategy nobody proposed.
+        """
+        if self._store is None:
+            return None
+        try:
+            rows = self._store.challenger_proposals(challenger_id=challenger_id, limit=1)
+        except Exception as exc:
+            logger.error("Challenger proposal unreadable: %s", exc)
+            return None
+        if not rows:
+            return None
+        parameters = rows[0].get("parameters")
+        return dict(parameters) if isinstance(parameters, dict) else None
 
     def demote(
         self,

@@ -994,6 +994,73 @@ a new name cannot inflate the bar its siblings are judged against. Nothing
 survived above — the expected outcome of most campaigns, reported as a result,
 because the alternative is a search that always finds something.
 
+### Champion versus challenger, with a barrier the learner cannot pass
+
+L4. A surviving challenger runs in **paper** alongside the champion, on the same
+symbols and window, and is compared using the same attribution machinery. Then
+it stops.
+
+```text
+     champion    24 trades  realised   +72.00
+     challenger  24 trades  realised  +144.00
+
+  refused: L4X:l4_demo@chal-15db42c583df was derived from a challenger
+           proposal and cannot be promoted to live.
+```
+
+The challenger doubled the champion's paper return and was refused anyway. That
+is the design:
+
+- **`sleeve.origin` marks a roster row derived from a proposal**, and promotion
+  to live is refused *categorically* — not "insufficient evidence", but
+  because of what it is. L3's safety rested on a proposal having nowhere to go;
+  once it becomes a sleeve that has to be re-established by something the
+  learner cannot satisfy.
+- **The check reads the database row under lock**, not the caller's `Sleeve`. A
+  snapshot is something an in-memory edit walks past — a test forges exactly
+  that and is still refused.
+- **`resolve_route` refuses a live route for a challenger too.** The store
+  barrier should make this unreachable, which is why it's worth having on the
+  one row where being wrong costs real money.
+- **Neither check touches exits.** A challenger holding a live position must
+  still be able to close it, or a safety check becomes a trapped position.
+
+Clearing the barrier is `adopt_challenger`: it needs a **named person** —
+`system`, `learner`, `auto` are refused — and a reason, and it is recorded as a
+transition carrying that person's name. It does not promote. It only stops the
+refusal; the sleeve still has to earn live through the ordinary gates.
+
+Proposals live in `lifecycle.challenger_proposal`, deliberately **not** in
+`validation_artifact`. A challenger is a proposal, an artifact is a
+measurement, and promotion reads artifacts — putting generator output into the
+table the gate trusts is the one place it must never appear.
+
+`compare` declares no winner. No `winner` field, no score. Picking one from a
+paper comparison is the step where a promotion gate gets bypassed by
+arithmetic.
+
+**And challengers actually trade.** The strategy worker runs each paper
+challenger's recorded proposal through the identical pipeline — same entry
+gates, same policy service, same sizing, same PDT budget — tagged with its
+derived id, so the journal separates the two sides' fills. Parameters come from
+`lifecycle.challenger_proposal` and nowhere else: no proposal row, no trades. A
+broken challenger is skipped; the champion runs first, unconditionally.
+
+> Wiring this exposed a defect older than L4: the workers' advisory gate
+> refused every sleeve below `live`, so the signal loop never produced the
+> paper fills that promotion evidence requires — the lifecycle ladder could not
+> be climbed through normal operation. The gate now permits paper sleeves; the
+> router still guarantees they reach only the simulator, the live-mode switch
+> still gates every real-money route, and the halt latch still covers paper
+> entries.
+
+> **One deviation from the ADR.** It says the two sleeves are distinguished by
+> strategy version, but the roster's identity is
+> `UNIQUE (strategy_id, symbol, account_id)` — no version. Widening that would
+> allow two rows for one sleeve while `get`/`require` return one, breaking the
+> one-state-per-sleeve invariant every gate rests on. So a challenger runs
+> under a derived id, `champion@chal-abc123`, and the constraint stays intact.
+
 ## Pattern Day Trader (PDT) Protection
 
 Intraday trading in the US runs into a rule that automated systems breach

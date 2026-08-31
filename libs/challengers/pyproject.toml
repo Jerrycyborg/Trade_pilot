@@ -3,7 +3,7 @@ name = "challengers"
 version = "0.1.0"
 description = "L3: bounded parameter proposals, evaluated with campaign-wide trial counting."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["attribution"]
 
 [build-system]
 requires = ["hatchling"]

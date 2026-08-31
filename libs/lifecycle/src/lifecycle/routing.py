@@ -102,6 +102,7 @@ def resolve_route(
     position_environment: str = POSITION_NONE,
     entries_halted: bool = False,
     halt_reason: str = "",
+    origin: str = "human",
 ) -> RouteDecision:
     """The only place the broker route is decided.
 
@@ -112,6 +113,15 @@ def resolve_route(
     have the same effect and none of them touches exits.
     """
     reducing = intent is OrderIntent.REDUCE_ONLY
+
+    # A challenger-origin sleeve is refused a live route here as well as at the
+    # store. The store barrier means one should never reach state='live' in the
+    # first place, so this is defence in depth against the single row that
+    # matters most — and it costs one comparison. It does not touch exits: a
+    # challenger that somehow holds a live position must still be able to close
+    # it, and refusing that would turn a safety check into a trapped position.
+    if origin == "challenger" and not reducing:
+        live_mode_enabled = False
 
     # Exits first. Nothing below may block one.
     if reducing:

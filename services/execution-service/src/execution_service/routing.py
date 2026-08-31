@@ -171,6 +171,7 @@ class BrokerRouter:
             position_environment=sleeve.position_environment,
             entries_halted=halt.halted,
             halt_reason=halt.halt_reason,
+            origin=getattr(sleeve, "origin", "human"),
         )
         return self._bind(decision)
 

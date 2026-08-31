@@ -80,6 +80,19 @@ class SleeveNotFoundError(LifecycleStoreError):
     pass
 
 
+class ChallengerCannotGoLiveError(LifecycleStoreError):
+    """A challenger-origin sleeve was asked to go live.
+
+    Not "the evidence was insufficient" — categorically refused. L3's safety
+    rested on a proposal having nowhere to go; once one is a sleeve, that has
+    to be re-established by something the learner cannot satisfy, rather than
+    by the ordinary gates it is designed to pass.
+
+    Clearing it is a named human action (`adopt_challenger`) that is recorded
+    as a transition, so the roster shows a person took responsibility.
+    """
+
+
 class LifecycleUnavailableError(LifecycleStoreError):
     """The authority could not be reached.
 
@@ -104,6 +117,17 @@ class Sleeve:
     reason: str
     probation_count: int
     position_environment: str
+
+    origin: str = "human"
+    """Who put this sleeve on the roster. 'challenger' marks one derived from a
+    generated proposal, and such a sleeve is refused promotion to live by the
+    store itself — not by evidence being insufficient, but categorically.
+
+    L3's safety rested on a proposal having nowhere to go. The moment one
+    becomes a sleeve that stops being true structurally and starts depending on
+    the lifecycle gates, which is weaker. A barrier the learner cannot satisfy
+    at all restores the stronger property: adopting a challenger is a named
+    human action, recorded as a transition."""
 
     @property
     def key(self) -> str:
@@ -182,6 +206,9 @@ class PostgresLifecycleStore:
         self._sleeve = Table("sleeve", self._meta, autoload_with=self._engine)
         self._transition = Table("transition", self._meta, autoload_with=self._engine)
         self._evidence = Table("evidence_snapshot", self._meta, autoload_with=self._engine)
+        self._challenger = Table(
+            "challenger_proposal", self._meta, autoload_with=self._engine
+        )
         self._environment = Table(
             "execution_environment", self._meta, autoload_with=self._engine
         )
@@ -211,6 +238,7 @@ class PostgresLifecycleStore:
             reason=row.reason,
             probation_count=row.probation_count,
             position_environment=row.position_environment,
+            origin=getattr(row, "origin", "human"),
         )
 
     def get(
@@ -324,6 +352,7 @@ class PostgresLifecycleStore:
         asset_class: str = "equity",
         account_id: str | None = None,
         actor: str = "operator",
+        origin: str = "human",
     ) -> Sleeve:
         """Add a sleeve as a candidate, or return the existing one.
 
@@ -384,6 +413,7 @@ class PostgresLifecycleStore:
                     version=1,
                     since=_now(),
                     reason="registered",
+                    origin=origin,
                     position_environment=POSITION_NONE,
                 )
                 .returning(self._sleeve)
@@ -446,6 +476,24 @@ class PostgresLifecycleStore:
         )
 
         with self._engine.begin() as conn:
+            if to_state == "live":
+                # Read the origin from the row under lock, not from the caller's
+                # copy. A Sleeve is a snapshot, and a barrier that trusts the
+                # object handed to it is one an in-memory edit can walk past.
+                origin = conn.execute(
+                    select(self._sleeve.c.origin)
+                    .where(self._sleeve.c.id == sleeve.id)
+                    .with_for_update()
+                ).scalar()
+                if origin == "challenger":
+                    raise ChallengerCannotGoLiveError(
+                        f"{sleeve.key} was derived from a challenger proposal and "
+                        f"cannot be promoted to live. Adopting it is a human "
+                        f"action: call adopt_challenger with a named actor, which "
+                        f"is recorded as a transition, and then promote it on its "
+                        f"own evidence."
+                    )
+
             result = conn.execute(
                 update(self._sleeve)
                 .where(
@@ -484,6 +532,192 @@ class PostgresLifecycleStore:
     # ------------------------------------------------------------------
     # Evidence — written by the server, never from a request body
     # ------------------------------------------------------------------
+    def paper_challengers(
+        self, symbol: str | None = None, account_id: str | None = None
+    ) -> list[Sleeve]:
+        """Challenger-origin sleeves currently in paper — the ones under
+        comparison. What the worker's challenger pass runs."""
+        account = account_id or self._settings.account_id
+        conditions = [
+            self._sleeve.c.origin == "challenger",
+            self._sleeve.c.state == "paper",
+            self._sleeve.c.account_id == account,
+        ]
+        if symbol is not None:
+            conditions.append(self._sleeve.c.symbol == symbol.upper())
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(self._sleeve).where(*conditions)).all()
+        return [self._row_to_sleeve(r) for r in rows]
+
+    def adopt_challenger(self, sleeve: Sleeve, *, actor: str, reason: str) -> Sleeve:
+        """A person takes responsibility for a challenger-derived sleeve.
+
+        Flips `origin` to 'human', which is the only way the live barrier is
+        cleared. It does not promote: the sleeve keeps its state and still has
+        to earn live through the ordinary gates on its own evidence. All this
+        does is stop the categorical refusal, and record who stopped it.
+
+        `actor` is required and must name a person. An automated caller passing
+        "system" here would be the learner adopting itself, which is exactly
+        what constraint 4 forbids.
+        """
+        named = (actor or "").strip()
+        if not named or named.lower() in {"system", "learner", "auto", "automation"}:
+            raise LifecycleStoreError(
+                "adopt_challenger needs a named human actor: adoption is the "
+                "step where a person takes responsibility, and an automated "
+                "caller doing it is the learner promoting itself"
+            )
+        if not (reason or "").strip():
+            raise LifecycleStoreError("adopt_challenger needs a reason")
+
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                select(self._sleeve)
+                .where(self._sleeve.c.id == sleeve.id)
+                .with_for_update()
+            ).first()
+            if row is None:
+                raise SleeveNotFoundError(f"sleeve {sleeve.id} is gone")
+            if row.origin != "challenger":
+                return self._row_to_sleeve(row)
+
+            new_version = row.version + 1
+            conn.execute(
+                update(self._sleeve)
+                .where(
+                    self._sleeve.c.id == sleeve.id,
+                    self._sleeve.c.version == row.version,
+                )
+                .values(origin="human", version=new_version, updated_at=_now())
+            )
+            # Recorded as a transition from the state to itself: nothing moved,
+            # but somebody accepted a sleeve the system had refused, and that
+            # belongs in the same append-only record as every other decision.
+            self._append_transition(
+                conn, sleeve.id, new_version, row.state, row.state,
+                f"challenger adopted: {reason.strip()}", named, None,
+            )
+            refreshed = conn.execute(
+                select(self._sleeve).where(self._sleeve.c.id == sleeve.id)
+            ).first()
+            return self._row_to_sleeve(refreshed)
+
+    def record_challenger_proposal(
+        self,
+        *,
+        campaign_id: str,
+        challenger: dict[str, Any],
+        deflated_sharpe_campaign: float | None = None,
+        deflated_sharpe_own_search: float | None = None,
+        pooled_trials: int = 0,
+        out_of_sample_sharpe: float | None = None,
+        survived: bool = False,
+        account_id: str | None = None,
+    ) -> int:
+        """Persist a proposal and what the campaign concluded about it.
+
+        Deliberately not `validation_artifact`. A challenger is a proposal and
+        an artifact is a measurement, and promotion reads artifacts — putting
+        something a generator produced into the table the promotion gate trusts
+        is the one place it must never appear.
+
+        Both deflated figures are stored. A reviewer reading this row months
+        later needs to see that the per-run and pooled numbers differ, and by
+        how much, without having to reconstruct the campaign.
+        """
+        account = account_id or self._settings.account_id
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(self._challenger.c.id).where(
+                    self._challenger.c.campaign_id == campaign_id,
+                    self._challenger.c.challenger_id == challenger["challenger_id"],
+                )
+            ).scalar()
+            if existing is not None:
+                # Append-only: a proposal is a historical fact about what was
+                # suggested and on what evidence. Re-recording returns the row
+                # rather than editing it.
+                return int(existing)
+            return int(
+                conn.execute(
+                    self._challenger.insert()
+                    .values(
+                        challenger_id=challenger["challenger_id"],
+                        campaign_id=campaign_id,
+                        strategy_id=challenger["strategy_id"],
+                        symbol=challenger["symbol"].upper(),
+                        base_version=challenger.get("base_version", ""),
+                        account_id=account,
+                        parameters=challenger["parameters"],
+                        rationale=challenger["rationale"],
+                        clamped=challenger.get("clamped", []),
+                        bounds_version=challenger.get("bounds_version", ""),
+                        generator=challenger.get("generator", ""),
+                        deflated_sharpe_campaign=deflated_sharpe_campaign,
+                        deflated_sharpe_own_search=deflated_sharpe_own_search,
+                        pooled_trials=pooled_trials,
+                        out_of_sample_sharpe=out_of_sample_sharpe,
+                        survived=survived,
+                        created_at=_now(),
+                    )
+                    .returning(self._challenger.c.id)
+                ).scalar()
+            )
+
+    def challenger_proposals(
+        self,
+        *,
+        strategy_id: str | None = None,
+        symbol: str | None = None,
+        campaign_id: str | None = None,
+        challenger_id: str | None = None,
+        account_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """What was proposed, and what the campaign concluded."""
+        conditions = []
+        if challenger_id is not None:
+            conditions.append(self._challenger.c.challenger_id == challenger_id)
+        if strategy_id is not None:
+            conditions.append(self._challenger.c.strategy_id == strategy_id)
+        if symbol is not None:
+            conditions.append(self._challenger.c.symbol == symbol.upper())
+        if campaign_id is not None:
+            conditions.append(self._challenger.c.campaign_id == campaign_id)
+        if account_id is not None:
+            conditions.append(self._challenger.c.account_id == account_id)
+
+        stmt = (
+            select(self._challenger)
+            .where(*conditions)
+            .order_by(self._challenger.c.created_at.desc())
+            .limit(limit)
+        )
+        with self._engine.connect() as conn:
+            return [
+                {
+                    "id": r.id,
+                    "challenger_id": r.challenger_id,
+                    "campaign_id": r.campaign_id,
+                    "strategy_id": r.strategy_id,
+                    "symbol": r.symbol,
+                    "base_version": r.base_version,
+                    "parameters": r.parameters,
+                    "rationale": r.rationale,
+                    "clamped": r.clamped,
+                    "bounds_version": r.bounds_version,
+                    "generator": r.generator,
+                    "deflated_sharpe_campaign": r.deflated_sharpe_campaign,
+                    "deflated_sharpe_own_search": r.deflated_sharpe_own_search,
+                    "pooled_trials": r.pooled_trials,
+                    "out_of_sample_sharpe": r.out_of_sample_sharpe,
+                    "survived": bool(r.survived),
+                    "created_at": _aware(r.created_at).isoformat(),
+                }
+                for r in conn.execute(stmt)
+            ]
+
     def record_evidence(
         self,
         *,
