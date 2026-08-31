@@ -1,0 +1,8 @@
+# Revisions that are pure formatting. Ignore them when attributing lines:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub picks this file up automatically.
+
+# chore: bring the repository to a clean ruff baseline
+88c535840f26e619243c789ecbb82c67162f9d85
