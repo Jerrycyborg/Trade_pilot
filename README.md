@@ -2,36 +2,72 @@
 
 # Trade_pilot — Autonomous Trading Platform
 
-Production-minded AI trading stack: strategy proposes, policy approves, execution fills, and portfolio reconciles. This repo includes autonomous orchestration, approvals, notifications, sentiment, audit logging, and dashboard controls on top of the core trading services.
+An intraday trading stack where strategy proposes, policy approves, execution
+fills, and portfolio reconciles — with the measurement and gating needed to
+decide whether any of it should be trading real money.
+
+**Status, stated plainly.** The pipeline runs end to end against a paper broker
+and a real-time data feed. It has never been validated against live market
+data in this repository's CI, and no strategy here has demonstrated an edge —
+the tooling to test that claim is built (see
+[Is the Edge Real, or Fitted?](#is-the-edge-real-or-fitted)), and running it is
+your job before any money is involved. The defaults are deliberately
+conservative: nothing trades until it is registered and promoted.
+
+## Where to start
+
+| If you want to… | Read |
+|---|---|
+| Run it locally on delayed data | [Running in Demo Mode](#running-in-demo-mode) |
+| Trade on real-time intraday bars | [Real-Time Intraday Trading](#real-time-intraday-trading) |
+| Know whether the strategy makes money | [Does the Strategy Actually Work?](#does-the-strategy-actually-work) |
+| Know whether that result is real or fitted | [Is the Edge Real, or Fitted?](#is-the-edge-real-or-fitted) |
+| Run more than one strategy | [Strategies and the Portfolio](#strategies-and-the-portfolio) |
+| Control what is allowed to trade | [The Strategy Lifecycle](#the-strategy-lifecycle) |
+| See what an order actually cost | [Execution Quality](#execution-quality) |
+| Go live | [Enabling Live Mode](#enabling-live-mode-step-by-step) |
+
+Operational procedures — what to do when something breaks — are in
+[RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Autonomy Orchestrator :8007                  │
-│        scheduler → signal fetch → risk → policy → execute      │
-└──────┬──────────────┬────────────────┬───────────────┬──────────┘
-       │              │                │               │
-       ▼              ▼                ▼               ▼
-  Risk Engine    Policy Gate      Execution        Audit Logger
-  (sizing,       (hard rules,     Service :8002    :8006
-   drawdown,      sector conc,    (broker order)   (append-only)
-   PDT, sector)   event block)         │
-                       │               ▼
-                       │         Broker (eToro/Paper)
-                       │
-              ┌────────┴─────────┐
+│   scheduler → signals → risk → policy → ROSTER → execute        │
+└──────┬──────────────┬────────────┬──────────┬──────────┬────────┘
+       │              │            │          │          │
+       ▼              ▼            ▼          ▼          ▼
+  Risk Engine    Policy Gate   Strategy   Execution   Audit Logger
+  (sizing,       (hard rules,  Lifecycle  Service     :8006
+   drawdown,      sector conc,  (roster:   :8002      (append-only)
+   PDT, sector)   event block)  may this  (marketable
+                       │        sleeve     limit+IOC)
+                       │        trade?)         │
+                       │             │          ▼
+                       │             │    Broker (eToro/Paper)
+                       │             │
+              ┌────────┴─────────┐   └──▶ blocked ⇒ recorded, not dropped
               ▼                  ▼
      Notification :8009    Approval Gateway :8010
      (webhook, tiered)     (PENDING/APPROVE/REJECT)
 
-── External Data ──────────────────────────────────────────────────
+── Data and evidence ──────────────────────────────────────────────
   Strategy Service :8003   (signals, TA, ADX, patterns)
   Portfolio Service :8004  (positions, NAV)
   Research Service :8005   (AI research summaries)
   Sentiment Aggregator :8008 (NewsAPI, AlphaVantage)
+  Backtest Service :8011   (backtest, walk-forward, sensitivity, portfolio)
   Dashboard :8080          (kill switch UI, approvals, stats)
+
+  Journal (journal.db)     every bar, price and decision, point-in-time
+  Roster (lifecycle.json)  which sleeves may trade, and why
 ```
+
+The **roster** is the addition that matters most: no (strategy, symbol) sleeve
+places an order until it has earned the state that permits it, and evidence the
+system recorded itself is what earns it.
 
 ## Service Port Map
 
@@ -885,6 +921,12 @@ container restart would stop trading.
 
 ⚠️ Only proceed after at least 30 days of demo/paper trading with no policy violations.
 
+**Live mode and the roster are two separate switches, and you need both.**
+Live mode connects the system to a real broker; the roster decides which
+sleeves may send it anything. Enabling live mode alone produces a system that
+connects to your broker and places no orders — which is the safe failure, but
+it looks like a bug if you are not expecting it.
+
 1. Set `ETORO_DEMO=false` and `BROKER=etoro` in `.env`
 2. Set `ADMIN_API_KEY` to a strong random secret in `.env`
 3. Restart all services
@@ -898,10 +940,27 @@ container restart would stop trading.
      -H "Content-Type: application/json" \
      -d '{"enable": true, "confirmation": "I CONFIRM LIVE TRADING"}'
    ```
-7. Monitor the first 10 trades manually via the dashboard
+7. Promote at least one sleeve to `live` — see
+   [The Strategy Lifecycle](#the-strategy-lifecycle) for the gates, and the
+   RUNBOOK for the walkthrough. Confirm with:
+   ```bash
+   curl http://localhost:8007/v1/orchestrator/lifecycle   # "trading": [...]
+   ```
+   An empty `trading` list means nothing will be sent to the broker.
+8. Monitor the first 10 trades manually via the dashboard
 
 ## Running Tests
 
 ```bash
-uv run pytest tests/ -x -q --ignore=tests/integration
+uv run pytest
+```
+
+Run it bare. `pytest tests/` skips `services/backtest-service/tests` — the
+backtest engine, the overfitting statistics and the portfolio all live there,
+which is around a fifth of the suite. Both paths are in `testpaths`, so no
+argument is needed.
+
+```bash
+uv run pytest -q --ignore=tests/integration   # skip the ones needing Postgres
+uv run ruff check .                            # lint
 ```
