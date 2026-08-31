@@ -28,8 +28,10 @@
         .then(cfg => { Object.assign(window.TRADE_PILOT_CONFIG, cfg); })
         .catch(() => {});
     </script>
-    <!-- TradingView Lightweight Charts -->
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- TradingView Lightweight Charts, vendored (v4.2.3): the dashboard must
+         render in egress-restricted deployments where CDNs are unreachable,
+         and an unpinned CDN copy also meant the chart code changed under us. -->
+    <script src="./vendor/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
     <main class="page">
