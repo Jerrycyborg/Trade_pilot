@@ -280,39 +280,57 @@ def get_chart(
 
 @app.get("/v1/market/quotes")
 def get_quotes(symbols: str = Query(description="Comma-separated symbols")) -> list[dict]:
-    """Return latest quotes for multiple symbols (for ticker bar)."""
+    """Return latest quotes for multiple symbols (for ticker bar).
+
+    Two properties the first live paper run showed to matter:
+
+    - The price prefers the provider's live quote and only falls back to the
+      last archived close. This endpoint used to read bars alone, so the
+      ticker showed Friday's close while a fresh quote sat in the feed —
+      "live prices" that were a session old.
+    - One symbol's failure yields one placeholder row. Only
+      DataUnavailableError used to be caught, so any other per-symbol error
+      (a provider network failure, a malformed symbol) 500'd the whole
+      request and blanked the entire ticker.
+    """
     symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()][:10]
-    results = []
     fetcher = get_fetcher(_md_settings)
-    for sym in symbol_list:
-        try:
-            bars = fetcher.fetch(sym, period_days=5)
-            if bars and len(bars) >= 2:
-                latest = bars[-1].close
-                prev = bars[-2].close
-                change_pct = (latest - prev) / prev * 100
-                results.append(
-                    {
-                        "symbol": sym,
-                        "price": round(latest, 4),
-                        "change_pct": round(change_pct, 2),
-                        "direction": "up" if change_pct >= 0 else "down",
-                    }
-                )
-            elif bars:
-                results.append(
-                    {
-                        "symbol": sym,
-                        "price": round(bars[-1].close, 4),
-                        "change_pct": 0.0,
-                        "direction": "neutral",
-                    }
-                )
-        except DataUnavailableError:
-            results.append(
-                {"symbol": sym, "price": None, "change_pct": None, "direction": "neutral"}
-            )
-    return results
+    return [_quote_row(fetcher, sym) for sym in symbol_list]
+
+
+def _quote_row(fetcher, sym: str) -> dict:
+    price: float | None = None
+    reference: float | None = None
+    try:
+        snapshot = fetcher.latest_price(sym)
+        if snapshot is not None and snapshot.price > 0:
+            price = float(snapshot.price)
+    except Exception:
+        # A live-quote failure must not hide the archived close.
+        pass
+    try:
+        bars = fetcher.fetch(sym, period_days=5) or []
+    except Exception:
+        bars = []
+    if price is None:
+        if bars:
+            price = float(bars[-1].close)
+            reference = float(bars[-2].close) if len(bars) >= 2 else None
+    elif bars:
+        # Live price against the last archived close: "change" is the move
+        # since the most recent bar the system holds.
+        reference = float(bars[-1].close)
+    if price is None:
+        return {"symbol": sym, "price": None, "change_pct": None, "direction": "neutral"}
+    if not reference:
+        return {"symbol": sym, "price": round(price, 4), "change_pct": 0.0, "direction": "neutral"}
+    change_pct = (price - reference) / reference * 100
+    return {
+        "symbol": sym,
+        "price": round(price, 4),
+        "change_pct": round(change_pct, 2),
+        "direction": "up" if change_pct >= 0 else "down",
+    }
 
 
 @app.get("/v1/market/events/{symbol}")

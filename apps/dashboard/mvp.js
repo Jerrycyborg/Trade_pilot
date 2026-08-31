@@ -923,16 +923,32 @@ setInterval(refreshWatchlist, 60_000);
 // Ticker bar
 // ---------------------------------------------------------------------------
 
+// The symbols the server actually trades, fetched once. The ticker used to
+// hard-code its own list, so it showed symbols the deployment had no data for
+// and missed the ones the worker was trading.
+let tickerSymbols = null;
+
 async function loadTicker() {
-  const watchlist = ["AAPL", "MSFT", "GOOGL", "BTC/USD", "ETH/USD"];
-  const syms = watchlist.join(",");
   try {
+    if (!tickerSymbols) {
+      try {
+        const wl = await readJson("watchlist", `${CONFIG.strategyBaseUrl}/v1/strategy/watchlist`);
+        if (wl && Array.isArray(wl.symbols) && wl.symbols.length) tickerSymbols = wl.symbols;
+      } catch { /* the default below stands until the service answers */ }
+      if (!tickerSymbols) tickerSymbols = ["AAPL", "MSFT", "GOOGL", "BTC/USD", "ETH/USD"];
+    }
+    const syms = tickerSymbols.join(",");
     const quotes = await readJson("quotes", `${CONFIG.strategyBaseUrl}/v1/market/quotes?symbols=${encodeURIComponent(syms)}`);
-    const sentiment = await readJson("sentiment", `${CONFIG.sentimentBaseUrl}/v1/sentiment/batch?symbols=${encodeURIComponent(syms)}`);
+    // Sentiment decorates the ticker; its service being down must not blank
+    // the prices.
+    let sentiment = [];
+    try {
+      sentiment = await readJson("sentiment", `${CONFIG.sentimentBaseUrl}/v1/sentiment/batch?symbols=${encodeURIComponent(syms)}`);
+    } catch { /* prices render without sentiment */ }
     renderTicker(quotes, sentiment);
   } catch {
     document.getElementById("ticker-items").innerHTML =
-      `<span class="ticker-loading">Prices unavailable — set ALPACA_API_KEY for live data</span>`;
+      `<span class="ticker-loading">Prices unavailable — the strategy service's quote endpoint did not answer</span>`;
   }
 }
 

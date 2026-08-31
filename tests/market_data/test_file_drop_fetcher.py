@@ -107,6 +107,24 @@ class TestServing:
         assert snapshot.source == "file_quote"
         assert snapshot.timestamp.isoformat() == stamp
 
+    def test_the_timestamp_spelling_is_also_accepted(self, tmp_path) -> None:
+        """A feeder wrote {"timestamp": ...} where the layout says {"ts": ...},
+        and the mismatch did not fail — it silently degraded every live price
+        to the last bar close, a session old. Either spelling now serves;
+        undated quotes are still refused (the test above this suite keeps
+        that)."""
+        (tmp_path / "quotes.json").write_text(
+            json.dumps(
+                {"quotes": {"AAPL": {
+                    "price": 316.85, "timestamp": "2026-08-31T20:23:03Z",
+                }}}
+            )
+        )
+        snapshot = FileDropFetcher(tmp_path).latest_price("AAPL")
+        assert snapshot is not None
+        assert snapshot.price == 316.85
+        assert snapshot.timestamp.tzinfo is not None
+
     @pytest.mark.real_price_source
     def test_the_price_resolver_reads_file_quotes_end_to_end(
         self, tmp_path, monkeypatch

@@ -419,7 +419,13 @@ class FileDropFetcher:
             payload = json.loads(path.read_text())
             quote = payload["quotes"][symbol.upper()]
             price = float(quote["price"])
-            stamp = datetime.fromisoformat(str(quote["ts"]))
+            # Feeders have written both spellings in practice, and the
+            # mismatch does not fail — it silently degrades every price to
+            # the last bar close. Accept either; undated is still refused.
+            raw_stamp = quote.get("ts", quote.get("timestamp"))
+            if raw_stamp is None:
+                raise KeyError("ts")
+            stamp = datetime.fromisoformat(str(raw_stamp).replace("Z", "+00:00"))
         except FileNotFoundError:
             return None
         except (KeyError, TypeError, ValueError) as exc:
