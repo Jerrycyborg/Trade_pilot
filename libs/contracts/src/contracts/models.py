@@ -274,6 +274,13 @@ class ExecutionOrderRequest(BaseModel):
     time_in_force: str = "DAY"
     stop_loss_rate: float | None = None
     take_profit_rate: float | None = None
+    limit_price: float | None = None
+    """Set for LIMIT orders. With time_in_force=IOC this caps the price paid
+    without leaving a working order behind."""
+
+    decision_price: float | None = None
+    """The price the decision was based on. Carried through to the fill so
+    execution cost can be measured rather than assumed."""
 
 
 class ClosePositionRequest(BaseModel):

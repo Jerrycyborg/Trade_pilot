@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -17,6 +18,11 @@ from contracts import (
     PortfolioContext,
     SignalCandidate,
     TechnicalSummaryContract,
+)
+from contracts.execution import (
+    average_daily_volume,
+    marketable_limit_price,
+    participation_capped_qty,
 )
 from market_data import (
     MarketDataSettings,
@@ -175,6 +181,20 @@ class TradeWorker:
         if reference_price is None and bars:
             reference_price = float(bars[-1].close)
         qty = _compute_qty(approved_size_pct, buying_power, reference_price)
+
+        # Trim to a share of the symbol's volume — a large order in a thin name
+        # pays for its own market impact.
+        bars_per_day = (
+            max(1.0, 390.0 / max(1, self._market_settings.intraday_minutes))
+            if self._market_settings.is_intraday
+            else 1.0
+        )
+        qty = participation_capped_qty(
+            qty,
+            average_daily_volume(bars, bars_per_day=bars_per_day),
+            float(os.getenv("MAX_ADV_PARTICIPATION", "0.01")),
+        )
+
         if qty < 1:
             logger.debug(
                 "Qty < 1 for %s (size_pct=%.4f, buying_power=%.2f, price=%s) — skipping order",
@@ -186,13 +206,27 @@ class TradeWorker:
             return
 
         # 6. Submit order to execution-service
+        # Marketable limit + IOC: fills now at or inside the limit, or not at
+        # all. Nothing is left working that would need managing.
+        order_type, time_in_force, limit_price = "MARKET", "DAY", None
+        if os.getenv("USE_LIMIT_ORDERS", "true").lower() == "true":
+            limit_price = marketable_limit_price(
+                reference_price,
+                str(getattr(signal.candidate_action, "value", signal.candidate_action)),
+                float(os.getenv("LIMIT_TOLERANCE_BPS", "10")),
+            )
+            if limit_price is not None:
+                order_type, time_in_force = "LIMIT", "IOC"
+
         order_req = ExecutionOrderRequest(
             signal_id=signal.signal_id,
             symbol=signal.symbol,
             side=signal.candidate_action,
             qty=qty,
-            order_type="MARKET",
-            time_in_force="DAY",
+            order_type=order_type,
+            time_in_force=time_in_force,
+            limit_price=limit_price,
+            decision_price=reference_price,
         )
         submitted = await self._submit_order(order_req, idempotency_key=f"worker-{signal.signal_id}")
         if submitted:

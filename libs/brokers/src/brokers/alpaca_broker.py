@@ -56,18 +56,29 @@ class AlpacaBroker:
 
     def _do_submit(self, request: ExecutionOrderRequest) -> BrokerResult:
         from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
         side = OrderSide.BUY if request.side.upper() == "BUY" else OrderSide.SELL
         tif_map = {"DAY": TimeInForce.DAY, "GTC": TimeInForce.GTC, "IOC": TimeInForce.IOC}
         tif = tif_map.get(request.time_in_force.upper(), TimeInForce.DAY)
 
-        order_data = MarketOrderRequest(
-            symbol=request.symbol,
-            qty=request.qty,
-            side=side,
-            time_in_force=tif,
-        )
+        if request.order_type.upper() == "LIMIT" and request.limit_price:
+            # Paired with IOC by the caller: fills now at or inside the limit,
+            # or cancels. No working order is left for anyone to manage.
+            order_data = LimitOrderRequest(
+                symbol=request.symbol,
+                qty=request.qty,
+                side=side,
+                time_in_force=tif,
+                limit_price=request.limit_price,
+            )
+        else:
+            order_data = MarketOrderRequest(
+                symbol=request.symbol,
+                qty=request.qty,
+                side=side,
+                time_in_force=tif,
+            )
         order = self._client.submit_order(order_data)
         external_order_id = str(order.id)
 

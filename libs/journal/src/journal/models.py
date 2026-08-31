@@ -83,6 +83,46 @@ class PriceObservation(Base):
     """False when refused as stale. Rejections are as informative as fills."""
 
 
+class ExecutionQuality(Base):
+    """What one order actually cost, versus what the decision assumed.
+
+    Implementation shortfall is the difference between the price the strategy
+    decided on and the price it paid. It is the only honest input to a
+    backtest's cost model — everything else is a guess — and it is the number
+    that decides whether an intraday strategy survives its own trading.
+
+    Unfilled orders are recorded too, with ``filled = 0``. A limit that missed
+    costs nothing in slippage but everything in opportunity, and a fill rate
+    read only from fills is a fill rate of 100%.
+    """
+
+    __tablename__ = "execution_quality"
+    __table_args__ = (
+        Index("ix_exec_symbol_ts", "symbol", "decision_ts"),
+        Index("ix_exec_order", "order_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    signal_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    order_type: Mapped[str] = mapped_column(String(16), nullable=False, default="MARKET")
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    shortfall_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    """Signed so positive is always a cost, for buys and sells alike."""
+
+    filled: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False, default="filled")
+    decision_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Decision(Base):
     """One decision point in the pipeline, with the inputs behind it."""
 

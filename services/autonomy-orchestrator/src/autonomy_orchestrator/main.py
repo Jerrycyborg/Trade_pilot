@@ -13,6 +13,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contracts import ApprovalRequest, AuditEvent, NotificationEvent, PolicyEvaluationRequest, SignalCandidate
 from contracts.auth import verify_admin_key, verify_internal_key
 from contracts.rate_limit import rate_limit_write
+from contracts.execution import (
+    average_daily_volume,
+    marketable_limit_price,
+    participation_capped_qty,
+)
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -615,7 +620,9 @@ async def run_cycle() -> dict[str, object]:
             if risk.tier >= 1:
                 await _notify(signal, risk, policy)
             if decision == "APPROVE" and risk.tier < 3:
-                order = await _submit_order(signal, risk, config, portfolio_state)
+                order = await _submit_order(
+                    signal, risk, config, portfolio_state, price_bars
+                )
                 if not _order_accepted(order):
                     # execution-service answers 200 with status REJECTED (no cash,
                     # qty limit). Recording an open here would burn a day-trade
@@ -828,7 +835,13 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
         raise RuntimeError(f"Policy service unreachable: {exc}") from exc
 
 
-async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
+async def _submit_order(
+    signal: SignalCandidate,
+    risk,
+    config: dict[str, object],
+    portfolio_state: dict[str, object],
+    price_bars: list[Any] | None = None,
+) -> dict[str, object]:
     buying_power = float(portfolio_state.get("buying_power", 100_000.0))
     amount_usd = round(buying_power * risk.adjusted_size_pct, 2)
     current_price = await _get_quote_price(signal.symbol)
@@ -840,12 +853,39 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
         logger.warning("No quote for %s — refusing to size an order", signal.symbol)
         return {"status": "REJECTED", "rejection_reason": "no_quote_for_sizing"}
     qty = int(amount_usd / current_price)
+
+    # Trim to a share of the symbol's volume. Being a large fraction of what
+    # trades moves the price against you, so the cost of the order becomes a
+    # function of its own size — the effect that punishes thin small caps.
+    max_participation = float(os.getenv("MAX_ADV_PARTICIPATION", "0.01"))
+    adv = average_daily_volume(price_bars or [], bars_per_day=_bars_per_day())
+    capped = participation_capped_qty(qty, adv, max_participation)
+    if capped < qty:
+        logger.info(
+            "Order for %s trimmed %d -> %d shares (%.1f%% of ~%.0f ADV)",
+            signal.symbol, qty, capped, max_participation * 100, adv or 0,
+        )
+        qty = capped
+
     if qty < 1:
         logger.info(
             "Order for %s sizes to 0 shares ($%.2f at %.4f) — skipping",
             signal.symbol, amount_usd, current_price,
         )
         return {"status": "REJECTED", "rejection_reason": "qty_below_one_share"}
+
+    # A marketable limit with IOC: fills now at or inside the limit, or not at
+    # all. A market order would accept whatever the book offers, which on a
+    # spike is exactly the fill the strategy did not assume.
+    order_type, time_in_force, limit_price = "MARKET", "DAY", None
+    if os.getenv("USE_LIMIT_ORDERS", "true").lower() == "true":
+        tolerance = float(os.getenv("LIMIT_TOLERANCE_BPS", "10"))
+        limit_price = marketable_limit_price(
+            current_price, _side_of(signal.candidate_action), tolerance
+        )
+        if limit_price is not None:
+            order_type, time_in_force = "LIMIT", "IOC"
+
     stop_loss_pct = float(config.get("stop_loss_pct", 0.03))
     take_profit_pct = float(config.get("take_profit_pct", 0.06))
     stop_loss_rate = current_price * (1 - stop_loss_pct) if current_price is not None else None
@@ -858,8 +898,10 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
                 "symbol": signal.symbol,
                 "side": signal.candidate_action,
                 "qty": qty,
-                "order_type": "MARKET",
-                "time_in_force": "DAY",
+                "order_type": order_type,
+                "time_in_force": time_in_force,
+                "limit_price": limit_price,
+                "decision_price": current_price,
                 "stop_loss_rate": stop_loss_rate,
                 "take_profit_rate": take_profit_rate,
             },
@@ -929,6 +971,14 @@ def _journal():
     from journal import get_journal
 
     return get_journal()
+
+
+def _bars_per_day() -> float:
+    """Bars in a session at the configured resolution, for scaling volume."""
+    market_settings = _market_settings()
+    if not market_settings.is_intraday:
+        return 1.0
+    return max(1.0, 390.0 / max(1, market_settings.intraday_minutes))
 
 
 def _order_accepted(order: dict[str, object]) -> bool:
@@ -1295,7 +1345,7 @@ async def _process_approvals() -> None:
                 metadata={"policy": policy},
             ))
             continue
-        order = await _submit_order(signal, risk, config, portfolio_state)
+        order = await _submit_order(signal, risk, config, portfolio_state, price_bars)
         if not _order_accepted(order):
             logger.warning(
                 "Approved order for %s rejected by the broker: %s",

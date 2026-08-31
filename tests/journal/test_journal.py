@@ -203,3 +203,110 @@ class TestProcessWideJournal:
         reset_journal(None)
         assert get_journal().enabled is False
         reset_journal(None)
+
+
+class TestExecutionQuality:
+    """What each order actually cost, versus what the decision assumed.
+
+    This is the measurement that replaces the backtest's guessed slippage. If
+    it flatters itself, the backtest inherits the flattery.
+    """
+
+    def test_a_fill_records_its_shortfall(self, archive: Journal) -> None:
+        shortfall = archive.record_execution(
+            symbol="AAPL", side="BUY", qty=10,
+            decision_price=200.0, fill_price=200.2,
+        )
+        assert shortfall == 10.0
+        report = archive.execution_quality()
+        assert report["orders"] == 1
+        assert report["filled"] == 1
+        assert report["mean_shortfall_bps"] == 10.0
+
+    def test_a_sell_filled_below_the_decision_price_is_also_a_cost(
+        self, archive: Journal
+    ) -> None:
+        assert archive.record_execution(
+            symbol="AAPL", side="SELL", qty=10,
+            decision_price=200.0, fill_price=199.8,
+        ) == 10.0
+
+    def test_a_missed_limit_is_recorded_and_counts_against_the_fill_rate(
+        self, archive: Journal
+    ) -> None:
+        """Reading a fill rate only from fills yields 100% — the number is useless."""
+        archive.record_execution(
+            symbol="AAPL", side="BUY", qty=10,
+            decision_price=200.0, fill_price=200.2,
+        )
+        assert archive.record_execution(
+            symbol="AAPL", side="BUY", qty=10,
+            decision_price=200.0, fill_price=None,
+            order_type="LIMIT", limit_price=200.2, outcome="limit_not_marketable",
+        ) is None
+
+        report = archive.execution_quality()
+        assert report["orders"] == 2
+        assert report["filled"] == 1
+        assert report["fill_rate"] == 0.5
+        # The miss cost no slippage, so it must not drag the mean toward zero.
+        assert report["mean_shortfall_bps"] == 10.0
+
+    def test_worst_case_is_reported_alongside_the_mean(self, archive: Journal) -> None:
+        """A mean hides the fill that actually hurt."""
+        for fill in (200.1, 200.2, 201.0):
+            archive.record_execution(
+                symbol="AAPL", side="BUY", qty=1,
+                decision_price=200.0, fill_price=fill,
+            )
+        report = archive.execution_quality()
+        assert report["worst_shortfall_bps"] == 50.0
+        assert report["mean_shortfall_bps"] < report["worst_shortfall_bps"]
+
+    def test_cost_is_broken_out_per_symbol(self, archive: Journal) -> None:
+        """Thin symbols cost more to trade. An aggregate figure hides which ones."""
+        archive.record_execution(
+            symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
+        )
+        archive.record_execution(
+            symbol="THIN", side="BUY", qty=1, decision_price=200.0, fill_price=201.0
+        )
+        by_symbol = archive.execution_quality()["mean_shortfall_by_symbol"]
+        assert by_symbol == {"AAPL": 10.0, "THIN": 50.0}
+
+    def test_a_fill_without_a_decision_price_records_no_shortfall(
+        self, archive: Journal
+    ) -> None:
+        """It filled, but there is nothing to compare it against — not a zero cost."""
+        assert archive.record_execution(
+            symbol="AAPL", side="BUY", qty=1, decision_price=None, fill_price=200.0
+        ) is None
+        report = archive.execution_quality()
+        assert report["filled"] == 1
+        assert report["mean_shortfall_bps"] is None
+
+    def test_no_orders_yet_reports_empty_rather_than_zero_cost(
+        self, archive: Journal
+    ) -> None:
+        report = archive.execution_quality()
+        assert report["orders"] == 0
+        assert report["fill_rate"] is None
+        assert report["mean_shortfall_bps"] is None
+
+    def test_a_disabled_journal_still_computes_the_shortfall(
+        self, tmp_path: Path
+    ) -> None:
+        """Archiving is optional; the caller's return value should not change."""
+        archive = Journal(path=tmp_path / "j.db", enabled=False)
+        assert archive.record_execution(
+            symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
+        ) == 10.0
+        assert archive.execution_quality() == {"enabled": False}
+
+    def test_a_broken_engine_does_not_break_the_trading_path(
+        self, archive: Journal
+    ) -> None:
+        archive._session_factory = None
+        assert archive.record_execution(
+            symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
+        ) == 10.0

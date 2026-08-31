@@ -114,6 +114,11 @@ def create_order(
         # reject the order. Keying only off ACCEPTED loses the fill for brokers
         # that report an immediate FILLED (the paper simulator, and Alpaca when
         # a market order fills inside the status poll).
+        # Measure what the order cost against the price the decision was based
+        # on. This is the only honest input to a cost model; everything else is
+        # an assumption. Misses are recorded too, or fill rate reads as 100%.
+        _record_execution_quality(request, order, broker_result)
+
         if (
             broker_result.fill_price is not None
             and broker_result.status
@@ -235,6 +240,45 @@ def list_execution_events() -> list[ExecutionEvent]:
     with SessionLocal() as session:
         events = session.scalars(select(ExecutionEventRecord)).all()
         return [_to_event_response(event) for event in events]
+
+
+def _record_execution_quality(request, order, broker_result) -> None:
+    """Archive execution cost for this order. Never raises."""
+    try:
+        from journal import get_journal
+
+        get_journal().record_execution(
+            symbol=request.symbol,
+            side=request.side,
+            qty=request.qty,
+            decision_price=request.decision_price,
+            fill_price=broker_result.fill_price,
+            order_type=request.order_type,
+            limit_price=request.limit_price,
+            order_id=str(order.order_id),
+            signal_id=request.signal_id,
+            outcome=(
+                broker_result.rejection_reason
+                or str(getattr(broker_result.status, "value", broker_result.status)).lower()
+            ),
+        )
+    except Exception as exc:  # pragma: no cover - measurement is best effort
+        logger.debug("Execution quality not recorded: %s", exc)
+
+
+@app.get("/v1/execution/quality")
+def execution_quality(limit: int = 200) -> dict[str, object]:
+    """Measured execution cost: fill rate and implementation shortfall.
+
+    Feed mean_shortfall_bps back into the backtest's slippage assumption to
+    replace a guess with a measurement.
+    """
+    try:
+        from journal import get_journal
+
+        return get_journal().execution_quality(limit=limit)
+    except Exception as exc:
+        return {"enabled": False, "error": str(exc)}
 
 
 @app.get("/v1/positions", response_model=list[BrokerPosition])

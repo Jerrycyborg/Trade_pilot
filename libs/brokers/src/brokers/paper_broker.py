@@ -24,6 +24,7 @@ from typing import Optional
 from uuid import uuid4
 
 from contracts import AccountInfo, BrokerPosition, ExecutionOrderRequest, OrderStatus
+from contracts.execution import limit_fill_price
 
 from .base import BrokerResult
 
@@ -172,6 +173,24 @@ class PaperBroker:
         price = self._fill_price(symbol, side)
         if price is None:
             return self._reject("no_market_price")
+
+        # A limit order can miss. Simulating that is the point: a market order
+        # always fills, so a backtest or paper run using only market orders
+        # cannot show the fill risk that limit pricing trades slippage for.
+        if request.order_type.upper() == "LIMIT" and request.limit_price:
+            filled = limit_fill_price(float(request.limit_price), price, side)
+            if filled is None:
+                logger.info(
+                    "PaperBroker: %s %s limit %.4f not marketable against %.4f",
+                    side, symbol, request.limit_price, price,
+                )
+                return BrokerResult(
+                    status=OrderStatus.CANCELLED,
+                    external_order_id=str(uuid4()),
+                    fill_price=None,
+                    rejection_reason="limit_not_marketable",
+                )
+            price = filled
         qty = float(request.qty)
         notional = price * qty
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Execution service with paper broker adapter."
 requires-python = ">=3.11"
 dependencies = [
+  "journal",
   "contracts",
   "brokers",
   "fastapi>=0.115.0",

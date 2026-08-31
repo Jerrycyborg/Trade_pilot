@@ -202,6 +202,61 @@ only loses money quicker.
 so there is nothing to evaluate. Lengthen `--days` or check the warm-up (EMA-50
 needs 51 bars before any signal is possible).
 
+## Checking What Execution Is Costing You
+
+```bash
+curl http://localhost:8002/v1/execution/quality
+```
+
+Read three numbers, in this order:
+
+1. **`fill_rate`** — the share of orders that actually filled. A rate well below
+   1.0 means the strategy you are running is not the strategy you backtested:
+   some of its trades never happened. Widen `LIMIT_TOLERANCE_BPS`, or accept
+   that those signals were the expensive ones.
+2. **`mean_shortfall_bps`** — average cost per fill, positive being a cost.
+   This is the honest input to the backtest's slippage assumption.
+3. **`worst_shortfall_bps`** and **`mean_shortfall_by_symbol`** — where the cost
+   actually lives. One symbol paying several times the rest is a liquidity
+   problem in that symbol; consider dropping it from the watchlist rather than
+   widening the tolerance for everything.
+
+Then close the loop — re-run the backtest with the measured cost rather than
+the default guess:
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT --slippage-bps 2.5
+```
+
+If the strategy was net positive at the assumed cost and net negative at the
+measured one, the edge was in the assumption. That is a finding, not a
+setback — it is exactly what this measurement exists to catch, and it is
+cheaper to learn here than from the account balance.
+
+### Fill rate has collapsed
+
+Every order coming back `limit_not_marketable` usually means one of:
+
+- **The tolerance is too tight for the symbol's spread.** 10bps on a stock with
+  a 30bps spread will essentially never fill. Raise `LIMIT_TOLERANCE_BPS` or
+  trade something tighter.
+- **The decision price is stale.** Check `/v1/orchestrator/realtime` for data
+  age. A limit priced off a two-minute-old quote is priced off a market that
+  has moved on.
+- **The market is moving fast.** Legitimate: this is the protection working,
+  and the fills you are missing are the ones that would have been worst.
+
+To confirm the mechanism rather than the market, set `USE_LIMIT_ORDERS=false`
+for one session and compare `mean_shortfall_bps` with limits on and off.
+
+### Orders are smaller than expected
+
+Sizing is capped at `MAX_ADV_PARTICIPATION` of average daily volume. The
+orchestrator logs the trim (`Order for X trimmed 500 -> 40 shares`). If a
+symbol is consistently trimmed hard it is too thin for the size you are
+trading — reduce the position size or drop the symbol. Raising the cap does not
+make the liquidity appear; it moves the cost from the trim into the fill price.
+
 ## Position Break — "New entries paused"
 
 The ledger and the broker disagree about what is held. Exits still work; only

@@ -464,6 +464,7 @@ dependencies = [
     { name = "brokers" },
     { name = "contracts" },
     { name = "fastapi" },
+    { name = "journal" },
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
@@ -474,6 +475,7 @@ requires-dist = [
     { name = "brokers", editable = "libs/brokers" },
     { name = "contracts", editable = "libs/contracts" },
     { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "journal", editable = "libs/journal" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.0" },
     { name = "sqlalchemy", specifier = ">=2.0.39" },
     { name = "uvicorn", specifier = ">=0.34.0" },
@@ -701,11 +703,15 @@ name = "journal"
 version = "0.1.0"
 source = { editable = "libs/journal" }
 dependencies = [
+    { name = "contracts" },
     { name = "sqlalchemy" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "sqlalchemy", specifier = ">=2.0.39" }]
+requires-dist = [
+    { name = "contracts", editable = "libs/contracts" },
+    { name = "sqlalchemy", specifier = ">=2.0.39" },
+]
 
 [[package]]
 name = "market-data"
@@ -1555,6 +1561,7 @@ dependencies = [
     { name = "contracts" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "journal" },
     { name = "market-data" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
@@ -1567,6 +1574,7 @@ requires-dist = [
     { name = "contracts", editable = "libs/contracts" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "journal", editable = "libs/journal" },
     { name = "market-data", editable = "libs/market_data" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },

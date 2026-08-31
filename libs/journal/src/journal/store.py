@@ -28,7 +28,13 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import BarObservation, Base, Decision, PriceObservation
+from .models import (
+    BarObservation,
+    Base,
+    Decision,
+    ExecutionQuality,
+    PriceObservation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -221,9 +227,110 @@ class Journal:
         )
         return decision_id
 
+    def record_execution(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        decision_price: float | None,
+        fill_price: float | None,
+        order_type: str = "MARKET",
+        limit_price: float | None = None,
+        order_id: str = "",
+        signal_id: str = "",
+        outcome: str = "filled",
+        decision_ts: datetime | None = None,
+    ) -> float | None:
+        """Record what an order cost. Returns the shortfall in bps, if computable.
+
+        Call this for misses as well as fills: a limit that did not fill is a
+        cost of the execution policy, and omitting it turns any later fill-rate
+        figure into 100%.
+        """
+        from contracts.execution import implementation_shortfall_bps
+
+        filled = fill_price is not None and fill_price > 0
+        shortfall = (
+            implementation_shortfall_bps(decision_price, fill_price, side)
+            if filled and decision_price
+            else None
+        )
+        if not self.enabled:
+            return shortfall
+        self._insert(
+            ExecutionQuality,
+            {
+                "order_id": order_id,
+                "signal_id": signal_id,
+                "symbol": symbol.upper(),
+                "side": side.upper(),
+                "qty": float(qty or 0.0),
+                "order_type": order_type.upper(),
+                "limit_price": limit_price,
+                "decision_price": decision_price,
+                "fill_price": fill_price,
+                "shortfall_bps": shortfall,
+                "filled": 1 if filled else 0,
+                "outcome": outcome,
+                "decision_ts": _utc(decision_ts),
+                "recorded_at": datetime.now(timezone.utc),
+            },
+        )
+        return shortfall
+
     # ------------------------------------------------------------------
     # Reads — for research and the operator endpoints
     # ------------------------------------------------------------------
+    def execution_quality(self, limit: int = 200) -> dict[str, object]:
+        """Measured execution cost — the replacement for guessed backtest costs."""
+        if not self.enabled:
+            return {"enabled": False}
+        try:
+            from sqlalchemy import func
+
+            with self._session_factory() as session:  # type: ignore[misc]
+                total = session.scalar(
+                    select(func.count()).select_from(ExecutionQuality)
+                ) or 0
+                fills = session.scalar(
+                    select(func.count())
+                    .select_from(ExecutionQuality)
+                    .where(ExecutionQuality.filled == 1)
+                ) or 0
+                mean_bps = session.scalar(
+                    select(func.avg(ExecutionQuality.shortfall_bps)).where(
+                        ExecutionQuality.shortfall_bps.is_not(None)
+                    )
+                )
+                worst = session.scalar(
+                    select(func.max(ExecutionQuality.shortfall_bps))
+                )
+                rows = session.scalars(
+                    select(ExecutionQuality)
+                    .order_by(ExecutionQuality.recorded_at.desc())
+                    .limit(limit)
+                ).all()
+                by_symbol: dict[str, list[float]] = {}
+                for row in rows:
+                    if row.shortfall_bps is not None:
+                        by_symbol.setdefault(row.symbol, []).append(row.shortfall_bps)
+
+            return {
+                "enabled": True,
+                "orders": total,
+                "filled": fills,
+                "fill_rate": round(fills / total, 4) if total else None,
+                "mean_shortfall_bps": round(mean_bps, 2) if mean_bps is not None else None,
+                "worst_shortfall_bps": round(worst, 2) if worst is not None else None,
+                "mean_shortfall_by_symbol": {
+                    symbol: round(sum(v) / len(v), 2) for symbol, v in sorted(by_symbol.items())
+                },
+            }
+        except Exception as exc:
+            logger.warning("Execution quality read failed: %s", exc)
+            return {"enabled": True, "error": str(exc)}
+
+
     def recent_decisions(self, limit: int = 50, symbol: str | None = None) -> list[dict]:
         if not self.enabled:
             return []

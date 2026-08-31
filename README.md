@@ -91,6 +91,14 @@ Production-minded AI trading stack: strategy proposes, policy approves, executio
 | `PAPER_SLIPPAGE_BPS` | `2` | Simulated slippage, always against the trader |
 | `PAPER_STATE_PATH` | `./paper-broker-state.json` | Paper position ledger |
 
+### Execution quality
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `USE_LIMIT_ORDERS` | `true` | Send marketable limit + IOC instead of market orders |
+| `LIMIT_TOLERANCE_BPS` | `10` | How far through the touch the limit is priced |
+| `MAX_ADV_PARTICIPATION` | `0.01` | Cap an order at this share of average daily volume (0 disables) |
+
 ## Getting eToro API Keys
 
 1. Log into your eToro account at etoro.com
@@ -341,6 +349,95 @@ bars = pd.read_sql("SELECT * FROM bar_observations", sqlite3.connect("journal.db
 
 Journalling never blocks trading. Every write is best-effort: a full disk
 degrades research, it does not halt the loop or raise mid-order.
+
+## Execution Quality
+
+A strategy that looks profitable on close prices can lose money once it has to
+trade. The gap between the two is execution cost, and until you measure it you
+are guessing at the single number that decides whether an intraday edge
+survives contact with the market.
+
+### Marketable limit orders
+
+Orders go out as **marketable limits with immediate-or-cancel**, not market
+orders. A market order accepts whatever price the book offers — on a thin
+symbol or during a spike that can be well away from what the strategy assumed.
+A marketable limit is priced `LIMIT_TOLERANCE_BPS` through the reference price
+in the paying direction (a buy at 200.00 with 10bps sends a 200.20 limit), so
+it fills immediately under normal conditions but refuses a fill beyond the
+tolerance. IOC means it fills now or cancels: nothing is left working that
+would later need managing or cancelling.
+
+The trade-off is explicit and it is a real one:
+
+| | Narrow tolerance | Wide tolerance |
+|---|---|---|
+| Fill rate | Lower | Higher |
+| Price paid when filled | Better | Worse |
+| Failure mode | Signals missed | Bad fills accepted |
+
+Neither failure is free. Missing the fills your backtest assumed changes the
+strategy you are actually running, which is why misses are recorded as
+carefully as fills.
+
+Set `USE_LIMIT_ORDERS=false` to fall back to market orders — worth doing once,
+side by side, to see what the limits are costing or saving you.
+
+### Implementation shortfall
+
+Every order carries the price the decision was based on (`decision_price`).
+When it fills, the difference against the fill price is recorded as
+implementation shortfall, in basis points, **signed so that positive is always
+a cost** — a buy filled high and a sell filled low both count as costs. Without
+that convention, averaging buys and sells together cancels real costs to zero
+and the system reports free trading.
+
+Orders that did not fill are recorded too, with `filled = 0`. A fill rate read
+only from fills is 100% by construction.
+
+```bash
+curl http://localhost:8002/v1/execution/quality
+```
+
+```json
+{
+  "orders": 3,
+  "filled": 2,
+  "fill_rate": 0.6667,
+  "mean_shortfall_bps": 2.5,
+  "worst_shortfall_bps": 5.0,
+  "mean_shortfall_by_symbol": {"AAPL": 1.0, "THIN": 5.0}
+}
+```
+
+**Feed `mean_shortfall_bps` back into the backtest.** The backtest's slippage
+assumption is otherwise a guess; this is a measurement from your own orders, on
+your own symbols, at your own size. Run the strategy in paper mode long enough
+to accumulate fills, then re-run the backtest with the measured figure:
+
+```bash
+uv run python scripts/run_backtest.py --slippage-bps <measured mean>
+```
+
+Read `worst_shortfall_bps` and the per-symbol breakdown as well as the mean. A
+tolerable average with one symbol paying five times the rest is a liquidity
+problem in that symbol, not a pricing problem in the strategy.
+
+### Volume-aware sizing
+
+An order that is a large fraction of a symbol's volume moves the price against
+itself, so its cost becomes a function of its own size. Orders are therefore
+capped at `MAX_ADV_PARTICIPATION` of average daily volume, inferred from the
+bars already being fetched (intraday bar volumes are scaled up by the number of
+bars in a session).
+
+At the default 1% this never binds on mega-caps and binds hard on thin names —
+which is the intent. A symbol too thin to support even one share at the cap is
+skipped rather than rounded up to a size that would pay for its own impact.
+
+Caveat, stated plainly: ADV inferred from a short intraday lookback is a rough
+estimate, and it says nothing about the spread or the depth at the touch. It
+is a guard against the obviously oversized order, not a market-impact model.
 
 ## Position Reconciliation
 
