@@ -13,7 +13,6 @@ from sqlalchemy import select
 from .database import Base, SessionLocal, engine
 from .models import AuditEventRecord
 
-
 Base.metadata.create_all(bind=engine)
 app = FastAPI(title="audit-logger", version="0.1.0")
 app.add_middleware(
@@ -65,7 +64,9 @@ def list_logs(
             statement = statement.where(AuditEventRecord.event_type == event_type)
         if since:
             statement = statement.where(AuditEventRecord.timestamp >= since)
-        rows = session.scalars(statement.order_by(AuditEventRecord.timestamp.desc()).limit(limit)).all()
+        rows = session.scalars(
+            statement.order_by(AuditEventRecord.timestamp.desc()).limit(limit)
+        ).all()
     return [_to_response(row) for row in rows]
 
 
@@ -91,12 +92,18 @@ def get_summary() -> dict:
     with SessionLocal() as session:
         all_rows = session.scalars(select(AuditEventRecord)).all()
 
-        total_trades = sum(1 for r in all_rows if r.event_type in ("order.submitted", "signal.approved"))
+        total_trades = sum(
+            1 for r in all_rows if r.event_type in ("order.submitted", "signal.approved")
+        )
         approved_today = sum(
-            1 for r in all_rows if r.event_type == "signal.approved" and _as_utc(r.timestamp) >= today_start
+            1
+            for r in all_rows
+            if r.event_type == "signal.approved" and _as_utc(r.timestamp) >= today_start
         )
         rejected_today = sum(
-            1 for r in all_rows if r.event_type == "signal.rejected" and _as_utc(r.timestamp) >= today_start
+            1
+            for r in all_rows
+            if r.event_type == "signal.rejected" and _as_utc(r.timestamp) >= today_start
         )
 
         weekly_spend = 0.0
@@ -108,7 +115,11 @@ def get_summary() -> dict:
                 except Exception:
                     pass
 
-        symbol_counts = Counter(r.symbol for r in all_rows if r.symbol and r.event_type in ("order.submitted", "signal.approved"))
+        symbol_counts = Counter(
+            r.symbol
+            for r in all_rows
+            if r.symbol and r.event_type in ("order.submitted", "signal.approved")
+        )
         top_symbols = [s for s, _ in symbol_counts.most_common(5)]
 
     return {

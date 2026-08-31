@@ -8,14 +8,15 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[4]
 
 
 @dataclass(frozen=True)
 class PolicySettings:
     database_url: str = field(
-        default_factory=lambda: os.getenv("POLICY_DATABASE_URL", "sqlite+pysqlite:///./policy-service.db")
+        default_factory=lambda: os.getenv(
+            "POLICY_DATABASE_URL", "sqlite+pysqlite:///./policy-service.db"
+        )
     )
     max_size_pct: float = field(
         default_factory=lambda: float(os.getenv("POLICY_MAX_SIZE_PCT", "0.02"))
@@ -43,12 +44,8 @@ class PolicySettings:
     use_alpaca_clock: bool = field(
         default_factory=lambda: os.getenv("POLICY_USE_ALPACA_CLOCK", "false").lower() == "true"
     )
-    alpaca_api_key: str = field(
-        default_factory=lambda: os.getenv("ALPACA_API_KEY", "")
-    )
-    alpaca_secret_key: str = field(
-        default_factory=lambda: os.getenv("ALPACA_SECRET_KEY", "")
-    )
+    alpaca_api_key: str = field(default_factory=lambda: os.getenv("ALPACA_API_KEY", ""))
+    alpaca_secret_key: str = field(default_factory=lambda: os.getenv("ALPACA_SECRET_KEY", ""))
     alpaca_paper: bool = field(
         default_factory=lambda: os.getenv("ALPACA_PAPER", "true").lower() == "true"
     )
@@ -56,7 +53,9 @@ class PolicySettings:
         default_factory=lambda: os.getenv("AUDIT_LOGGER_URL", "http://localhost:8006")
     )
     policy_config_path: Path = field(
-        default_factory=lambda: Path(os.getenv("POLICY_BASELINE_PATH", ROOT / "config" / "policy-baseline.yaml"))
+        default_factory=lambda: Path(
+            os.getenv("POLICY_BASELINE_PATH", ROOT / "config" / "policy-baseline.yaml")
+        )
     )
 
 
@@ -72,7 +71,10 @@ def load_policy_baseline() -> dict[str, object]:
 def merged_policy_config() -> dict[str, object]:
     baseline = load_policy_baseline()
     baseline["max_position_size_pct"] = float(
-        os.getenv("POLICY_MAX_SIZE_PCT", str(baseline.get("max_position_size_pct", settings.max_size_pct * 100)))
+        os.getenv(
+            "POLICY_MAX_SIZE_PCT",
+            str(baseline.get("max_position_size_pct", settings.max_size_pct * 100)),
+        )
     )
     baseline["max_daily_drawdown_pct"] = float(
         os.getenv(
@@ -80,9 +82,9 @@ def merged_policy_config() -> dict[str, object]:
             str(baseline.get("max_daily_drawdown_pct", settings.max_daily_drawdown_pct * 100)),
         )
     )
-    baseline["kill_switch"] = os.getenv(
-        "POLICY_KILL_SWITCH", str(baseline.get("kill_switch", False))
-    ).lower() == "true"
+    baseline["kill_switch"] = (
+        os.getenv("POLICY_KILL_SWITCH", str(baseline.get("kill_switch", False))).lower() == "true"
+    )
     # Allow tests/CI to disable trading hours via env var
     if os.getenv("POLICY_WEEKLY_CAP_USD"):
         baseline["weekly_notional_cap_usd"] = float(os.getenv("POLICY_WEEKLY_CAP_USD"))

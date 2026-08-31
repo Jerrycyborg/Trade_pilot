@@ -13,6 +13,7 @@ genuinely exercised, but no claim is made that it is real market history.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -71,6 +72,21 @@ def broker(tmp_path: Path, stub_prices) -> PaperBroker:
     )
 
 
+def _internal_headers(idempotency_key: str) -> dict[str, str]:
+    """Headers for an authenticated order post.
+
+    POST /v1/orders is behind verify_internal_key, which is a no-op when
+    INTERNAL_API_KEY is unset. These tests used to pass only because of that:
+    with the variable set — as it is in CI, and as it must be in any real
+    deployment — they got 401. Sending the key exercises the endpoint the way
+    it actually runs.
+    """
+    return {
+        "Idempotency-Key": idempotency_key,
+        "X-Internal-Key": os.environ.get("INTERNAL_API_KEY", ""),
+    }
+
+
 def _execution_client(db_path: Path, broker: PaperBroker, monkeypatch: pytest.MonkeyPatch):
     import execution_service.config as config
     import execution_service.database as database
@@ -92,6 +108,12 @@ def _execution_client(db_path: Path, broker: PaperBroker, monkeypatch: pytest.Mo
     # monkeypatch so the module-level broker is restored: other integration
     # tests reuse this module and would otherwise inherit our price stub.
     monkeypatch.setattr(main, "broker", broker)
+    # The route is resolved server-side now, so the router is what selects the
+    # adapter. store=None gives a simulated-only router, which is what an
+    # offline integration test wants.
+    from execution_service.routing import BrokerRouter
+
+    monkeypatch.setattr(main, "router", BrokerRouter(store=None, simulated=broker))
     return TestClient(main.app)
 
 
@@ -156,7 +178,7 @@ class TestSizingAndExecution:
                 qty=qty,
                 order_type="MARKET",
             ).model_dump(mode="json"),
-            headers={"Idempotency-Key": "intraday-1"},
+            headers=_internal_headers("intraday-1"),
         )
 
         assert response.status_code == 200
@@ -182,7 +204,7 @@ class TestSizingAndExecution:
                 qty=5,
                 order_type="MARKET",
             ).model_dump(mode="json"),
-            headers={"Idempotency-Key": "intraday-2"},
+            headers=_internal_headers("intraday-2"),
         ).json()
 
         fills = client.get(f"/v1/orders/{order['order_id']}/fills").json()

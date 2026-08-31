@@ -401,6 +401,18 @@ class WalkForwardResult(BaseModel):
     """in_sample_sharpe - out_of_sample_sharpe. The size of the lie the
     in-sample number was telling."""
 
+    trial_sharpes: list[float] = Field(default_factory=list)
+    """Per-period Sharpe of every configuration that competed, un-annualised.
+
+    Exposed so a *campaign* of several walk-forwards can pool them. Deflating
+    each run against only its own grid would let someone run twenty searches
+    and report the best one's deflated ratio as though nineteen never happened,
+    which is the way this statistic becomes decorative."""
+
+    out_of_sample_returns: list[float] = Field(default_factory=list)
+    """The stitched out-of-sample per-bar returns of the selected
+    configuration. Needed to recompute deflation against a pooled trial set."""
+
     probabilistic_sharpe_ratio: float | None = None
     """P(true Sharpe > 0), correcting for skew, kurtosis and sample length.
     None when the sample is too short or degenerate to support a claim."""

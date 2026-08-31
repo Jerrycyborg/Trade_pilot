@@ -1,9 +1,8 @@
 """Tests for sector concentration risk check."""
 from datetime import datetime, timezone
 
-from contracts import CandidateAction, SignalCandidate
-
 from autonomy_orchestrator.risk_engine import evaluate_risk
+from contracts import CandidateAction, SignalCandidate
 
 BASE_CONFIG = {
     "weekly_notional_cap_usd": 10000,

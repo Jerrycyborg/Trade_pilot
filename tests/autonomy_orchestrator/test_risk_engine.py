@@ -1,8 +1,7 @@
 from datetime import datetime, timezone
 
-from contracts import SignalCandidate
-
 from autonomy_orchestrator.risk_engine import evaluate_risk
+from contracts import SignalCandidate
 
 
 def _signal(**overrides):
@@ -52,7 +51,10 @@ def test_risk_engine_caps_position_size() -> None:
             "max_concurrent_positions": 10,
             "max_position_size_pct": 5.0,
             "max_daily_drawdown_pct": 3.0,
-            "approval_tiers": {"tier1_alert_threshold_usd": 200, "tier3_hard_approval_required_usd": 500},
+            "approval_tiers": {
+                "tier1_alert_threshold_usd": 200,
+                "tier3_hard_approval_required_usd": 500,
+            },
         },
     )
     assert result.approved

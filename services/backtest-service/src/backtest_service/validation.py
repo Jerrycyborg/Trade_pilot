@@ -348,6 +348,8 @@ def walk_forward(
         bars_count=len(bars),
         n_folds=len(fold_results),
         n_trials=len(combos),
+        trial_sharpes=[round(x, 8) for x in trial_sharpes],
+        out_of_sample_returns=[round(x, 10) for x in oos_returns],
         objective=objective,
         embargo_bars=embargo,
         folds=fold_results,

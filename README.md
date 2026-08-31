@@ -25,6 +25,7 @@ conservative: nothing trades until it is registered and promoted.
 | Run more than one strategy | [Strategies and the Portfolio](#strategies-and-the-portfolio) |
 | Control what is allowed to trade | [The Strategy Lifecycle](#the-strategy-lifecycle) |
 | See what an order actually cost | [Execution Quality](#execution-quality) |
+| Understand why a trade lost | [Explaining Trades After the Fact](#explaining-trades-after-the-fact) |
 | Go live | [Enabling Live Mode](#enabling-live-mode-step-by-step) |
 
 Operational procedures — what to do when something breaks — are in
@@ -715,18 +716,283 @@ sleeve that silently discarded its signals could never be promoted.
 
 Being explicit, because "autonomous" oversells it:
 
-- **Evidence is supplied, not harvested.** Nothing runs walk-forward on a
-  schedule and feeds the result in. You run it and pass the numbers to
-  `/promote`. The gates are automatic; gathering what they read is not.
-- **Health checks are called, not scheduled.** `/lifecycle/health` evaluates
-  and acts on the triggers, but something has to call it with current live
-  figures. Until you wire that to a cron or the orchestrator's cycle, decay
-  detection is manual.
-- **The thresholds are conventions, not derivations.** 0.95, 30 trades, 20
-  days, 0.7 correlation — each is defensible and none is a law. They are
-  environment variables so you can argue with them.
+- **Evidence is harvested for walk-forward only.** `run_backtest.py
+  --walk-forward` records its own validation artifact and prints the promote
+  call to copy, so a promotion cites a row the server reads rather than numbers
+  the caller typed. Nothing runs it on a schedule — you still choose when to
+  validate.
+- **The drawdown check needs a denominator you declare.** A drawdown percentage
+  is a fraction of the money at risk, and the journal records fills rather than
+  account sizes. Set `LIFECYCLE_CAPITAL_BASE_USD`, or
+  `LIFECYCLE_MAX_LIVE_DRAWDOWN_USD` for an absolute limit. With neither, that
+  trigger does not run and the health sweep says so in its warnings rather than
+  reporting a clean bill it did not earn.
+- **Most thresholds are conventions, not derivations.** 0.95, 30 trades, 20
+  days, 0.7 correlation, a 15% drawdown, a 60-minute journal-gap grace — each
+  is defensible and none is a law. They are environment variables so you can
+  argue with them. The one exception is Sharpe decay, which is measured in
+  standard errors of the estimate rather than as a fixed gap, because the same
+  shortfall is evidence over 500 trades and noise over 20.
 - **It cannot make a bad strategy good.** It only stops one reaching real money
   before it has shown anything, and takes it away when it stops working.
+
+## Explaining Trades After the Fact
+
+```bash
+uv run python scripts/attribute_trades.py --environment paper
+```
+
+This answers one question and deliberately only one: **when a trade went wrong,
+do the recorded facts say why?** It is not a performance report — the backtest
+and `/v1/execution/quality` already do that — and it produces no
+recommendation.
+
+### The decomposition adds up
+
+```
+  From the signal            +75.08
+  Entry execution            -25.82
+  Exit execution             -22.70
+  ------------------------------------------
+  Realised                   +26.56
+```
+
+Those three components are an **exact identity**: they reconstruct the realised
+result, which is what makes them worth arguing about rather than a set of
+categories that feel meaningful. "Signal" is what the strategy's own decisions
+would have earned with perfect fills; the other two are what trading cost. A
+test asserts the identity on every attribution.
+
+The reading above is the point of the exercise: *the strategy was right, and
+execution took 65% of what it earned.* The realised number alone cannot
+distinguish that from a strategy that was simply wrong, and they call for
+completely different responses.
+
+Everything approximate — max favourable/adverse excursion, capture ratio, exit
+reason — is reported as a diagnostic rather than folded in. Folding an
+approximation into an identity is how the identity stops being one.
+
+### Coverage is the deliverable
+
+```
+  Closed round trips        20
+  Fully attributable        18  (90%)
+
+  Missing inputs — this is the work L0 implies:
+    entry_decision_price         missing on 2 trade(s)
+```
+
+An attribution that cannot be computed **names the field it is missing** rather
+than substituting a zero. A zero would read as "execution cost nothing" instead
+of "we did not record what it cost", and would make the archive look richer
+than it is — which is the one outcome that would make this stage worthless.
+
+### Counterfactuals use what was knowable
+
+Alternative stops, holding longer, and the best exit available are computed
+against `bars_as_of(exit)` — the series as the system held it when the trade
+closed, not the corrected one. A revision that arrived afterwards must not
+decide that a different exit was better; that is hindsight wearing the clothes
+of analysis.
+
+They are questions for a later phase, not recommendations. Per
+[ADR 0001](docs/adr/0001-constrained-offline-adaptive-learning.md) nothing may
+propose a change until attribution has shown the archive can explain outcomes
+at all — this is L0 of that roadmap, and it proposes nothing.
+
+### Regime: was the rule wrong, or run in the wrong conditions?
+
+The price decomposition says how much of a result came from the signal. It
+cannot say *why* the signal was right or wrong, and for a rule-based strategy
+the most common answer is that the rule was applied in conditions it was not
+built for. A trend entry taken in a range earns nothing however well it is
+executed, and that failure looks identical to a bad rule in the numbers above.
+
+So each trade carries the regime at both ends, classified from bars the system
+actually held at that moment — `bars_as_of(entry)` for the entry, not the
+exit-time series, because a revision that arrived during the hold was not
+knowable when the entry was decided. Results are then grouped by the regime
+each trade was **entered** into:
+
+```text
+  BY ENTRY REGIME
+  regime             trades     realised      signal   win rate
+  ranging                 8      -268.00     -220.00         0%
+  trending_up             6      +603.00     +630.00       100%
+```
+
+The headline for that archive is `+335 realised`, which reads as a strategy
+that works. The slices say it earns in a trend and loses in a range — which
+points at a missing filter rather than at a broken rule, and those imply
+completely different work.
+
+A regime that cannot be measured gets its own `unknown` row rather than a
+residual bucket that resembles a real one. `compute_adx` returns 25.0 when the
+series is too short, which reads as "mildly trending"; letting that into an
+analysis would turn the absence of evidence into evidence. Regime is a
+diagnostic and never enters the identity — a label with a threshold in it is an
+opinion, and the three price components have to add up regardless of anyone's
+opinion about ADX.
+
+> The same sentinel was a live defect. The strategy worker gates trend entries
+> on `ADX < 20`, and 25.0 sits above 20 — so on thin data, or with no market
+> snapshot at all, the regime filter passed on a fabricated number. It now
+> refuses an entry whose regime it cannot measure.
+
+### What it cannot tell you
+
+- **It cannot see a trade it has no record of.** Coverage below 100% means
+  exactly that, and the fix is upstream in what gets recorded.
+- **Pairing is FIFO within one (strategy, symbol, environment, account).** It
+  never crosses environments, so a paper entry can never be matched to a live
+  exit — but it also assumes FIFO matches how you think about your lots.
+
+## Arguing About a Symbol Before Trading It
+
+```bash
+uv run python scripts/specialist_report.py --symbols AAPL,MSFT
+uv run python scripts/specialist_report.py --symbols AAPL --as-of 2026-08-20T14:00:00Z
+```
+
+L1 of [ADR 0001](docs/adr/0001-constrained-offline-adaptive-learning.md). Typed
+specialist roles read the point-in-time archive and produce structured claims —
+each with the measurement behind it, the threshold it was judged against, and a
+reference to the rows it came from. **It proposes nothing.** No component reads
+the output to decide anything; the risk veto is L2 and is deliberately built
+before anything can propose.
+
+Two constraints are enforced in code rather than written down. A specialist
+receives a `PointInTimeArchive` pinned to a moment, never the journal, and that
+object has no method returning the corrected series — so no role can consult
+one even by accident. And a `Claim` built without evidence raises at
+construction, rather than being filtered out later by something that might not
+run.
+
+### Reproducibility is measured, because it is the whole point
+
+Determinism is the easy half. The half that bites is point-in-time isolation: a
+role can be perfectly deterministic and still silently improve every time the
+archive is corrected, which makes every historical conclusion unfalsifiable —
+re-running it never reproduces what was originally said. A test records a
+series, assesses at T, stores a revision that would flip the classification,
+re-assesses at T, and requires an identical digest. A second test requires that
+an assessment made *after* the revision does see it, so the first cannot pass
+by ignoring revisions altogether.
+
+### Two of five roles have an archive to read
+
+That is the finding, not a limitation of the code:
+
+| Role | Status |
+|---|---|
+| Market | reads `bar_observations` as-of |
+| Technical | reads `bar_observations` as-of |
+| News | **blocked** — no headline store with observed-at times |
+| Sentiment | **blocked** — computed on request into a process-local dict, never persisted |
+| Fundamentals | **blocked** — research reports are a TTL cache keyed by symbol; it holds the current answer, not the sequence |
+
+The blocked three stay in the roster reporting `unavailable` with the storage
+each needs. A missing role is a gap someone has to close; an absent one is a
+gap nobody can see. None was built against its live source — an assessment "as
+of" a past moment constructed from today's data is exactly the leakage the
+archive prevents, and it would not be visible in the output.
+
+### What it produced
+
+On a ranging symbol the technical role reported a bullish average cross and
+positive MACD, while the market role reported no directional trend — *"a
+trend-following entry here is being taken in conditions it is not built for"*.
+That is the same finding the regime slices above produced from realised losses,
+recovered from the archive **before** a trade rather than after one.
+
+> **Should these roles be LLM-backed?** Answered at L1: not the two that are
+> buildable. Their claims are arithmetic over an archived series — an ADX
+> reading against a threshold, an average cross, a histogram sign — and a model
+> restating them would add a paraphrase while removing reproducibility, since a
+> digest that changes between runs cannot distinguish "the market changed" from
+> "the model did". The three *blocked* roles are the ones whose input is
+> unstructured text, where a model would do work no threshold can. That
+> question becomes live when their archives exist.
+
+### The risk veto refuses; it never approves
+
+L2 of the same ADR (`libs/veto`), and it runs in the command above — first, and
+without ever seeing a specialist claim:
+
+```text
+  Vetoed — the risk veto refuses these subjects:
+    THIN     insufficient_history: 12 archived bars for THIN; nothing
+             downstream can rest on fewer than 60
+    OLD      stale_series: the freshest bar for OLD is 4320 minutes old;
+             this is reasoning about a memory
+```
+
+Three properties are arranged rather than promised:
+
+- **Independent.** `review()` takes a journal and a subject. There is no
+  parameter for an argument, so it cannot be handed one.
+- **Rejection-only.** No `approved`, `ok` or `passed` field, and
+  `VetoDecision.__bool__` *raises*. The way this authority gets lost is a
+  caller writing `if veto_ok(x):`, after which `not rejected` and `approved`
+  are the same bit. Here a decision cannot be used in a condition at all.
+- **Final.** A frozen dataclass with no override, and no `--force` flag on the
+  command. A veto that can be talked out of is not a veto.
+
+Its scope is only whether a subject can be *reasoned about* — enough history,
+a current series, not hopelessly gapped, an instrument whose orders are not
+being rejected. It never judges merit: a veto with merit criteria is an
+approver with a negative sign. Checks that could not run are listed under
+`unchecked`, because a veto that skipped half of them and said nothing looks
+exactly like one that ran them all and found nothing.
+
+> Running it found a bug in its own staleness rule. `completeness` reports
+> `stale_minutes=None` when the window holds no bars — the exact case the rule
+> exists for — so a symbol dead for three days passed cleanly while a
+> merely-late one was caught. Staleness now comes from the freshest bar held.
+
+### Bounded challengers, and the trial count that makes them arguable
+
+L3 (`libs/challengers`) — the first phase that proposes anything. What keeps
+that safe is not the generator being careful; it is that a proposal has nowhere
+to go. A `Challenger` is frozen, carries no lifecycle state, no sleeve id and
+no environment, and has no method that writes. A test asserts the package never
+imports the lifecycle authority.
+
+**Clamped, not validated.** A validator rejects and lets the caller retry,
+which under a generator means it eventually proposes whatever it wanted. An
+out-of-range value is pulled to the bound and *the adjustment is recorded*, so
+a challenger pressing against a limit is visible as that rather than as one
+that chose the boundary on merit. A parameter with no declared bound is refused
+outright — otherwise the bounds only constrain the fields somebody remembered
+to list. Position sizing and risk ceilings are deliberately absent: those are
+safety policy, out of reach of anything automated.
+
+**The trial count is pooled across the campaign.** This is the part that makes
+the statistics mean anything:
+
+```text
+challenger            OOS Sharpe   DSR own  DSR pooled  overstated
+  chal-0c0c473d4099        1.635     0.732       0.684      +0.047
+  chal-3cd8122dee4c        3.188     0.886       0.857      +0.029
+  chal-56fa2d8872b0        1.599     0.755       0.702      +0.052
+  chal-58d6724698c9        1.635     0.732       0.684      +0.047
+
+survivors: []
+```
+
+A walk-forward deflates its winner against the configurations *that run* tried.
+Run it eight times and report each winner's own deflated ratio, and every one
+of those numbers still answers the one-run question — while the search actually
+performed was eight times larger. `evaluate_campaign` pools every trial from
+every challenger and re-deflates against the pooled set. The gate reads the
+pooled figure, and there is no fallback to the per-run one when pooling can't
+be computed: substituting it would put the overstated number in the single
+field that decides.
+
+Challengers are content-addressed, so re-proposing the same configuration under
+a new name cannot inflate the bar its siblings are judged against. Nothing
+survived above — the expected outcome of most campaigns, reported as a result,
+because the alternative is a search that always finds something.
 
 ## Pattern Day Trader (PDT) Protection
 

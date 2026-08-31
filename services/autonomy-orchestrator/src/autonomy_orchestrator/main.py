@@ -1,33 +1,35 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import uuid4
 
-import asyncio
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from contracts import ApprovalRequest, AuditEvent, NotificationEvent, PolicyEvaluationRequest, SignalCandidate
+from contracts import (
+    ApprovalRequest,
+    AuditEvent,
+    NotificationEvent,
+    PolicyEvaluationRequest,
+    SignalCandidate,
+)
 from contracts.auth import verify_admin_key, verify_internal_key
-from contracts.rate_limit import rate_limit_write
 from contracts.execution import (
     average_daily_volume,
     marketable_limit_price,
     participation_capped_qty,
 )
+from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
-from lifecycle import (
-    DEFAULT_LIVE_STRATEGY,
-    Evidence,
-    LifecycleRegistry,
-    State,
-    summarise,
-)
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from lifecycle import DEFAULT_LIVE_STRATEGY
+from lifecycle.health import run_health_sweep
+from lifecycle.service import LifecycleService, get_lifecycle_service
+from lifecycle.store import STATES, LifecycleUnavailableError
 from market_data import (
     LivePriceCache,
     MarketDataSettings,
@@ -37,15 +39,15 @@ from market_data import (
 )
 from market_data.fetcher import OHLCVFetcherProtocol  # noqa: F401 - kept for type hints
 from market_data.indicators import compute_atr
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import settings
 from .day_trade_tracker import DayTradeTracker
+from .policy_config import is_market_hours, load_policy_config, update_policy_config
 from .reconciliation import Reconciler
+from .risk_engine import evaluate_risk
 from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
-from .policy_config import is_market_hours, load_policy_config, update_policy_config
-from .risk_engine import evaluate_risk
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,8 @@ class OrchestratorState:
     stream_manager: StreamManager | None = None
     market_settings: MarketDataSettings | None = None
     day_trades: DayTradeTracker | None = None
-    lifecycle: LifecycleRegistry | None = None
+    lifecycle: LifecycleService | None = None
+    last_health_sweep: dict[str, object] | None = None
 
 
 state = OrchestratorState()
@@ -158,12 +161,56 @@ def _start_scheduler() -> None:
         replace_existing=True,
         coalesce=True,
     )
+    # Demotion triggers and journal completeness. Scheduled rather than left to
+    # an operator calling an endpoint: a safety control that only runs when
+    # somebody remembers is not a safety control.
+    scheduler.add_job(
+        lambda: asyncio.create_task(_run_health_sweep()),
+        "interval",
+        seconds=int(os.getenv("HEALTH_SWEEP_INTERVAL_SECONDS", "900")),
+        id="lifecycle_health_sweep",
+        replace_existing=True,
+        coalesce=True,
+    )
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return
     scheduler.start()
     state.scheduler = scheduler
+
+
+async def _run_health_sweep() -> dict[str, object]:
+    """Check every live sleeve, demote what has stopped working, halt on gaps.
+
+    Runs on a timer. Failures are logged and recorded rather than raised: a
+    health check that crashes the scheduler removes the very thing that was
+    watching.
+    """
+    try:
+        result = run_health_sweep(_lifecycle(), _journal())
+    except Exception as exc:  # pragma: no cover - the sweep must never crash
+        logger.exception("Health sweep failed: %s", exc)
+        state.last_health_sweep = {"error": str(exc)}
+        return state.last_health_sweep
+
+    state.last_health_sweep = {
+        **result.to_dict(),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    for demotion in result.demoted:
+        await _audit(
+            AuditEvent(
+                event_type="lifecycle.demoted",
+                symbol=demotion.split(":")[0],
+                signal_id="health-sweep",
+                decision="DEMOTE",
+                reasoning=demotion,
+                metadata={"source": "health_sweep"},
+            )
+        )
+    return state.last_health_sweep
+
 
 
 async def _check_dependency(name: str, url: str) -> dict[str, object]:
@@ -296,9 +343,7 @@ def realtime_status() -> dict[str, object]:
         "intraday_minutes": market_settings.intraday_minutes,
         "provider": "alpaca" if market_settings.has_alpaca_credentials else "yahoo",
         "cycle_interval_seconds": _cycle_interval_seconds(),
-        "stop_loss_check_seconds": _risk_check_interval_seconds(
-            "STOP_LOSS_CHECK_INTERVAL_MINUTES"
-        ),
+        "stop_loss_check_seconds": _risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES"),
         "take_profit_check_seconds": _risk_check_interval_seconds(
             "TAKE_PROFIT_CHECK_INTERVAL_MINUTES"
         ),
@@ -344,34 +389,106 @@ def journal_status(limit: int = 25, symbol: str | None = None) -> dict[str, obje
 @app.get("/v1/orchestrator/lifecycle")
 def lifecycle_status() -> dict[str, object]:
     """The strategy roster: what is live, what is on paper, and why."""
-    return summarise(_lifecycle())
+    service = _lifecycle()
+    if not service.configured:
+        return {
+            "available": False,
+            "reason": "no LIFECYCLE_DATABASE_URL — no shared authority",
+            "sleeves": [],
+            "trading": [],
+        }
+    try:
+        sleeves = service.all()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"lifecycle_unavailable: {exc}") from exc
+
+    counts: dict[str, int] = {}
+    for sleeve in sleeves:
+        counts[sleeve.state] = counts.get(sleeve.state, 0) + 1
+    return {
+        "available": True,
+        "counts": counts,
+        "trading": [s.key for s in sleeves if s.state == "live"],
+        "live_mode_enabled": service.store.live_mode_enabled(),
+        "sleeves": [
+            {
+                "key": s.key,
+                "strategy": s.strategy_id,
+                "strategy_version": s.strategy_version,
+                "symbol": s.symbol,
+                "state": s.state,
+                "version": s.version,
+                "since": s.since.isoformat() if s.since else None,
+                "reason": s.reason,
+                "probation_count": s.probation_count,
+                "position_environment": s.position_environment,
+            }
+            for s in sleeves
+        ],
+    }
 
 
 @app.post("/v1/orchestrator/lifecycle/register")
 def lifecycle_register(
-    strategy: str, symbol: str, _: None = Depends(verify_internal_key)
+    strategy: str,
+    symbol: str,
+    strategy_version: str = "",
+    _: None = Depends(verify_internal_key),
 ) -> dict[str, object]:
     """Add a sleeve as a candidate. It cannot trade until it earns each step."""
-    record = _lifecycle().register(strategy, sanitize_symbol(symbol))
-    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+    try:
+        record = _lifecycle().register(
+            strategy, sanitize_symbol(symbol), strategy_version=strategy_version
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"sleeve": record.key, "state": record.state, "reason": record.reason}
+
+
+class PromotionRequest(BaseModel):
+    """What a promotion may say. Note what is absent: any performance number.
+
+    The caller names the sleeve and the validation runs to read. Every figure
+    the gates evaluate is derived by the server from those stored artifacts and
+    from the journal. This request cannot assert that a strategy is good.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_ids: list[int] = Field(default_factory=list)
+    """Walk-forward artifacts, for candidate -> paper."""
+    correlation_artifact_id: int | None = None
+    """Portfolio correlation artifact, for paper -> live."""
+    paper_window_days: float | None = None
 
 
 @app.post("/v1/orchestrator/lifecycle/promote")
 def lifecycle_promote(
     strategy: str,
     symbol: str,
-    evidence: Evidence,
+    request: PromotionRequest | None = None,
     _: None = Depends(verify_admin_key),
 ) -> dict[str, object]:
-    """Move a sleeve up one step, if the evidence supports it.
+    """Move a sleeve up one step, if the stored evidence supports it.
 
-    Admin-gated because the upper step of this ladder is real money. Every gate
-    fails closed: a missing measurement is a refusal, not a pass.
+    Admin-gated because the top of this ladder is real money. Every gate fails
+    closed: a missing measurement is a refusal, not a pass — and the
+    measurements are read from durable records, not from this request.
     """
-    record, result = _lifecycle().promote(strategy, sanitize_symbol(symbol), evidence)
+    body = request or PromotionRequest()
+    try:
+        record, result = _lifecycle().promote(
+            strategy,
+            sanitize_symbol(symbol),
+            artifact_ids=body.artifact_ids,
+            correlation_artifact_id=body.correlation_artifact_id,
+            paper_window_days=body.paper_window_days,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "sleeve": record.key if record else None,
-        "state": record.state.value if record else None,
+        "state": record.state if record else None,
         "promoted": result.allowed,
         "passed": result.passed,
         "failed": result.failed,
@@ -388,35 +505,49 @@ def lifecycle_demote(
     _: None = Depends(verify_internal_key),
 ) -> dict[str, object]:
     """Take a sleeve out of live. Never gated — safety must not need approval."""
-    try:
-        target = State(to)
-    except ValueError:
+    if to not in STATES:
         raise HTTPException(
             status_code=422,
-            detail=f"Unknown state {to!r}. Available: {', '.join(s.value for s in State)}",
-        ) from None
-    record = _lifecycle().demote(strategy, sanitize_symbol(symbol), target, reason)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Sleeve is not registered")
-    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+            detail=f"Unknown state {to!r}. Available: {', '.join(STATES)}",
+        )
+    try:
+        record = _lifecycle().demote(strategy, sanitize_symbol(symbol), to, reason)
+    except LifecycleUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"sleeve": record.key, "state": record.state, "reason": record.reason}
 
 
-@app.post("/v1/orchestrator/lifecycle/health")
-def lifecycle_health(
-    strategy: str,
-    symbol: str,
-    evidence: Evidence,
-    _: None = Depends(verify_internal_key),
+@app.post("/v1/orchestrator/lifecycle/live-mode")
+def lifecycle_live_mode(
+    enabled: bool,
+    reason: str = "",
+    actor: str = "operator",
+    _: None = Depends(verify_admin_key),
 ) -> dict[str, object]:
-    """Check a live sleeve against its demotion triggers, and act on the answer."""
-    check = _lifecycle().check_health(strategy, sanitize_symbol(symbol), evidence)
-    record = _lifecycle().get(strategy, sanitize_symbol(symbol))
-    return {
-        "sleeve": record.key if record else None,
-        "healthy": check.healthy,
-        "state": record.state.value if record else None,
-        "reasons": check.reasons,
-    }
+    """The operator switch for real-money execution.
+
+    A database row rather than an environment variable, so it is audited, is
+    shared by every process at once, and cannot be flipped by a redeploy.
+    """
+    service = _lifecycle()
+    if not service.configured:
+        raise HTTPException(status_code=503, detail="no lifecycle authority configured")
+    enabled_now = service.store.set_live_mode(enabled, actor=actor, reason=reason)
+    return {"live_mode_enabled": enabled_now, "actor": actor, "reason": reason}
+
+
+@app.get("/v1/orchestrator/health-sweep")
+def health_sweep_status() -> dict[str, object]:
+    """The last scheduled health sweep, and what it did."""
+    return state.last_health_sweep or {"status": "not_run_yet"}
+
+
+@app.post("/v1/orchestrator/health-sweep")
+async def health_sweep_now(_: None = Depends(verify_internal_key)) -> dict[str, object]:
+    """Run the sweep immediately. Same code path as the scheduled one."""
+    return await _run_health_sweep()
 
 
 @app.get("/v1/orchestrator/day-trades")
@@ -437,6 +568,7 @@ def status() -> dict[str, object]:
         "kill_switch": config.get("kill_switch", False),
         "trading_mode": config.get("trading_mode", "demo"),
     }
+
 
 @app.get("/v1/orchestrator/client-config")
 async def client_config(request: Request) -> dict[str, str]:
@@ -469,7 +601,8 @@ async def client_config(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=403, detail="not allowed")
     logger.warning(
         "EXPOSE_CLIENT_KEYS=true — serving API keys to %s. Anyone who can reach "
-        "the dashboard can read the admin key.", client_host,
+        "the dashboard can read the admin key.",
+        client_host,
     )
     return {
         "internalKey": os.getenv("INTERNAL_API_KEY", ""),
@@ -477,23 +610,22 @@ async def client_config(request: Request) -> dict[str, str]:
     }
 
 
-
-
 @app.get("/v1/orchestrator/cycle/last")
 def last_cycle() -> dict[str, object]:
     return state.last_cycle_summary
+
 
 @app.post("/v1/orchestrator/cycle/trigger")
 async def trigger_cycle(x_internal_key: str = Header(...)) -> dict[str, object]:
     """Manually trigger a cycle (bypasses market hours gate — for testing)."""
     from .policy_config import load_policy_config
+
     config = load_policy_config(settings.policy_config_path)
     if config.get("kill_switch"):
         return {"status": "halted", "reason": "kill_switch_active"}
     if state.running:
         return {"status": "busy", "reason": "cycle_already_running"}
     return await run_cycle()
-
 
 
 @app.get("/v1/orchestrator/health/deps")
@@ -546,11 +678,18 @@ async def live_mode(
         if request.confirmation != "I CONFIRM LIVE TRADING":
             raise HTTPException(status_code=400, detail="Confirmation string mismatch")
         if config.get("kill_switch"):
-            raise HTTPException(status_code=400, detail="Kill switch must be off before enabling live mode")
+            raise HTTPException(
+                status_code=400, detail="Kill switch must be off before enabling live mode"
+            )
         if not config.get("weekly_notional_cap_usd"):
-            raise HTTPException(status_code=400, detail="Weekly cap must be set before enabling live mode")
+            raise HTTPException(
+                status_code=400, detail="Weekly cap must be set before enabling live mode"
+            )
         if not config.get("symbol_allowlist"):
-            raise HTTPException(status_code=400, detail="Symbol allowlist must be non-empty before enabling live mode")
+            raise HTTPException(
+                status_code=400,
+                detail="Symbol allowlist must be non-empty before enabling live mode",
+            )
         update_policy_config(settings.policy_config_path, {"trading_mode": "live"})
     else:
         update_policy_config(settings.policy_config_path, {"trading_mode": "demo"})
@@ -595,7 +734,9 @@ async def run_cycle() -> dict[str, object]:
         await _process_approvals()
         if not _monthly_limits_ok():
             return summary
-        signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
+        signals = [
+            signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"
+        ]
         portfolio_state = await _portfolio_state()
 
         # Pattern-day-trader budget. The equity lookup is a network call so it
@@ -672,7 +813,9 @@ async def run_cycle() -> dict[str, object]:
                 )
                 continue
             price_bars = _fetch_price_bars(signal.symbol)
-            risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
+            risk = evaluate_risk(
+                signal, portfolio_state, weekly_spend, config, price_bars=price_bars
+            )
             if not risk.approved:
                 summary["rejected"] += 1
                 _journal().record_decision(
@@ -741,9 +884,7 @@ async def run_cycle() -> dict[str, object]:
                     await _mark_signal_acted(signal.signal_id)
                     continue
 
-                order = await _submit_order(
-                    signal, risk, config, portfolio_state, price_bars
-                )
+                order = await _submit_order(signal, risk, config, portfolio_state, price_bars)
                 if not _order_accepted(order):
                     # execution-service answers 200 with status REJECTED (no cash,
                     # qty limit). Recording an open here would burn a day-trade
@@ -907,7 +1048,9 @@ async def _portfolio_state() -> dict[str, object]:
             headers=_internal_headers(),
         )
     positions = positions_resp.json() if positions_resp.status_code == 200 else []
-    account = account_resp.json() if account_resp.status_code == 200 else {"buying_power": 100_000.0}
+    account = (
+        account_resp.json() if account_resp.status_code == 200 else {"buying_power": 100_000.0}
+    )
     return {
         "positions": positions,
         "buying_power": float(account.get("buying_power", 100_000.0)),
@@ -915,7 +1058,9 @@ async def _portfolio_state() -> dict[str, object]:
     }
 
 
-async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
+async def _policy_evaluate(
+    signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]
+) -> dict[str, object]:
     try:
         from strategy_service.earnings_calendar import is_earnings_blackout as _iec
 
@@ -934,7 +1079,8 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
             "market_open": is_market_hours(config),
             "event_blackout_active": event_blackout,
             "liquidity_score": 0.95,
-            "symbol_allowed": signal.symbol.upper() in {str(sym).upper() for sym in config.get("symbol_allowlist", [])},
+            "symbol_allowed": signal.symbol.upper()
+            in {str(sym).upper() for sym in config.get("symbol_allowlist", [])},
         },
         portfolio_context={
             "gross_exposure_pct": min(len(portfolio_state.get("positions", [])) / 10.0, 1.0),
@@ -984,14 +1130,20 @@ async def _submit_order(
     if capped < qty:
         logger.info(
             "Order for %s trimmed %d -> %d shares (%.1f%% of ~%.0f ADV)",
-            signal.symbol, qty, capped, max_participation * 100, adv or 0,
+            signal.symbol,
+            qty,
+            capped,
+            max_participation * 100,
+            adv or 0,
         )
         qty = capped
 
     if qty < 1:
         logger.info(
             "Order for %s sizes to 0 shares ($%.2f at %.4f) — skipping",
-            signal.symbol, amount_usd, current_price,
+            signal.symbol,
+            amount_usd,
+            current_price,
         )
         return {"status": "REJECTED", "rejection_reason": "qty_below_one_share"}
 
@@ -1053,20 +1205,31 @@ def _strategy_of(signal: SignalCandidate) -> str:
 def _lifecycle_gate(signal: SignalCandidate) -> str | None:
     """Why this signal may not reach the broker, or None if it may.
 
-    Extracted from the cycle so the decision can be tested on its own. Buried
-    inside a hundred-line loop it could only be verified by re-implementing it
-    in the test, which tests the test.
+    Advisory: execution-service resolves and enforces the route regardless.
+    Asking here means a refused signal gets journalled with the context the
+    orchestrator has — confidence, sizing, the risk tier — instead of arriving
+    downstream stripped of it.
+
+    This used to consult a per-process JSON registry loaded once at boot, so
+    the orchestrator could believe a sleeve was live minutes after it had been
+    demoted elsewhere. It now reads the shared authority, and an unreachable
+    authority is a refusal rather than a pass.
     """
-    strategy_name = _strategy_of(signal)
-    registry = _lifecycle()
-    if registry.can_trade(strategy_name, signal.symbol):
+    answer = _lifecycle().may_open(_strategy_of(signal), signal.symbol)
+    if answer.permitted:
         return None
-    return registry.gate_reason(strategy_name, signal.symbol)
+    if not answer.available:
+        logger.error(
+            "Lifecycle authority unavailable (%s) — refusing to open %s",
+            answer.reason, signal.symbol,
+        )
+    return answer.reason
 
 
-def _lifecycle() -> LifecycleRegistry:
-    if state.lifecycle is None:
-        state.lifecycle = LifecycleRegistry()
+def _lifecycle() -> LifecycleService:
+    """The shared authority. Reconnects on demand rather than caching a failure."""
+    if state.lifecycle is None or not state.lifecycle.configured:
+        state.lifecycle = get_lifecycle_service()
     return state.lifecycle
 
 
@@ -1217,12 +1380,8 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     # Mirror image: a short profits as price FALLS, so its target sits below the
     # entry. An above-entry target is already satisfied at the moment of entry.
     is_short = _side_of(signal.candidate_action) == "SELL"
-    gain_per_share = (
-        settings.take_profit_target_usd / qty if qty > 0 else entry_price * 0.06
-    )
-    target_price = (
-        entry_price - gain_per_share if is_short else entry_price + gain_per_share
-    )
+    gain_per_share = settings.take_profit_target_usd / qty if qty > 0 else entry_price * 0.06
+    target_price = entry_price - gain_per_share if is_short else entry_price + gain_per_share
     state.take_profit_monitor.register(
         TakeProfitRecord(
             symbol=signal.symbol,
@@ -1300,8 +1459,8 @@ async def _run_stop_loss_check() -> None:
         realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
         if realized is None:
             logger.warning(
-                "Stop-loss on %s: position size unknown, loss not attributed to the "
-                "monthly limit", symbol,
+                "Stop-loss on %s: position size unknown, loss not attributed to the monthly limit",
+                symbol,
             )
         else:
             state.monthly_realized_loss_usd += max(0.0, -realized)
@@ -1309,13 +1468,15 @@ async def _run_stop_loss_check() -> None:
         if state.monthly_realized_loss_usd >= settings.monthly_loss_limit_usd * 0.7:
             await _notify_smart(
                 "loss_warning",
-                f"⚠️ Monthly loss ${state.monthly_realized_loss_usd:.2f} approaching ${settings.monthly_loss_limit_usd:.2f} limit",
+                f"⚠️ Monthly loss ${state.monthly_realized_loss_usd:.2f} approaching "
+                f"${settings.monthly_loss_limit_usd:.2f} limit",
                 tier=2,
             )
         if state.monthly_realized_loss_usd >= settings.monthly_loss_limit_usd:
             await _notify_smart(
                 "loss_limit_hit",
-                f"🛑 Monthly ${settings.monthly_loss_limit_usd:.2f} loss limit reached — trading paused",
+                f"🛑 Monthly ${settings.monthly_loss_limit_usd:.2f} loss limit reached "
+                "— trading paused",
                 tier=3,
             )
 
@@ -1333,7 +1494,8 @@ async def _run_take_profit_check() -> None:
         if realized is None:
             logger.warning(
                 "Take-profit on %s: position size unknown, gain not attributed to the "
-                "monthly target", symbol,
+                "monthly target",
+                symbol,
             )
         else:
             state.monthly_realized_profit_usd += max(0.0, realized)
@@ -1341,7 +1503,8 @@ async def _run_take_profit_check() -> None:
         if state.monthly_realized_profit_usd >= settings.monthly_profit_target_usd:
             await _notify_smart(
                 "profit_target_hit",
-                f"🎯 Monthly ${settings.monthly_profit_target_usd:.2f} profit target reached — coasting",
+                f"🎯 Monthly ${settings.monthly_profit_target_usd:.2f} profit target "
+                "reached — coasting",
                 tier=1,
             )
 
@@ -1433,7 +1596,8 @@ async def _process_approvals() -> None:
             approved_rows = response.json()
     except Exception as exc:
         logger.error(
-            "Approval gateway unreachable: %s — treating all pending approvals as REJECTED (fail safe)",
+            "Approval gateway unreachable: %s — treating all pending approvals as "
+            "REJECTED (fail safe)",
             exc,
         )
         return
@@ -1476,25 +1640,29 @@ async def _process_approvals() -> None:
         # Re-run risk + policy with current state before executing
         risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
         if not risk.approved:
-            await _audit(AuditEvent(
-                event_type="approval.stale_rejected",
-                symbol=signal.symbol,
-                signal_id=signal.signal_id,
-                decision="REJECT",
-                reasoning=f"deferred approval failed re-check: {risk.reason}",
-                metadata={"tier": risk.tier},
-            ))
+            await _audit(
+                AuditEvent(
+                    event_type="approval.stale_rejected",
+                    symbol=signal.symbol,
+                    signal_id=signal.signal_id,
+                    decision="REJECT",
+                    reasoning=f"deferred approval failed re-check: {risk.reason}",
+                    metadata={"tier": risk.tier},
+                )
+            )
             continue
         policy = await _policy_evaluate(signal, risk, config, portfolio_state)
         if policy.get("decision") != "APPROVE":
-            await _audit(AuditEvent(
-                event_type="approval.stale_rejected",
-                symbol=signal.symbol,
-                signal_id=signal.signal_id,
-                decision="REJECT",
-                reasoning="deferred approval failed policy re-check",
-                metadata={"policy": policy},
-            ))
+            await _audit(
+                AuditEvent(
+                    event_type="approval.stale_rejected",
+                    symbol=signal.symbol,
+                    signal_id=signal.signal_id,
+                    decision="REJECT",
+                    reasoning="deferred approval failed policy re-check",
+                    metadata={"policy": policy},
+                )
+            )
             continue
         order = await _submit_order(signal, risk, config, portfolio_state, price_bars)
         if not _order_accepted(order):
@@ -1512,14 +1680,16 @@ async def _process_approvals() -> None:
         weekly_spend += float(order.get("amount_usd", 0.0))
         state.weekly_notional_used = weekly_spend
         await _notify_trade_executed(signal, order)
-        await _audit(AuditEvent(
-            event_type="trade.executed.approval",
-            symbol=signal.symbol,
-            signal_id=signal.signal_id,
-            decision="APPROVED",
-            reasoning="approval executed after re-check",
-            metadata=order,
-        ))
+        await _audit(
+            AuditEvent(
+                event_type="trade.executed.approval",
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                decision="APPROVED",
+                reasoning="approval executed after re-check",
+                metadata=order,
+            )
+        )
         await _mark_signal_acted(signal.signal_id)
 
 
@@ -1578,7 +1748,9 @@ async def _process_exit_signals() -> int:
         position = position_map.get(signal.symbol.upper())
         if not position:
             continue
-        position_id = str(position.get("position_id") or position.get("positionId") or signal.symbol)
+        position_id = str(
+            position.get("position_id") or position.get("positionId") or signal.symbol
+        )
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{settings.execution_service_url}/v1/orders/close",
@@ -1671,10 +1843,7 @@ def _check_monthly_reset() -> None:
     now = datetime.now(timezone.utc)
     current_month = now.month
     current_year = now.year
-    if (
-        current_month != state.monthly_reset_month
-        or current_year != state.monthly_reset_year
-    ):
+    if current_month != state.monthly_reset_month or current_year != state.monthly_reset_year:
         state.monthly_realized_loss_usd = 0.0
         state.monthly_realized_profit_usd = 0.0
         state.monthly_reset_month = current_month
@@ -1689,6 +1858,8 @@ def _monthly_limits_ok() -> bool:
         logger.warning("Monthly loss limit $%.2f reached", settings.monthly_loss_limit_usd)
         return False
     if state.monthly_realized_profit_usd >= settings.monthly_profit_target_usd:
-        logger.info("Monthly profit target $%.2f reached — coasting", settings.monthly_profit_target_usd)
+        logger.info(
+            "Monthly profit target $%.2f reached — coasting", settings.monthly_profit_target_usd
+        )
         return False
     return True

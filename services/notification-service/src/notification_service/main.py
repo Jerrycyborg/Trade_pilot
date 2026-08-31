@@ -29,7 +29,9 @@ def health() -> dict[str, str]:
 
 
 @app.post("/v1/notify")
-async def notify(event: NotificationEvent, _: None = Depends(verify_internal_key)) -> dict[str, object]:
+async def notify(
+    event: NotificationEvent, _: None = Depends(verify_internal_key)
+) -> dict[str, object]:
     payload = event.model_dump(mode="json")
     _history.appendleft(payload)
     if event.tier >= 2:

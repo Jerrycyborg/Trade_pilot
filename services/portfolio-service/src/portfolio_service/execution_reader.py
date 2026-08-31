@@ -41,5 +41,7 @@ ExecutionSessionLocal = sessionmaker(
 def list_execution_fills() -> list[ExecutionFillRecord]:
     with ExecutionSessionLocal() as session:
         return session.scalars(
-            select(ExecutionFillRecord).order_by(ExecutionFillRecord.filled_at, ExecutionFillRecord.fill_id)
+            select(ExecutionFillRecord).order_by(
+                ExecutionFillRecord.filled_at, ExecutionFillRecord.fill_id
+            )
         ).all()

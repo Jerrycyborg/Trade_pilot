@@ -1,10 +1,12 @@
-from pathlib import Path
 import asyncio
+from pathlib import Path
+
 
 def test_orchestrator_status_endpoint(tmp_path: Path) -> None:
     config_file = tmp_path / "policy.yaml"
     config_file.write_text(
-        "weekly_notional_cap_usd: 500\nkill_switch: false\ntrading_mode: demo\nsymbol_allowlist: [AAPL]\n",
+        "weekly_notional_cap_usd: 500\nkill_switch: false\n"
+        "trading_mode: demo\nsymbol_allowlist: [AAPL]\n",
         encoding="utf-8",
     )
 
@@ -26,7 +28,8 @@ def test_orchestrator_status_endpoint(tmp_path: Path) -> None:
 def test_orchestrator_validation_endpoint(tmp_path: Path, monkeypatch) -> None:
     config_file = tmp_path / "policy.yaml"
     config_file.write_text(
-        "weekly_notional_cap_usd: 500\nkill_switch: false\ntrading_mode: demo\nsymbol_allowlist: [AAPL, BAD]\n",
+        "weekly_notional_cap_usd: 500\nkill_switch: false\n"
+        "trading_mode: demo\nsymbol_allowlist: [AAPL, BAD]\n",
         encoding="utf-8",
     )
 

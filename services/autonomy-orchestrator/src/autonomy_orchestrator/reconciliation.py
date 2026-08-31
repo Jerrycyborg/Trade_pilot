@@ -36,6 +36,12 @@ class PositionBreak:
     symbol: str
     broker_qty: float
     ledger_qty: float
+    account_id: str = ""
+    broker: str = ""
+    asset_class: str = ""
+    """Identity beyond the symbol. Without these, one account's AAPL and
+    another's are the same row, and a paper view is compared against a live
+    one."""
 
     @property
     def difference(self) -> float:
@@ -49,9 +55,18 @@ class PositionBreak:
             return "phantom_position"     # we think we hold something the broker does not
         return "quantity_mismatch"
 
+    @property
+    def identity(self) -> str:
+        parts = [self.symbol]
+        if self.account_id:
+            parts.append(f"acct={self.account_id}")
+        if self.broker:
+            parts.append(f"broker={self.broker}")
+        return " ".join(parts)
+
     def describe(self) -> str:
         return (
-            f"{self.symbol}: broker {self.broker_qty:g} vs ledger "
+            f"{self.identity}: broker {self.broker_qty:g} vs ledger "
             f"{self.ledger_qty:g} ({self.kind})"
         )
 
@@ -79,6 +94,9 @@ class ReconciliationResult:
             "breaks": [
                 {
                     "symbol": b.symbol,
+                    "account_id": b.account_id,
+                    "broker": b.broker,
+                    "asset_class": b.asset_class,
                     "broker_qty": b.broker_qty,
                     "ledger_qty": b.ledger_qty,
                     "difference": b.difference,
@@ -103,23 +121,51 @@ def compare_positions(
                     continue
         return 0.0
 
-    broker = {
-        str(p.get("symbol", "")).upper(): _qty(p, "qty", "net_qty")
-        for p in broker_positions
-        if p.get("symbol")
-    }
-    ledger = {
-        str(p.get("symbol", "")).upper(): _qty(p, "net_qty", "qty")
-        for p in ledger_positions
-        if p.get("symbol")
-    }
+    def _aggregate(rows: list[dict], *names: str) -> dict[tuple[str, ...], float]:
+        """Sum quantities per identity key.
+
+        A dict comprehension here silently kept only the last row for a
+        repeated key, so a broker reporting two lots of AAPL (100 and 50)
+        produced 50 and then a spurious break against a ledger that correctly
+        said 150 — with the direction depending on list order.
+
+        The key carries account, broker and asset class as well as the symbol.
+        Comparing one account's position against another's, or a paper view
+        against a live one, is a comparison of unrelated numbers.
+        """
+        totals: dict[tuple[str, ...], float] = {}
+        for row in rows:
+            symbol = str(row.get("symbol", "")).strip().upper()
+            if not symbol:
+                continue
+            key = (
+                symbol,
+                str(row.get("account_id", "") or "").upper(),
+                str(row.get("broker", "") or "").lower(),
+                str(row.get("asset_class", "") or "").lower(),
+            )
+            totals[key] = totals.get(key, 0.0) + _qty(row, *names)
+        return totals
+
+    broker = _aggregate(broker_positions, "qty", "net_qty")
+    ledger = _aggregate(ledger_positions, "net_qty", "qty")
 
     breaks: list[PositionBreak] = []
-    for symbol in sorted(set(broker) | set(ledger)):
-        broker_qty = broker.get(symbol, 0.0)
-        ledger_qty = ledger.get(symbol, 0.0)
+    for key in sorted(set(broker) | set(ledger)):
+        broker_qty = broker.get(key, 0.0)
+        ledger_qty = ledger.get(key, 0.0)
         if abs(broker_qty - ledger_qty) > QTY_TOLERANCE:
-            breaks.append(PositionBreak(symbol, broker_qty, ledger_qty))
+            symbol, account_id, broker_name, asset_class = key
+            breaks.append(
+                PositionBreak(
+                    symbol=symbol,
+                    broker_qty=broker_qty,
+                    ledger_qty=ledger_qty,
+                    account_id=account_id,
+                    broker=broker_name,
+                    asset_class=asset_class,
+                )
+            )
     return breaks
 
 

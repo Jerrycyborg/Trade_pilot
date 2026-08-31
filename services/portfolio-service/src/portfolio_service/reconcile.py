@@ -7,7 +7,13 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from contracts import FillRecord, PortfolioReconcileRequest, PortfolioReconcileResponse, PortfolioSnapshot, PositionRecord
+from contracts import (
+    FillRecord,
+    PortfolioReconcileRequest,
+    PortfolioReconcileResponse,
+    PortfolioSnapshot,
+    PositionRecord,
+)
 
 from .execution_reader import ExecutionFillRecord
 
@@ -72,7 +78,9 @@ def reconcile_portfolio(
         state = positions[symbol]
         if state.net_qty == 0:
             continue
-        market_price = request.latest_quotes.get(symbol, state.last_fill_price or state.average_cost)
+        market_price = request.latest_quotes.get(
+            symbol, state.last_fill_price or state.average_cost
+        )
         market_value = state.net_qty * market_price
         unrealized_pnl = _compute_unrealized(state.net_qty, state.average_cost, market_price)
         gross_exposure += abs(state.net_qty * market_price)
@@ -116,7 +124,11 @@ def _apply_fill(state: PositionState, fill: FillRecord) -> None:
     signed_qty = fill.qty if fill.side.upper() == "BUY" else -fill.qty
     state.last_fill_price = fill.price
 
-    if state.net_qty == 0 or (state.net_qty > 0 and signed_qty > 0) or (state.net_qty < 0 and signed_qty < 0):
+    if (
+        state.net_qty == 0
+        or (state.net_qty > 0 and signed_qty > 0)
+        or (state.net_qty < 0 and signed_qty < 0)
+    ):
         new_qty = state.net_qty + signed_qty
         total_cost = abs(state.net_qty) * state.average_cost + abs(signed_qty) * fill.price
         state.net_qty = new_qty

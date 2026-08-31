@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 from backtest_service.engine import run_backtest, run_cost_sensitivity
 from backtest_service.main import load_bars
@@ -124,6 +126,65 @@ def _sweep(request: BacktestRequest, bars) -> None:
         )
 
 
+def _record_artifact(request: BacktestRequest, result, args, kind: str = "walk_forward"):
+    """Store the validation so a promotion can cite it.
+
+    A promotion names artifact ids and the server reads the numbers from the
+    rows they point at — it cannot accept a Sharpe ratio in a request body. So
+    a walk-forward whose result is only printed to a terminal cannot promote
+    anything, and recording it by hand was the manual step that made the whole
+    gate impractical.
+
+    Best effort and silent when no authority is configured: this is a research
+    command, and failing to reach a database must not lose the analysis that
+    has already been printed above.
+    """
+    if not os.getenv("LIFECYCLE_DATABASE_URL", "").strip():
+        return None
+    try:
+        from lifecycle.store import PostgresLifecycleStore, StoreSettings
+
+        store = PostgresLifecycleStore(StoreSettings.from_env())
+        payload = {
+            "deflated_sharpe_ratio": result.deflated_sharpe_ratio,
+            "probabilistic_sharpe_ratio": result.probabilistic_sharpe_ratio,
+            "out_of_sample_sharpe": result.out_of_sample_sharpe,
+            "out_of_sample_return_pct": result.out_of_sample_return_pct,
+            "out_of_sample_trades": result.out_of_sample_trades,
+            "out_of_sample_max_drawdown_pct": result.out_of_sample_max_drawdown_pct,
+            "in_sample_sharpe": result.in_sample_sharpe,
+            "sharpe_degradation": result.sharpe_degradation,
+            "n_trials": result.n_trials,
+            "n_folds": result.n_folds,
+            "parameter_stability": result.parameter_stability,
+            "warnings": result.warnings,
+        }
+        window_end = datetime.now(timezone.utc)
+        artifact_id = store.record_validation_artifact(
+            kind=kind,
+            strategy_id=request.strategy,
+            strategy_version=os.getenv("STRATEGY_VERSION", ""),
+            symbol=request.symbol,
+            environment="backtest",
+            window_start=window_end - timedelta(days=request.period_days),
+            window_end=window_end,
+            payload=payload,
+            data_version=f"{request.timeframe}:{request.intraday_minutes}m",
+            produced_by="scripts/run_backtest.py --walk-forward",
+        )
+        print(
+            f"\n  {DIM}Recorded as validation artifact {artifact_id}. Cite it when "
+            f"promoting:{RESET}\n"
+            f"    curl -X POST '.../lifecycle/promote?strategy={request.strategy}"
+            f"&symbol={request.symbol}' \\\n"
+            f"      -d '{{\"artifact_ids\": [{artifact_id}]}}'"
+        )
+        return artifact_id
+    except Exception as exc:
+        print(f"\n  {YELLOW}! Result not recorded as an artifact: {exc}{RESET}")
+        return None
+
+
 def _verdict(label: str, ok: bool, detail: str) -> None:
     mark = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
     print(f"  [{mark}] {label:<28} {detail}")
@@ -194,6 +255,9 @@ def _walk_forward_report(request: BacktestRequest, bars, args) -> None:
         f"— every parameter you tried by hand\n  beforehand is also a trial, and none of "
         f"them are in that number.{RESET}"
     )
+
+    if not args.no_record:
+        _record_artifact(request, result, args)
 
 
 def _sensitivity_report(request: BacktestRequest, bars, args) -> None:
@@ -362,6 +426,11 @@ def main() -> int:
         help="score the whole parameter grid: plateau or spike?",
     )
     parser.add_argument("--splits", type=int, default=4, help="walk-forward folds")
+    parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="do not store the walk-forward result as a promotion artifact",
+    )
     parser.add_argument(
         "--portfolio",
         action="store_true",

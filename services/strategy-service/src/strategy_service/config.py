@@ -14,20 +14,18 @@ class StrategySettings:
         )
     )
     # AI signal generation
-    anthropic_api_key: str = field(
-        default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "")
-    )
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     claude_model: str = field(
         default_factory=lambda: os.getenv("STRATEGY_CLAUDE_MODEL", "claude-haiku-4-5-20251001")
     )
     fallback_to_deterministic: bool = field(
-        default_factory=lambda: os.getenv("STRATEGY_FALLBACK_DETERMINISTIC", "true").lower() == "true"
+        default_factory=lambda: (
+            os.getenv("STRATEGY_FALLBACK_DETERMINISTIC", "true").lower() == "true"
+        )
     )
     # Symbol watchlist (comma-separated)
     watchlist_raw: str = field(
-        default_factory=lambda: os.getenv(
-            "STRATEGY_WATCHLIST", "AAPL,MSFT,GOOGL,BTC/USD,ETH/USD"
-        )
+        default_factory=lambda: os.getenv("STRATEGY_WATCHLIST", "AAPL,MSFT,GOOGL,BTC/USD,ETH/USD")
     )
     # Research service URL
     research_service_url: str = field(
@@ -62,15 +60,11 @@ class StrategySettings:
     earnings_blackout_days: int = field(
         default_factory=lambda: int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
     )
-    stop_loss_pct: float = field(
-        default_factory=lambda: float(os.getenv("STOP_LOSS_PCT", "0.03"))
-    )
+    stop_loss_pct: float = field(default_factory=lambda: float(os.getenv("STOP_LOSS_PCT", "0.03")))
     take_profit_pct: float = field(
         default_factory=lambda: float(os.getenv("TAKE_PROFIT_PCT", "0.06"))
     )
-    max_hold_hours: int = field(
-        default_factory=lambda: int(os.getenv("MAX_HOLD_HOURS", "48"))
-    )
+    max_hold_hours: int = field(default_factory=lambda: int(os.getenv("MAX_HOLD_HOURS", "48")))
     volume_confirm_enabled: bool = field(
         default_factory=lambda: os.getenv("VOLUME_CONFIRM_ENABLED", "true").lower() == "true"
     )

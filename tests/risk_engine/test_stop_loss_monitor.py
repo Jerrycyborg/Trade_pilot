@@ -9,7 +9,9 @@ import pytest
 from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor, StopLossRecord
 
 
-def _record(symbol: str = "AAPL", stop_price: float = 95.0, entry_price: float = 100.0) -> StopLossRecord:
+def _record(
+    symbol: str = "AAPL", stop_price: float = 95.0, entry_price: float = 100.0
+) -> StopLossRecord:
     return StopLossRecord(
         symbol=symbol,
         entry_price=entry_price,
@@ -56,9 +58,7 @@ async def test_register_and_trigger() -> None:
     monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
     prices = _make_prices(94.0)  # below stop
 
-    with patch.object(
-        monitor, "_trigger_exit", new=AsyncMock(return_value=True)
-    ) as mock_exit:
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)) as mock_exit:
         triggered = await monitor.check_all(prices)
 
     assert "AAPL" in triggered
@@ -117,14 +117,18 @@ async def test_short_stop_fires_on_a_rise_not_a_fall() -> None:
     monitor = StopLossMonitor("http://localhost:8002", "key")
     monitor.register(
         StopLossRecord(
-            symbol="AAPL", entry_price=100.0, stop_price=103.0,
-            position_id="p", qty=10.0, side="SELL",
+            symbol="AAPL",
+            entry_price=100.0,
+            stop_price=103.0,
+            position_id="p",
+            qty=10.0,
+            side="SELL",
             created_at=datetime.now(timezone.utc),
         )
     )
 
     with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)):
-        assert await monitor.check_all(_make_prices(101.0)) == []      # still inside
+        assert await monitor.check_all(_make_prices(101.0)) == []  # still inside
         assert await monitor.check_all(_make_prices(104.0)) == ["AAPL"]  # breached
 
 

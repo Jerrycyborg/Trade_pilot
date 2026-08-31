@@ -7,7 +7,6 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from market_data.clock import market_session, reset_clock_cache
 from market_data.config import MarketDataSettings
 

@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "libs" / "contracts" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "lifecycle" / "src"))
+sys.path.insert(0, str(ROOT / "libs" / "attribution" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "brokers" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "market_data" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "audit-logger" / "src"))
@@ -94,10 +95,12 @@ def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
     # Each test gets its own strategy roster. Without this the suite would
     # write to the developer's real strategy-lifecycle.json — and, worse, read
     # it, so whether a test passed would depend on what was live locally.
-    monkeypatch.setenv("LIFECYCLE_STATE_PATH", str(tmp_path / "strategy-lifecycle.json"))
-    from strategy_service.worker import reset_lifecycle
+    # No shared lifecycle authority unless a test supplies one. That is the
+    # fail-closed default: a process without the roster attempts no entry.
+    monkeypatch.delenv("LIFECYCLE_DATABASE_URL", raising=False)
+    from lifecycle.service import reset_lifecycle_service
 
-    reset_lifecycle()
+    reset_lifecycle_service(None)
     if request.node.get_closest_marker("real_price_source"):
         # Tests of the resolver itself inject their own fetcher, so they never
         # reach the network either.

@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from brokers import PaperBroker
 from contracts import ExecutionOrderRequest
+from execution_service.routing import BrokerRouter
 
 
 def _setup():
@@ -21,7 +22,12 @@ def _setup():
     database.Base.metadata.create_all(bind=database.engine)
     main.engine = database.engine
     main.SessionLocal = database.SessionLocal
-    main.broker = PaperBroker()
+    # Orders now resolve their route server-side, so the router is what the
+    # test has to supply — setting main.broker alone would leave the real
+    # router in place, reading whatever lifecycle state the environment had.
+    paper = PaperBroker()
+    main.broker = paper
+    main.router = BrokerRouter(store=None, simulated=paper)
     return main
 
 
@@ -69,6 +75,9 @@ def test_duplicate_submission_same_payload_does_not_create_extra_events() -> Non
     main = _setup()
     first = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-5")
     second = main.create_order(ExecutionOrderRequest(**_request()), idempotency_key="idem-5")
+    # The point of an idempotency key: the second call returns the first order
+    # rather than creating another one. This was computed and never checked.
+    assert second.order_id == first.order_id
 
     import execution_service.database as database
     import execution_service.models as models
@@ -129,8 +138,6 @@ def test_close_order_endpoint_calls_broker_wrapper(monkeypatch) -> None:
         captured["symbol"] = symbol
         captured["units"] = units
         return True
-
-    import execution_service.main as main
 
     monkeypatch.setattr(main, "close_position", fake_close_position)
 

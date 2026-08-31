@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
-
 from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor, StopLossRecord
 
 

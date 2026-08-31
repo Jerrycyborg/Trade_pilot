@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 from brokers import PaperBroker
 from contracts import ExecutionOrderRequest, OrderStatus
+from execution_service.routing import BrokerRouter
 
 
 class Prices:
@@ -45,16 +46,17 @@ def main(tmp_path: Path, prices: Prices, monkeypatch: pytest.MonkeyPatch):
     database.Base.metadata.create_all(bind=database.engine)
     monkeypatch.setattr(module, "engine", database.engine)
     monkeypatch.setattr(module, "SessionLocal", database.SessionLocal)
-    monkeypatch.setattr(
-        module,
-        "broker",
-        PaperBroker(
-            starting_cash=1_000_000.0,
-            slippage_bps=0.0,
-            state_path=tmp_path / "paper.json",
-            price_source=prices,
-        ),
+    paper = PaperBroker(
+        starting_cash=1_000_000.0,
+        slippage_bps=0.0,
+        state_path=tmp_path / "paper.json",
+        price_source=prices,
     )
+    monkeypatch.setattr(module, "broker", paper)
+    # Route resolution is server-side now, so the router is what decides which
+    # adapter an order reaches. With no store it is simulated-only, which is
+    # what these tests want.
+    monkeypatch.setattr(module, "router", BrokerRouter(store=None, simulated=paper))
     return module
 
 

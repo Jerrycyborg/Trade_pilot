@@ -286,6 +286,23 @@ class ExecutionOrderRequest(BaseModel):
     """The price the decision was based on. Carried through to the fill so
     execution cost can be measured rather than assumed."""
 
+    strategy_id: str = "ema_rsi_macd"
+    """Which rule produced this order. execution-service looks the sleeve up on
+    (strategy_id, symbol, account) to decide the broker route, so a wrong value
+    here is gated against the wrong sleeve — it is not a free-text label."""
+
+    account_id: str = "default"
+
+    reduce_only: bool = False
+    """True when this order can only decrease exposure — a stop, a take-profit,
+    or any exit. Reduce-only orders are never blocked by a halt: refusing to
+    let a position close turns a bookkeeping problem into a financial one.
+
+    Note what is deliberately absent: there is no broker or environment field.
+    The venue is resolved server-side from the sleeve's lifecycle state and the
+    operator's live-mode switch. A caller that could name its own broker could
+    route a candidate sleeve's order to a live venue."""
+
 
 class ClosePositionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")

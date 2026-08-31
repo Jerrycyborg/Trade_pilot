@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-
 POSTGRES_URL = os.getenv("TEST_EXECUTION_POSTGRES_URL")
 
 pytestmark = pytest.mark.skipif(

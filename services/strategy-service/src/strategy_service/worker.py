@@ -24,10 +24,13 @@ from contracts.execution import (
     marketable_limit_price,
     participation_capped_qty,
 )
-from lifecycle import DEFAULT_LIVE_STRATEGY, LifecycleRegistry
+from lifecycle import DEFAULT_LIVE_STRATEGY
+from lifecycle.service import get_lifecycle_service, reset_lifecycle_service
 from market_data import (
+    ADX_NEUTRAL,
     MarketDataSettings,
     RealtimePriceSource,
+    adx_is_computable,
     build_ta_summary,
     fetch_bars,
     market_session,
@@ -38,21 +41,16 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# One roster per process, shared by every cycle.
-_registry: LifecycleRegistry | None = None
-
-
-def _lifecycle() -> LifecycleRegistry:
-    global _registry
-    if _registry is None:
-        _registry = LifecycleRegistry()
-    return _registry
+def _lifecycle():
+    """The shared roster. Not a per-process copy: this worker used to hold a
+    JSON registry loaded once at boot, so it could believe a sleeve was live
+    long after another process demoted it."""
+    return get_lifecycle_service()
 
 
 def reset_lifecycle() -> None:
-    """Drop the cached roster — for tests, and after an out-of-band edit."""
-    global _registry
-    _registry = None
+    """Drop the cached authority — for tests, and after an out-of-band change."""
+    reset_lifecycle_service(None)
 
 
 @dataclass
@@ -148,15 +146,30 @@ class TradeWorker:
 
         ta, bars = self._get_market_snapshot(symbol)
         if signal.candidate_action == "BUY":
-            adx = getattr(ta, "adx", 25.0) if ta is not None else 25.0
-            if adx < 20.0:
+            # compute_adx returns ADX_NEUTRAL (25.0) when the series is too
+            # short, and 25.0 sits *above* this filter's threshold — so on thin
+            # or missing data the regime gate used to pass on a fabricated
+            # number rather than refuse. An unmeasurable regime is not a
+            # trending one.
+            bars_count = getattr(ta, "bars_count", 0) if ta is not None else 0
+            adx = getattr(ta, "adx", ADX_NEUTRAL) if ta is not None else ADX_NEUTRAL
+            if not adx_is_computable(bars_count):
+                logger.debug(
+                    "regime: not measurable (%s bars), suppressing trend signal", bars_count
+                )
+                signal.candidate_action = CandidateAction.HOLD
+            elif adx < 20.0:
                 logger.debug("regime: ranging (adx=%s), suppressing trend signal", round(adx, 4))
                 signal.candidate_action = CandidateAction.HOLD
             elif settings.volume_confirm_enabled and bars:
                 volumes = [float(getattr(bar, "volume", 0.0) or 0.0) for bar in bars]
                 current_volume = volumes[-1] if volumes else None
                 avg_volume = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else None
-                if current_volume is not None and avg_volume is not None and current_volume <= avg_volume:
+                if (
+                    current_volume is not None
+                    and avg_volume is not None
+                    and current_volume <= avg_volume
+                ):
                     logger.debug("volume_confirm: below avg, suppressing BUY")
                     signal.candidate_action = CandidateAction.HOLD
 
@@ -235,7 +248,9 @@ class TradeWorker:
         if gate is not None:
             logger.info(
                 "Not trading %s %s: %s (signal recorded, no order placed)",
-                signal.candidate_action, symbol, gate,
+                signal.candidate_action,
+                symbol,
+                gate,
             )
             self._record_gated_decision(signal, symbol, qty, reference_price, gate)
             result.orders_gated += 1
@@ -264,18 +279,32 @@ class TradeWorker:
             limit_price=limit_price,
             decision_price=reference_price,
         )
-        submitted = await self._submit_order(order_req, idempotency_key=f"worker-{signal.signal_id}")
+        submitted = await self._submit_order(
+            order_req, idempotency_key=f"worker-{signal.signal_id}"
+        )
         if submitted:
             result.orders_submitted += 1
-            logger.info("Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action)
+            logger.info(
+                "Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action
+            )
 
     def _lifecycle_gate(self, signal: SignalCandidate) -> str | None:
-        """Why this signal may not reach the broker, or None if it may."""
-        registry = _lifecycle()
+        """Why this signal may not reach the broker, or None if it may.
+
+        Advisory — execution-service resolves and enforces the route whatever
+        this says. Asking here is what lets the refusal be journalled with the
+        context this worker has, instead of arriving downstream without it.
+        """
         strategy = getattr(signal, "strategy", None) or DEFAULT_LIVE_STRATEGY
-        if registry.can_trade(strategy, signal.symbol):
+        answer = _lifecycle().may_open(strategy, signal.symbol)
+        if answer.permitted:
             return None
-        return registry.gate_reason(strategy, signal.symbol)
+        if not answer.available:
+            logger.error(
+                "Lifecycle authority unavailable (%s) — refusing to open %s",
+                answer.reason, signal.symbol,
+            )
+        return answer.reason
 
     def _record_gated_decision(
         self,
@@ -376,11 +405,11 @@ class TradeWorker:
         # Prefer the live price over the last bar close: at intraday resolution a
         # stop that reacts only on bar boundaries is a stop that fires late.
         live_price = self._prices.get_price(symbol)
-        current_price = float(
-            live_price if live_price is not None else ta.current_price
-        )
+        current_price = float(live_price if live_price is not None else ta.current_price)
         qty = int(position.get("net_qty", 0))
-        opened_at = _parse_datetime(position.get("opened_at")) or _parse_datetime(position.get("updated_at"))
+        opened_at = _parse_datetime(position.get("opened_at")) or _parse_datetime(
+            position.get("updated_at")
+        )
         max_hold = timedelta(hours=settings.max_hold_hours)
 
         reasons: list[str] = []

@@ -20,8 +20,8 @@ def test_compute_atr_exact_values() -> None:
     Seed ATR (SMA of TR[0:3]) = (2+2+2)/3 = 2.0
     No further bars → final ATR = 2.0 (no Wilder smoothing steps needed).
     """
-    highs  = [12.0, 13.0, 14.0, 15.0]
-    lows   = [10.0, 11.0, 12.0, 13.0]
+    highs = [12.0, 13.0, 14.0, 15.0]
+    lows = [10.0, 11.0, 12.0, 13.0]
     closes = [11.0, 12.0, 13.0, 14.0]
     atr = compute_atr(highs, lows, closes, period=3)
     assert math.isfinite(atr), "ATR must be finite"
@@ -39,8 +39,8 @@ def test_compute_atr_wilder_smoothing() -> None:
     period = 3
     # All bars flat: H=L=C, so TR = 0 for every bar
     # Seed ATR = 0.0; after Wilder step still 0.0.
-    highs  = [10.0] * 5
-    lows   = [10.0] * 5
+    highs = [10.0] * 5
+    lows = [10.0] * 5
     closes = [10.0] * 5
     atr = compute_atr(highs, lows, closes, period=period)
     assert atr == 0.0, f"Flat bars should yield ATR=0.0, got {atr}"
@@ -55,14 +55,17 @@ def test_compute_atr_insufficient_data_fallback() -> None:
 def test_compute_atr_positive_for_volatile_bars() -> None:
     """ATR of volatile bars must be positive."""
     import random
+
     rng = random.Random(42)
     highs, lows, closes = [], [], []
     prev_close = 100.0
     for _ in range(30):
         h = prev_close + rng.uniform(0.5, 3.0)
-        l = prev_close - rng.uniform(0.5, 3.0)
-        c = rng.uniform(l, h)
-        highs.append(h); lows.append(l); closes.append(c)
+        low = prev_close - rng.uniform(0.5, 3.0)
+        c = rng.uniform(low, h)
+        highs.append(h)
+        lows.append(low)
+        closes.append(c)
         prev_close = c
     atr = compute_atr(highs, lows, closes, period=14)
     assert atr > 0, f"Volatile bars must have ATR > 0, got {atr}"

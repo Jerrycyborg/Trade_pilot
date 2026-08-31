@@ -95,7 +95,11 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
         hard_reasons.append("symbol_not_allowed")
     if not _within_trading_hours(config):
         hard_reasons.append("outside_trading_hours")
-    if request.portfolio_context.daily_drawdown_pct >= float(config.get("max_daily_drawdown_pct", settings.max_daily_drawdown_pct * 100)) / 100.0:
+    if (
+        request.portfolio_context.daily_drawdown_pct
+        >= float(config.get("max_daily_drawdown_pct", settings.max_daily_drawdown_pct * 100))
+        / 100.0
+    ):
         hard_reasons.append("daily_drawdown_limit")
     weekly_cap = float(config.get("weekly_notional_cap_usd", 0.0))
     weekly_spend = _weekly_spend()
@@ -177,7 +181,9 @@ def _within_trading_hours(config: dict[str, object]) -> bool:
     now = datetime.now(zone)
     if now.strftime("%a") not in trading_hours.get("days", ["Mon", "Tue", "Wed", "Thu", "Fri"]):
         return False
-    start_hour, start_minute = [int(part) for part in str(trading_hours.get("start", "09:30")).split(":")]
+    start_hour, start_minute = [
+        int(part) for part in str(trading_hours.get("start", "09:30")).split(":")
+    ]
     end_hour, end_minute = [int(part) for part in str(trading_hours.get("end", "16:00")).split(":")]
     start = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
     end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)

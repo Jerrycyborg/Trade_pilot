@@ -17,7 +17,6 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .models import ApprovalRecord
 
-
 Base.metadata.create_all(bind=engine)
 app = FastAPI(title="approval-gateway", version="0.1.0")
 app.add_middleware(
@@ -84,7 +83,9 @@ def list_pending(status: str | None = Query(default="PENDING")) -> list[Approval
 def get_approval(approval_id: str) -> ApprovalResponse:
     _expire_soft_timeouts()
     with SessionLocal() as session:
-        row = session.scalar(select(ApprovalRecord).where(ApprovalRecord.approval_id == approval_id))
+        row = session.scalar(
+            select(ApprovalRecord).where(ApprovalRecord.approval_id == approval_id)
+        )
     if not row:
         raise HTTPException(status_code=404, detail="Approval not found")
     return _to_response(row)
@@ -113,7 +114,9 @@ def reject(
 def _transition(approval_id: str, status: str) -> ApprovalResponse:
     _expire_soft_timeouts()
     with SessionLocal() as session:
-        row = session.scalar(select(ApprovalRecord).where(ApprovalRecord.approval_id == approval_id))
+        row = session.scalar(
+            select(ApprovalRecord).where(ApprovalRecord.approval_id == approval_id)
+        )
         if not row:
             raise HTTPException(status_code=404, detail="Approval not found")
         if row.status != "PENDING":

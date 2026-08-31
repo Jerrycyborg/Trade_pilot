@@ -7,8 +7,12 @@ requires-python = ">=3.11"
 dependencies = [
   "contracts",
   "journal",
+  "attribution",
   "lifecycle",
   "market_data",
+  "challengers",
+  "specialists",
+  "veto",
   "brokers",
   "audit-logger",
   "autonomy-orchestrator",
@@ -35,8 +39,12 @@ dev = [
 members = [
   "libs/contracts",
   "libs/journal",
+  "libs/attribution",
   "libs/lifecycle",
   "libs/market_data",
+  "libs/challengers",
+  "libs/specialists",
+  "libs/veto",
   "libs/brokers",
   "services/audit-logger",
   "services/autonomy-orchestrator",
@@ -54,8 +62,12 @@ members = [
 [tool.uv.sources]
 contracts = { workspace = true }
 journal = { workspace = true }
+attribution = { workspace = true }
 lifecycle = { workspace = true }
 market_data = { workspace = true }
+challengers = { workspace = true }
+specialists = { workspace = true }
+veto = { workspace = true }
 brokers = { workspace = true }
 audit-logger = { workspace = true }
 autonomy-orchestrator = { workspace = true }
