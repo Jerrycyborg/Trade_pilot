@@ -126,6 +126,7 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
         parameters: dict | None = None,
         bars_override: list | None = None,
         signal_builder=None,
+        positions: dict[str, float] | None | object = _UNSET,
     ) -> ExecutionOrderRequest | None:
         captured.clear()
         if challengers is not None or parameters is not None:
@@ -162,6 +163,13 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
             captured.append(req)
             return True
 
+        async def sleeve_position(_symbol: str, _strategy_id: str):
+            # Flat by default so the entry pipeline runs; tests of the
+            # position-awareness check pass their own book (or None for an
+            # unknowable one).
+            return {"paper": 0.0, "live": 0.0} if positions is _UNSET else positions
+
+        monkeypatch.setattr(worker, "_get_sleeve_position", sleeve_position)
         monkeypatch.setattr(worker, "_get_buying_power", buying_power)
         monkeypatch.setattr(worker, "_get_portfolio_context", portfolio_context)
         monkeypatch.setattr(worker, "_call_policy", call_policy)
@@ -178,8 +186,10 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
             replace(worker_settings, volume_confirm_enabled=False),
         )
 
-        await worker._process_symbol("AAPL", WorkerRunResult())
+        result = WorkerRunResult()
+        await worker._process_symbol("AAPL", result)
         run.orders = list(captured)
+        run.result = result
         return captured[-1] if captured else None
 
     return run
@@ -589,6 +599,8 @@ class TestOrderSubmissionAuthenticates:
             from contracts import PortfolioContext
             return PortfolioContext(gross_exposure_pct=0.0, daily_drawdown_pct=0.0)
         async def approve(_r): return {"decision": "APPROVE", "approved_size_pct": 0.05}
+        async def flat(_sym, _sid): return {"paper": 0.0, "live": 0.0}
+        monkeypatch.setattr(worker, "_get_sleeve_position", flat)
         monkeypatch.setattr(worker, "_get_buying_power", buying_power)
         monkeypatch.setattr(worker, "_get_portfolio_context", ctx)
         monkeypatch.setattr(worker, "_call_policy", approve)
@@ -603,3 +615,55 @@ class TestOrderSubmissionAuthenticates:
 
         assert result.orders_submitted == 0
         assert result.errors and "submission failed" in result.errors[0]
+
+
+class TestAnEntrySignalIsNotAnInstructionToAdd:
+    """Position awareness on the entry path.
+
+    The rule re-signals for as long as its conditions hold, and the worker
+    used to re-enter on every cycle: the first live paper run stacked one
+    sleeve's short 6 → 12 → 19 shares in three five-minute cycles, with
+    nothing anywhere deciding that a bigger position was wanted. A sleeve
+    already positioned in the signal's direction now submits nothing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_positioned_sleeve_does_not_re_enter(self, worker_run) -> None:
+        order = await worker_run(
+            action=CandidateAction.SELL, positions={"paper": -7.0, "live": 0.0}
+        )
+        assert order is None
+
+    @pytest.mark.asyncio
+    async def test_a_flat_sleeve_enters(self, worker_run) -> None:
+        order = await worker_run(
+            action=CandidateAction.SELL, positions={"paper": 0.0, "live": 0.0}
+        )
+        assert order is not None
+
+    @pytest.mark.asyncio
+    async def test_an_opposing_position_does_not_block_the_entry(self, worker_run) -> None:
+        """A BUY against a short reduces exposure; blocking it would trap the
+        position behind the guard that exists to limit it."""
+        order = await worker_run(
+            action=CandidateAction.BUY, positions={"paper": -7.0, "live": 0.0}
+        )
+        assert order is not None
+        assert order.side == "BUY"
+
+    @pytest.mark.asyncio
+    async def test_a_position_in_either_environment_counts(self, worker_run) -> None:
+        order = await worker_run(
+            action=CandidateAction.BUY, positions={"paper": 0.0, "live": 3.0}
+        )
+        assert order is None
+
+    @pytest.mark.asyncio
+    async def test_an_unknowable_position_blocks_the_entry_and_says_so(
+        self, worker_run
+    ) -> None:
+        """Unknowable is not flat — and per the silent-rejection lesson from
+        the same run, the refusal must be visible in the cycle result."""
+        order = await worker_run(action=CandidateAction.BUY, positions=None)
+        assert order is None
+        assert any("position unknowable" in e for e in worker_run.result.errors)

@@ -286,6 +286,38 @@ class TradeWorker:
         it decides which roster row gates it and which broker route
         execution-service resolves, so it is threaded explicitly rather than
         defaulted."""
+        # 1. Position awareness. An entry signal is a view on direction, not an
+        # instruction to add: the rule re-signals every cycle for as long as
+        # the conditions hold, and without this check every cycle re-entered —
+        # the first live paper run stacked one sleeve's short 6 → 12 → 19
+        # shares in three cycles. A sleeve already positioned in the signal's
+        # direction submits nothing; an unknowable position submits nothing
+        # either, because unknowable is not flat. Exits are unaffected: they
+        # do not pass through this method, and execution-service exempts
+        # reduce-only orders from its own cap.
+        held = await self._get_sleeve_position(symbol, strategy_id)
+        if held is None:
+            logger.warning(
+                "Position for %s/%s unknowable — entry not submitted", strategy_id, symbol
+            )
+            result.errors.append(
+                f"{symbol}: position unknowable, entry not submitted ({strategy_id})"
+            )
+            return
+        action = str(
+            getattr(signal.candidate_action, "value", signal.candidate_action)
+        ).upper()
+        if any(
+            (net > 0 and action == "BUY") or (net < 0 and action == "SELL")
+            for net in held.values()
+        ):
+            logger.info(
+                "Already positioned in %s for %s (%s) — an entry signal is not "
+                "an instruction to add",
+                symbol, strategy_id, held,
+            )
+            return
+
         # 2. Get account buying power (best-effort)
         buying_power = await self._get_buying_power()
 
@@ -492,6 +524,30 @@ class TradeWorker:
             await self._persist_signal(exit_signal)
             emitted += 1
         return emitted
+
+    async def _get_sleeve_position(self, symbol: str, strategy_id: str) -> dict[str, float] | None:
+        """Net quantity this sleeve holds, per environment, or None if unknowable.
+
+        Asked of execution-service, which answers from its own fill journal —
+        the same record its position cap enforces against — rather than from
+        anything this worker asserts about itself. None on any failure: the
+        caller must fail closed on it, not treat it as flat.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{settings.execution_service_url}/v1/positions/exposure",
+                    params={"symbol": symbol, "strategy_id": strategy_id},
+                )
+            if resp.status_code != 200:
+                return None
+            data = resp.json().get("net_by_environment")
+            if not isinstance(data, dict):
+                return None
+            return {str(env): float(net) for env, net in data.items()}
+        except Exception as exc:
+            logger.debug("Sleeve position lookup failed for %s/%s: %s", strategy_id, symbol, exc)
+            return None
 
     async def _get_open_positions(self) -> list[dict[str, object]]:
         try:

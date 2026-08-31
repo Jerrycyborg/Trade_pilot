@@ -617,6 +617,49 @@ class Journal:
             "last_at": max(stamps).isoformat(),
         }
 
+    def net_position(
+        self,
+        *,
+        strategy_id: str,
+        symbol: str,
+        environment: str,
+        account_id: str = "default",
+    ) -> float | None:
+        """Signed net filled quantity for one sleeve scope, or None if unknowable.
+
+        None is deliberately not 0.0: a journal that is disabled or unreadable
+        does not know the sleeve is flat, it knows nothing — and the caller
+        enforcing a position cap must fail closed on nothing, not treat it as
+        an empty book. Exits are never gated on this, so refusing entries here
+        cannot trap a position.
+        """
+        if not self.enabled:
+            return None
+        try:
+            with self._session_factory() as session:  # type: ignore[misc]
+                rows = session.execute(
+                    select(
+                        ExecutionQuality.side,
+                        func.coalesce(func.sum(ExecutionQuality.filled_qty), 0.0),
+                    )
+                    .where(
+                        ExecutionQuality.strategy_id == strategy_id,
+                        ExecutionQuality.symbol == symbol.upper(),
+                        ExecutionQuality.environment == environment,
+                        ExecutionQuality.account_id == account_id,
+                        ExecutionQuality.filled == 1,
+                    )
+                    .group_by(ExecutionQuality.side)
+                ).all()
+        except Exception as exc:
+            logger.warning("Net position read failed: %s", exc)
+            return None
+        net = 0.0
+        for side, qty in rows:
+            signed = float(qty or 0.0)
+            net += signed if str(side).upper() == "BUY" else -signed
+        return net
+
     def execution_rows(
         self,
         *,

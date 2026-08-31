@@ -91,6 +91,19 @@ def create_order(
         if not routed.places_order:
             return _record_unplaced(session, request, routed, idempotency_key, payload_hash)
 
+        # Position cap, enforced here and not in the caller: the strategy
+        # worker re-signals every cycle, and a persistent signal that re-enters
+        # every cycle stacks one sleeve's position without bound (the first
+        # live paper run went 6 → 12 → 19 shares short in three cycles). The
+        # worker now checks before submitting, but a control enforced only by
+        # the thing it constrains is not a control. Reduce-only orders are
+        # never refused here — risk-reducing exits stay possible.
+        refusal = _position_cap_refusal(request, routed)
+        if refusal is not None:
+            return _record_unplaced(
+                session, request, routed, idempotency_key, payload_hash, reason=refusal
+            )
+
         if routed.decision.is_live:
             # Second, independent check at the boundary. resolve_route already
             # decided this; a routing bug that got past it would place a real
@@ -174,7 +187,47 @@ def create_order(
     return response
 
 
-def _record_unplaced(session, request, routed, idempotency_key: str, payload_hash: str):
+def _position_cap_refusal(request, routed) -> str | None:
+    """Why this order may not open or extend a position, or None if it may.
+
+    The sleeve's current book is read from the journal's own fill record — the
+    same scope attribution pairs by — not from anything the caller asserts.
+    Unknowable is not flat: a journal that is disabled or unreadable refuses
+    entries rather than treating the missing book as empty. Exits are exempt
+    either way, so this can never trap a position behind its own guard.
+    """
+    if request.reduce_only:
+        return None
+    from journal import get_journal
+
+    environment = "live" if routed.decision.is_live else "paper"
+    net = get_journal().net_position(
+        strategy_id=request.strategy_id,
+        symbol=request.symbol,
+        environment=environment,
+        account_id=request.account_id,
+    )
+    if net is None:
+        return (
+            "position_unknowable: the journal cannot say what this sleeve "
+            "already holds, so an entry that could stack is refused"
+        )
+    side = str(request.side).upper()
+    signed = float(request.qty) if side == "BUY" else -float(request.qty)
+    new_net = net + signed
+    cap = float(config_settings.max_position_qty)
+    if abs(new_net) > cap and abs(new_net) > abs(net):
+        return (
+            f"position_cap: {net:+g} {signed:+g} would hold {new_net:+g} "
+            f"against a cap of {cap:g} for {request.strategy_id}/{request.symbol}"
+        )
+    return None
+
+
+def _record_unplaced(
+    session, request, routed, idempotency_key: str, payload_hash: str,
+    reason: str | None = None,
+):
     """Persist a decision that reached no broker, and say why.
 
     A shadow or blocked order is still a decision the system made. Dropping it
@@ -182,6 +235,7 @@ def _record_unplaced(session, request, routed, idempotency_key: str, payload_has
     — which is exactly the evidence its promotion is supposed to rest on — and
     would make a halt invisible after the fact.
     """
+    reason = reason or routed.decision.reason
     order = OrderRecord(
         order_id=str(uuid4()),
         signal_id=request.signal_id,
@@ -200,7 +254,7 @@ def _record_unplaced(session, request, routed, idempotency_key: str, payload_has
         # (NotNullViolation) while passing on the simulated-only routers the
         # tests used, which is how it reached CI.
         external_order_id=f"unplaced-{uuid4()}",
-        rejection_reason=f"{routed.decision.route.value}: {routed.decision.reason}",
+        rejection_reason=f"{routed.decision.route.value}: {reason}",
     )
     session.add(order)
     session.flush()
@@ -210,7 +264,7 @@ def _record_unplaced(session, request, routed, idempotency_key: str, payload_has
         event_type="order.not_placed",
         payload={
             "route": routed.decision.route.value,
-            "reason": routed.decision.reason,
+            "reason": reason,
             "strategy_id": request.strategy_id,
             "account_id": request.account_id,
             "reduce_only": request.reduce_only,
@@ -222,7 +276,7 @@ def _record_unplaced(session, request, routed, idempotency_key: str, payload_has
         order_id=order.order_id,
         signal_id=request.signal_id,
         route=routed.decision.route.value,
-        reason=routed.decision.reason,
+        reason=reason,
     )
     return _to_response(order)
 
@@ -403,6 +457,42 @@ def list_broker_positions() -> list[BrokerPosition]:
     except Exception as exc:
         logger.error("Broker position lookup failed: %s", exc)
         raise HTTPException(status_code=503, detail=f"broker_unavailable: {exc}") from exc
+
+
+@app.get("/v1/positions/exposure")
+def sleeve_exposure(
+    symbol: str, strategy_id: str, account_id: str = "default"
+) -> dict[str, object]:
+    """Net filled quantity one sleeve holds, per environment, from the journal.
+
+    The broker's /v1/positions is keyed by symbol alone and cannot say which
+    sleeve holds what. This is the per-sleeve view the position cap enforces
+    against, exposed so a caller (the strategy worker) can decline to submit
+    an entry it already knows would stack. 503 when the journal cannot answer:
+    unknowable is not flat, and a caller that treats it as flat re-creates the
+    stacking this exists to prevent.
+    """
+    from journal import get_journal
+
+    clean = sanitize_symbol(symbol)
+    journal = get_journal()
+    by_environment: dict[str, float] = {}
+    for environment in ("paper", "live"):
+        net = journal.net_position(
+            strategy_id=strategy_id,
+            symbol=clean,
+            environment=environment,
+            account_id=account_id,
+        )
+        if net is None:
+            raise HTTPException(status_code=503, detail="position_unknowable")
+        by_environment[environment] = net
+    return {
+        "symbol": clean,
+        "strategy_id": strategy_id,
+        "account_id": account_id,
+        "net_by_environment": by_environment,
+    }
 
 
 @app.get("/v1/account", response_model=AccountInfo)

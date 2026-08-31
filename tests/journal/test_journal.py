@@ -310,3 +310,55 @@ class TestExecutionQuality:
         assert archive.record_execution(
             symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
         ) == 10.0
+
+
+class TestNetPosition:
+    """The sleeve's book, as the fill record has it.
+
+    This is what the execution service's position cap enforces against, so the
+    two properties that matter are the sign convention and the None: a journal
+    that cannot answer must say so, because a cap that reads a missing book as
+    flat re-creates the unbounded stacking it exists to prevent.
+    """
+
+    def test_fills_net_signed_within_the_scope(self, archive: Journal) -> None:
+        archive.record_execution(
+            symbol="NVDA", side="SELL", qty=7,
+            decision_price=219.5, fill_price=219.46, strategy_id="ema_rsi_macd",
+        )
+        archive.record_execution(
+            symbol="NVDA", side="BUY", qty=3,
+            decision_price=219.4, fill_price=219.45, strategy_id="ema_rsi_macd",
+        )
+        assert archive.net_position(
+            strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
+        ) == -4.0
+
+    def test_a_miss_is_not_a_position(self, archive: Journal) -> None:
+        archive.record_execution(
+            symbol="NVDA", side="BUY", qty=10,
+            decision_price=219.5, fill_price=None,
+            order_type="LIMIT", limit_price=219.4, outcome="limit_not_marketable",
+            strategy_id="ema_rsi_macd",
+        )
+        assert archive.net_position(
+            strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
+        ) == 0.0
+
+    def test_another_sleeves_fills_do_not_count(self, archive: Journal) -> None:
+        archive.record_execution(
+            symbol="NVDA", side="SELL", qty=7,
+            decision_price=219.5, fill_price=219.46, strategy_id="ema_rsi_macd",
+        )
+        assert archive.net_position(
+            strategy_id="ema_rsi_macd@chal-1", symbol="NVDA", environment="paper"
+        ) == 0.0
+        assert archive.net_position(
+            strategy_id="ema_rsi_macd", symbol="NVDA", environment="live"
+        ) == 0.0
+
+    def test_a_disabled_journal_answers_none_not_flat(self, tmp_path: Path) -> None:
+        dead = Journal(path=tmp_path / "off.db", enabled=False)
+        assert dead.net_position(
+            strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
+        ) is None

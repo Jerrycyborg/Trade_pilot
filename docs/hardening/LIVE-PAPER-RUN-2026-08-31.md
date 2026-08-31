@@ -128,11 +128,14 @@ re-runs identical.
 
 ## Findings that are not yet fixes
 
-- **Position stacking**: the worker re-evaluates each cycle with no position
-  awareness, so a persistent signal re-enters every cycle (NVDA reached −12,
-  then −19, before the interval was raised). Entries need either position
-  awareness or a per-sleeve exposure cap enforced before submission — the
-  policy service's caps are per-order, not per-position.
+- **Position stacking** *(since fixed)*: the worker re-evaluates each cycle
+  with no position awareness, so a persistent signal re-enters every cycle
+  (NVDA reached −12, then −19, before the interval was raised). Fixed in two
+  layers: the worker now reads the sleeve's book from execution-service and
+  skips same-direction entries, and execution-service enforces a per-sleeve
+  position cap (`EXECUTION_MAX_POSITION_QTY`, default `EXECUTION_MAX_QTY`)
+  from its own fill journal — reduce-only orders exempt, an unknowable book
+  refusing entries rather than reading as flat.
 - **The earnings gate fails open, silently**: `earnings_calendar.py` reaches
   yfinance directly and swallows failure by design ("never blocks on error").
   Under this sandbox's egress policy that means the gate simply wasn't there,
