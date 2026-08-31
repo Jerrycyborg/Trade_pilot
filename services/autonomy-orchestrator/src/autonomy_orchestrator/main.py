@@ -1062,10 +1062,15 @@ async def _policy_evaluate(
     signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]
 ) -> dict[str, object]:
     try:
-        from strategy_service.earnings_calendar import is_earnings_blackout as _iec
+        from strategy_service.earnings_calendar import check_earnings_blackout
 
-        event_blackout = _iec(signal.symbol)
-    except Exception:
+        # The gate reports its own reachability and honours
+        # EARNINGS_GATE_FAIL_CLOSED; an unreachable calendar is logged there.
+        event_blackout = check_earnings_blackout(signal.symbol).active
+    except Exception as exc:
+        logger.warning(
+            "Earnings gate unavailable for %s (%s) — failing open", signal.symbol, exc
+        )
         event_blackout = False
 
     request = PolicyEvaluationRequest(

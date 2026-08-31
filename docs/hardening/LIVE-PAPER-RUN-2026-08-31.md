@@ -136,11 +136,17 @@ re-runs identical.
   position cap (`EXECUTION_MAX_POSITION_QTY`, default `EXECUTION_MAX_QTY`)
   from its own fill journal — reduce-only orders exempt, an unknowable book
   refusing entries rather than reading as flat.
-- **The earnings gate fails open, silently**: `earnings_calendar.py` reaches
-  yfinance directly and swallows failure by design ("never blocks on error").
-  Under this sandbox's egress policy that means the gate simply wasn't there,
-  and nothing said so. A fail-open guard should at least report that it is
-  open.
+- **The earnings gate fails open, silently** *(since fixed)*: `earnings_calendar.py`
+  reached yfinance directly and swallowed failure by design ("never blocks on
+  error") — under this sandbox's egress policy the gate simply wasn't there,
+  and nothing said so. Worse, the worker hard-coded
+  `event_blackout_active=False` into every policy request, so the policy
+  service's hard event-blackout rejection could never fire on the path that
+  was actually trading. Fixed: the check returns a verdict that distinguishes
+  "no blackout" from "could not ask", an unanswerable calendar warns at
+  WARNING (once per outage per symbol), the failure posture is explicit
+  validated configuration (`EARNINGS_GATE_FAIL_CLOSED`, default open), and
+  the worker now consults the gate instead of asserting False.
 - **The orchestrator was not exercised**: stop-loss, take-profit, PDT
   protection and scheduled reconciliation have still never run against real
   data. The flatten that closed the day was an operator action, not a

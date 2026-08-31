@@ -38,6 +38,7 @@ from market_data import (
 
 from .ai_pipeline import AISignalPipeline, _build_deterministic_signal
 from .config import settings
+from .earnings_calendar import check_earnings_blackout
 from .rule_engine import evaluate_rules
 
 logger = logging.getLogger(__name__)
@@ -504,10 +505,19 @@ class TradeWorker:
             age_seconds = 10_000
             logger.warning("No price available for %s — reporting data as stale", symbol)
 
+        # The earnings gate, consulted rather than asserted: this used to be a
+        # hard-coded False, so the policy service's event_blackout rule — a
+        # hard rejection — could never fire on the worker's path, whatever the
+        # calendar said. The check reports its own reachability and fails per
+        # EARNINGS_GATE_FAIL_CLOSED, loudly either way.
+        blackout = check_earnings_blackout(
+            symbol, blackout_days=settings.earnings_blackout_days
+        )
+
         return MarketContext(
             data_age_seconds=age_seconds,
             market_open=session.is_open,
-            event_blackout_active=False,
+            event_blackout_active=blackout.active,
             liquidity_score=0.95,
             symbol_allowed=True,
         )

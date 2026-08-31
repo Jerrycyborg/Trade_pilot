@@ -76,6 +76,12 @@ def pytest_configure(config: pytest.Config) -> None:
         "real_price_source: exercise the real RealtimePriceSource instead of the "
         "suite-wide stub (for tests of the price resolver itself)",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_earnings_calendar: exercise the real earnings-calendar lookup "
+        "instead of the suite-wide stub (for tests of the gate itself, which "
+        "patch yfinance directly)",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +107,20 @@ def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
     from lifecycle.service import reset_lifecycle_service
 
     reset_lifecycle_service(None)
+    # The earnings gate consults yfinance and caches verdicts process-wide.
+    # Every test starts with an empty cache and, unless it is a test of the
+    # gate itself, a stubbed calendar — a real lookup would leave the suite's
+    # outcome depending on the network and on whose earnings are this week.
+    from strategy_service.earnings_calendar import BlackoutCheck, reset_earnings_gate
+
+    reset_earnings_gate()
+    if not request.node.get_closest_marker("real_earnings_calendar"):
+        monkeypatch.setattr(
+            "strategy_service.earnings_calendar._consult_calendar",
+            lambda symbol, blackout_days, fail_closed: BlackoutCheck(
+                active=False, checked=True, reason="suite-wide offline stub"
+            ),
+        )
     if request.node.get_closest_marker("real_price_source"):
         # Tests of the resolver itself inject their own fetcher, so they never
         # reach the network either.
