@@ -72,7 +72,12 @@ def evaluate_policy(request: PolicyEvaluationRequest) -> tuple[PolicyDecision, l
     if request.market_context.data_age_seconds > settings.max_data_age_seconds:
         hard_reasons.append("stale_data")
     max_size_pct = float(config.get("max_position_size_pct", settings.max_size_pct * 100)) / 100.0
-    if request.size_pct >= max_size_pct:
+    # Strictly above, not at: the cap is inclusive. The orchestrator's ATR
+    # sizer clamps to this same configured value (min(atr_size, cap)), so
+    # with >= every clamped order — exactly the ones sized by the risk
+    # engine as intended — was refused, and the cap was unreachable by
+    # construction. Found by the first orchestrator drill.
+    if request.size_pct > max_size_pct:
         hard_reasons.append("max_size_exceeded")
     if request.market_context.liquidity_score < settings.min_liquidity_score:
         hard_reasons.append("liquidity_too_low")

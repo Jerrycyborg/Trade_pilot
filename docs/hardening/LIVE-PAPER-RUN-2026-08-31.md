@@ -147,10 +147,31 @@ re-runs identical.
   WARNING (once per outage per symbol), the failure posture is explicit
   validated configuration (`EARNINGS_GATE_FAIL_CLOSED`, default open), and
   the worker now consults the gate instead of asserting False.
-- **The orchestrator was not exercised**: stop-loss, take-profit, PDT
-  protection and scheduled reconciliation have still never run against real
-  data. The flatten that closed the day was an operator action, not a
-  stop — the −$0.61 exit cost above is what an unmanaged exit looks like.
+- **The orchestrator was not exercised** *(since drilled — 8 defects found
+  and fixed)*: a controlled drill (isolated archive/broker/DB, synthetic
+  prices via the file feed, disclosed drill-local baseline) exercised the
+  entry → policy → stop-loss path end to end for the first time. It found:
+  every scheduled risk job (stop-loss, take-profit, reconciliation, health
+  sweep) dead on arrival — sync lambdas wrapping `asyncio.create_task` on an
+  AsyncIOScheduler run in a loop-less executor thread, so no risk check had
+  ever executed; an unguarded audit-logger call that wedged the orchestrator
+  as "busy" forever (and sat outside the finally that resets the flag);
+  seven more unguarded HTTP calls where one down dependency aborted the whole
+  cycle — the worst sitting between the policy verdict and the order; the
+  policy service rejecting sizes `>=` the cap that the ATR sizer clamps *to*,
+  making the cap unreachable; the singular quote endpoint pricing marketable
+  limits from a session-old close (four for four orders cancelled
+  `limit_not_marketable` on a 1.1% gap); two PaperBroker instances over one
+  state file, so reads answered from the twin that never traded; and the
+  orchestrator emitting all its operational logs below the level anything
+  printed. After the fixes, the drill ran clean: entry filled, stop
+  registered at entry − 2·ATR, reconciliation flagged a ledger break and
+  blocked entries while keeping exits, and the stop fired 37 seconds after
+  the breach quote and flattened the lot. Two findings remain open: stop
+  records are in-memory only, so positions opened before an orchestrator
+  restart are unwatched until re-registered; and the monitor and the broker
+  can price from different snapshots under lenient freshness limits (the
+  drill's stop fired on 185 while the exit filled from a cached 220).
 - **Regime classification is empty for daily-cadence runs** *(resolved)*:
   `attribute_trades.py --timeframe 1d` classifies the run's trade as
   ranging/agitated (ADX 16.2, matching the specialist report) — the plumbing

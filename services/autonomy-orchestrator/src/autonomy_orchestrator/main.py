@@ -49,6 +49,13 @@ from .risk_engine import evaluate_risk
 from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
 
+# Without this, records propagate to a handler-less root logger and fall to
+# Python's last-resort handler, which prints WARNING and above only — every
+# INFO-level operational record (stop-loss registrations, cycle notices,
+# recovery messages) silently vanished under uvicorn. The other services
+# configure this; the orchestrator, the one that most needs an audit trail
+# of what it armed and when, did not.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger(__name__)
 
 
@@ -137,40 +144,51 @@ def _start_scheduler() -> None:
         coalesce=True,
     )
 
+    # Coroutine functions handed to the scheduler directly, never wrapped in a
+    # sync lambda: AsyncIOScheduler runs a sync callable in its thread-pool
+    # executor, where asyncio.create_task has no running loop — so every tick
+    # of a lambda-wrapped job died with "no running event loop" and the job it
+    # wrapped never executed once. The first orchestrator drill found all four
+    # risk jobs below dead this way, stop-loss included, while the trading
+    # cycle above (a real coroutine job) ran fine.
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_stop_loss_check()),
+        _run_stop_loss_check,
         "interval",
         seconds=_risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES"),
         id="stop_loss_check",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_reconciliation()),
+        _run_reconciliation,
         "interval",
         seconds=int(os.getenv("RECONCILE_INTERVAL_SECONDS", "300")),
         id="position_reconciliation",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_take_profit_check()),
+        _run_take_profit_check,
         "interval",
         seconds=_risk_check_interval_seconds("TAKE_PROFIT_CHECK_INTERVAL_MINUTES"),
         id="take_profit_check",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     # Demotion triggers and journal completeness. Scheduled rather than left to
     # an operator calling an endpoint: a safety control that only runs when
     # somebody remembers is not a safety control.
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_health_sweep()),
+        _run_health_sweep,
         "interval",
         seconds=int(os.getenv("HEALTH_SWEEP_INTERVAL_SECONDS", "900")),
         id="lifecycle_health_sweep",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     try:
         asyncio.get_running_loop()
@@ -721,9 +739,12 @@ async def run_cycle() -> dict[str, object]:
         "executed": 0,
         "signals": 0,
     }
-    weekly_spend = await _weekly_spend_safe()
-    state.weekly_notional_used = weekly_spend
     try:
+        # Inside the try, not before it: everything between `state.running =
+        # True` and this block runs outside the finally that resets the flag,
+        # so any exception there wedges every future cycle as "busy".
+        weekly_spend = await _weekly_spend_safe()
+        state.weekly_notional_used = weekly_spend
         if not state.allowlist_validation_ran:
             validation = await _validate_allowlist_symbols()
             state.allowlist_validation_ran = True
@@ -1000,13 +1021,20 @@ async def run_cycle() -> dict[str, object]:
 
 
 async def _pending_signals() -> list[SignalCandidate]:
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            f"{settings.strategy_service_url}/v1/signals",
-            params={"limit": 50, "acted_on": "false"},
-            headers=_internal_headers(),
-        )
-        response.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{settings.strategy_service_url}/v1/signals",
+                params={"limit": 50, "acted_on": "false"},
+                headers=_internal_headers(),
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        # A signal source that is down means no entries this cycle — it must
+        # not also mean no exit processing, which runs later in the same
+        # cycle and used to be skipped when this raised.
+        logger.error("Strategy service unreachable for pending signals: %s", exc)
+        return []
     signals: list[SignalCandidate] = []
     for item in response.json():
         try:
@@ -1019,13 +1047,17 @@ async def _pending_signals() -> list[SignalCandidate]:
 
 
 async def _pending_exit_signals() -> list[SignalCandidate]:
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            f"{settings.strategy_service_url}/v1/signals",
-            params={"limit": 50, "acted_on": "false", "candidate_action": "EXIT"},
-            headers=_internal_headers(),
-        )
-        response.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{settings.strategy_service_url}/v1/signals",
+                params={"limit": 50, "acted_on": "false", "candidate_action": "EXIT"},
+                headers=_internal_headers(),
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        logger.error("Strategy service unreachable for exit signals: %s", exc)
+        return []
     signals: list[SignalCandidate] = []
     for item in response.json():
         try:
@@ -1038,19 +1070,27 @@ async def _pending_exit_signals() -> list[SignalCandidate]:
 
 
 async def _portfolio_state() -> dict[str, object]:
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        positions_resp = await client.get(
-            f"{settings.portfolio_service_url}/v1/portfolio/positions",
-            headers=_internal_headers(),
-        )
-        account_resp = await client.get(
-            f"{settings.execution_service_url}/v1/account",
-            headers=_internal_headers(),
-        )
-    positions = positions_resp.json() if positions_resp.status_code == 200 else []
-    account = (
-        account_resp.json() if account_resp.status_code == 200 else {"buying_power": 100_000.0}
-    )
+    positions: list = []
+    account: dict = {"buying_power": 100_000.0}
+    # Unreachable falls back exactly as a non-200 does. When the execution
+    # service itself is down, the defaulted buying power cannot buy anything
+    # anyway — order submission fails closed against the same dead service.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            positions_resp = await client.get(
+                f"{settings.portfolio_service_url}/v1/portfolio/positions",
+                headers=_internal_headers(),
+            )
+            account_resp = await client.get(
+                f"{settings.execution_service_url}/v1/account",
+                headers=_internal_headers(),
+            )
+        if positions_resp.status_code == 200:
+            positions = positions_resp.json()
+        if account_resp.status_code == 200:
+            account = account_resp.json()
+    except Exception as exc:
+        logger.error("Portfolio state unreachable: %s", exc)
     return {
         "positions": positions,
         "buying_power": float(account.get("buying_power", 100_000.0)),
@@ -1168,27 +1208,36 @@ async def _submit_order(
     take_profit_pct = float(config.get("take_profit_pct", 0.06))
     stop_loss_rate = current_price * (1 - stop_loss_pct) if current_price is not None else None
     take_profit_rate = current_price * (1 + take_profit_pct) if current_price is not None else None
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(
-            f"{settings.execution_service_url}/v1/orders",
-            json={
-                "signal_id": signal.signal_id,
-                "symbol": signal.symbol,
-                "side": signal.candidate_action,
-                "qty": qty,
-                "order_type": order_type,
-                "time_in_force": time_in_force,
-                "limit_price": limit_price,
-                "decision_price": current_price,
-                "stop_loss_rate": stop_loss_rate,
-                "take_profit_rate": take_profit_rate,
-            },
-            headers={
-                "Idempotency-Key": f"orchestrator-{signal.signal_id}",
-                **_internal_headers(),
-            },
-        )
-        response.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{settings.execution_service_url}/v1/orders",
+                json={
+                    "signal_id": signal.signal_id,
+                    "symbol": signal.symbol,
+                    "side": signal.candidate_action,
+                    "qty": qty,
+                    "order_type": order_type,
+                    "time_in_force": time_in_force,
+                    "limit_price": limit_price,
+                    "decision_price": current_price,
+                    "stop_loss_rate": stop_loss_rate,
+                    "take_profit_rate": take_profit_rate,
+                },
+                headers={
+                    "Idempotency-Key": f"orchestrator-{signal.signal_id}",
+                    **_internal_headers(),
+                },
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        # The caller already has a path for a broker that says no; a broker
+        # that cannot be reached takes the same one. Raising here killed the
+        # rest of the cycle — the remaining signals and the exit pass. The
+        # idempotency key is derived from the signal id, so a retry on a
+        # later cycle replays rather than double-fills.
+        logger.error("Execution service unreachable for %s: %s", signal.symbol, exc)
+        return {"status": "REJECTED", "rejection_reason": f"execution_unreachable: {exc}"}
     body = response.json()
     body["amount_usd"] = amount_usd
     body["entry_price"] = current_price
@@ -1545,12 +1594,20 @@ async def _notify(signal: SignalCandidate, risk, policy: dict[str, object]) -> N
         reason="; ".join(policy.get("reasons", []) or [risk.reason]),
         signal_id=signal.signal_id,
     )
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(
-            f"{settings.notification_service_url}/v1/notify",
-            json=event.model_dump(mode="json"),
-            headers=_internal_headers(),
-        )
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.notification_service_url}/v1/notify",
+                json=event.model_dump(mode="json"),
+                headers=_internal_headers(),
+            )
+    except Exception as exc:
+        # A notification is telemetry about a decision, not part of it. This
+        # call sits between the policy verdict and the order placement, and
+        # unguarded it turned a down notification service into "no trades and
+        # no stop registration for any tier>=1 signal" — the drill's approved
+        # entry aborted here before it reached the broker.
+        logger.error("Notification service unreachable: %s — decision proceeds", exc)
 
 
 async def _notify_smart(event_type: str, message: str, tier: int = 1) -> None:
@@ -1699,24 +1756,40 @@ async def _process_approvals() -> None:
 
 
 async def _mark_signal_acted(signal_id: str) -> None:
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(
-            f"{settings.strategy_service_url}/v1/signals/{signal_id}/act",
-            headers=_internal_headers(),
-        )
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.strategy_service_url}/v1/signals/{signal_id}/act",
+                headers=_internal_headers(),
+            )
+    except Exception as exc:
+        # The signal stays pending and is retried next cycle; the
+        # signal-derived idempotency key at execution makes that retry a
+        # replay, not a second fill. Raising here aborted the cycle after
+        # the trade had already been placed.
+        logger.error("Could not mark signal %s acted: %s", signal_id, exc)
 
 
 async def _weekly_spend() -> float:
     since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            f"{settings.audit_logger_url}/v1/audit/logs",
-            params={"event_type": "trade.executed", "since": since, "limit": 1000},
-            headers=_internal_headers(),
-        )
-        if response.status_code != 200:
-            return 0.0
-        rows = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{settings.audit_logger_url}/v1/audit/logs",
+                params={"event_type": "trade.executed", "since": since, "limit": 1000},
+                headers=_internal_headers(),
+            )
+            if response.status_code != 200:
+                return 0.0
+            rows = response.json()
+    except Exception as exc:
+        # A non-200 already fell back to 0.0; an unreachable audit logger must
+        # not be harder failure than a broken one. This call used to raise —
+        # and, sitting between `state.running = True` and the cycle's try
+        # block, one refused connection wedged the orchestrator as "busy"
+        # until restart. _weekly_spend_safe then prefers the cached figure.
+        logger.error("Audit logger unreachable for weekly spend: %s", exc)
+        return 0.0
     return round(sum(float(row.get("metadata", {}).get("amount_usd", 0.0)) for row in rows), 2)
 
 
@@ -1756,16 +1829,22 @@ async def _process_exit_signals() -> int:
         position_id = str(
             position.get("position_id") or position.get("positionId") or signal.symbol
         )
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{settings.execution_service_url}/v1/orders/close",
-                json={
-                    "symbol": signal.symbol,
-                    "position_id": position_id,
-                    "signal_id": signal.signal_id,
-                },
-                headers=_internal_headers(),
-            )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{settings.execution_service_url}/v1/orders/close",
+                    json={
+                        "symbol": signal.symbol,
+                        "position_id": position_id,
+                        "signal_id": signal.signal_id,
+                    },
+                    headers=_internal_headers(),
+                )
+        except Exception as exc:
+            # One exit that cannot reach the broker must not abandon the
+            # remaining exits in the same pass.
+            logger.error("Exit close unreachable for %s: %s", signal.symbol, exc)
+            continue
         if response.status_code not in (200, 201):
             continue
         closed += 1
@@ -1785,14 +1864,20 @@ async def _process_exit_signals() -> int:
 
 
 async def _portfolio_positions() -> list[dict[str, object]]:
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.get(
-            f"{settings.portfolio_service_url}/v1/portfolio/positions",
-            headers=_internal_headers(),
-        )
-        if response.status_code != 200:
-            return []
-        return response.json()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{settings.portfolio_service_url}/v1/portfolio/positions",
+                headers=_internal_headers(),
+            )
+            if response.status_code != 200:
+                return []
+            return response.json()
+    except Exception as exc:
+        # A non-200 already read as "no positions to exit"; an unreachable
+        # portfolio service must not be a harder failure than a broken one.
+        logger.error("Portfolio service unreachable for positions: %s", exc)
+        return []
 
 
 async def _get_quote_price(symbol: str) -> float | None:

@@ -212,8 +212,17 @@ class BrokerRouter:
         return RoutedOrder(decision, None, "none")
 
 
-def build_router(max_qty: int = 1000) -> BrokerRouter:
-    """The process-wide router, wired to the shared authority when configured."""
+def build_router(max_qty: int = 1000, simulated: object | None = None) -> BrokerRouter:
+    """The process-wide router, wired to the shared authority when configured.
+
+    `simulated` is the service's own paper adapter, when it has one. Without
+    it the router built a second PaperBroker over the same state file, so the
+    process traded on one in-memory book while every read endpoint —
+    /v1/positions, /v1/account, and the reconciler's broker-side view —
+    answered from the other, loaded once at startup and never again. The
+    first orchestrator drill placed a fill the position endpoint could not
+    see. One process, one paper book.
+    """
     url = os.getenv("LIFECYCLE_DATABASE_URL", "").strip()
     if not url:
         logger.warning(
@@ -221,13 +230,15 @@ def build_router(max_qty: int = 1000) -> BrokerRouter:
             "to the paper broker. Real-money execution requires the shared "
             "lifecycle authority."
         )
-        return BrokerRouter(store=None, max_qty=max_qty)
+        return BrokerRouter(store=None, max_qty=max_qty, simulated=simulated)
 
     def _connect() -> PostgresLifecycleStore:
         return PostgresLifecycleStore(StoreSettings.from_env())
 
     try:
-        return BrokerRouter(store=_connect(), max_qty=max_qty, store_factory=_connect)
+        return BrokerRouter(
+            store=_connect(), max_qty=max_qty, store_factory=_connect, simulated=simulated
+        )
     except Exception as exc:
         # Configured but not reachable yet. Entries are blocked and exits
         # preserved until a later order succeeds in connecting.
@@ -235,4 +246,6 @@ def build_router(max_qty: int = 1000) -> BrokerRouter:
             "Lifecycle authority configured but unreachable (%s). Entries are "
             "blocked until it responds; exits remain available.", exc,
         )
-        return BrokerRouter(store=None, max_qty=max_qty, store_factory=_connect)
+        return BrokerRouter(
+            store=None, max_qty=max_qty, store_factory=_connect, simulated=simulated
+        )

@@ -140,3 +140,17 @@ def test_the_refusal_is_a_recorded_decision(main) -> None:
 
     stored = main.get_order(refused.order_id)
     assert "position_cap" in (stored.rejection_reason or "")
+
+
+def test_the_service_trades_and_reports_from_one_paper_book(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router used to build a second PaperBroker over the same state
+    file: fills landed on its in-memory book while /v1/positions and the
+    reconciler's broker-side view answered from the module's own instance,
+    loaded once at startup. The first orchestrator drill placed a fill the
+    position endpoint could not see."""
+    import execution_service.main as module
+
+    assert isinstance(module.broker, PaperBroker)
+    assert module.router._simulated is module.broker

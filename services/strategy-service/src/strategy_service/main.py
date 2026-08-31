@@ -188,16 +188,33 @@ _md_settings = MarketDataSettings()
 
 @app.get("/v1/market/quote/{symbol}")
 def get_quote(symbol: str) -> dict:
-    """Return latest price + key indicators for a symbol."""
+    """Return latest price + key indicators for a symbol.
+
+    `price` prefers the provider's live quote and only falls back to the last
+    archived close (which the indicators are always computed from). The
+    orchestrator prices its marketable limits from this field, and when it was
+    a session-old close every entry on a gap-up day cancelled as
+    limit_not_marketable — and on a gap-down day paid the whole gap. Found by
+    the first orchestrator drill: four for four orders cancelled against a
+    live price 1.1% above Friday's close.
+    """
     try:
         fetcher = get_fetcher(_md_settings)
         bars = fetcher.fetch(symbol.upper(), period_days=30)
         if not bars:
             raise HTTPException(status_code=404, detail=f"No market data for {symbol}")
         ta = build_ta_summary(symbol.upper(), bars)
+        price = ta.current_price
+        try:
+            snapshot = fetcher.latest_price(symbol.upper())
+            if snapshot is not None and snapshot.price > 0:
+                price = float(snapshot.price)
+        except Exception:
+            # A live-quote failure must not hide the archived close.
+            pass
         return {
             "symbol": ta.symbol,
-            "price": ta.current_price,
+            "price": price,
             "trend": ta.trend_direction,
             "rsi": round(ta.indicators.rsi_14, 2),
             "macd_histogram": round(ta.indicators.macd_histogram, 6),

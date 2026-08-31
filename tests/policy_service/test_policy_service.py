@@ -69,6 +69,18 @@ def test_max_size_rejection(tmp_path: Path) -> None:
     assert "max_size_exceeded" in response.reasons
 
 
+def test_a_size_exactly_at_the_cap_is_not_rejected(tmp_path: Path) -> None:
+    """The cap is inclusive. The orchestrator's ATR sizer clamps to the same
+    configured cap, so a >= comparison here refused every order the risk
+    engine sized as intended — the cap was unreachable by construction."""
+    main = _main(tmp_path)
+    from policy_service.config import merged_policy_config
+
+    cap = float(merged_policy_config().get("max_position_size_pct", 2.0)) / 100.0
+    response = main.evaluate(_request(size_pct=cap))
+    assert "max_size_exceeded" not in response.reasons
+
+
 def test_confidence_review(tmp_path: Path) -> None:
     main = _main(tmp_path)
     response = main.evaluate(_request(confidence=0.4))

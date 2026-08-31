@@ -88,3 +88,19 @@ def test_one_broken_symbol_does_not_blank_the_ticker(quotes) -> None:
     assert rows["NVDA"]["price"] == 220.74
     assert rows["BROKEN"]["price"] is None
     assert rows["MSFT"]["price"] == 513.5
+
+
+def test_the_single_quote_endpoint_prefers_the_live_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The orchestrator prices its marketable limits from this endpoint's
+    `price`. As a session-old close, every entry on a gap-up day cancelled
+    limit_not_marketable — the drill went four for four."""
+    from strategy_service.main import get_quote
+
+    stub = StubFetcher()
+    stub.bars["NVDA"] = [_bar(216.0 + i * 0.5, 30 - i) for i in range(30)]
+    monkeypatch.setattr("strategy_service.main.get_fetcher", lambda _s: stub)
+    row = get_quote("NVDA")
+    assert row["price"] == 220.74, "the live quote, not the archived close"
+    assert row["rsi"] is not None, "indicators still come from the archived bars"
