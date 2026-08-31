@@ -127,3 +127,44 @@ def test_market_orders_are_measured_too(main) -> None:
         idempotency_key=f"k-{uuid4()}",
     )
     assert main.execution_quality()["orders"] == 1
+
+
+def test_a_recorded_fill_carries_its_sleeve_scope(main, tmp_path: Path) -> None:
+    """The scoping fields are not decoration. Attribution pairs round trips
+    within (strategy, symbol, environment, account), promotion evidence is
+    derived from the same scope, and the champion/challenger comparison
+    separates its sides by strategy id. The service used to route an order *by*
+    request.strategy_id and then record the fill without it — every fill in the
+    archive was unscoped, so attribution for a named strategy found nothing and
+    a paper sleeve's evidence was written where no gate would read it. Found by
+    the first live paper run, whose first real fill came back strategy_id=''.
+    """
+    from journal import Journal, reset_journal
+
+    journal = Journal(path=tmp_path / "journal.db")
+    reset_journal(journal)
+    try:
+        main.create_order(
+            _limit(
+                200.2,
+                strategy_id="ema_rsi_macd",
+                account_id="acct-7",
+            ),
+            idempotency_key=f"k-{uuid4()}",
+        )
+        rows = journal.execution_rows(symbol="AAPL", account_id="acct-7")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["strategy_id"] == "ema_rsi_macd"
+        assert row["account_id"] == "acct-7"
+        assert row["environment"] == "paper", "the resolved route, not the request"
+        assert row["broker"] == "paper"
+        # And the attribution loader can actually find it under its scope.
+        from attribution import load_round_trips
+
+        assert load_round_trips(
+            journal, strategy_id="ema_rsi_macd", symbol="AAPL",
+            environment="paper", account_id="acct-7",
+        ) == []  # one open leg pairs to nothing, but the scope query works
+    finally:
+        reset_journal(None)

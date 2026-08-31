@@ -148,7 +148,7 @@ def create_order(
         # Measure what the order cost against the price the decision was based
         # on. This is the only honest input to a cost model; everything else is
         # an assumption. Misses are recorded too, or fill rate reads as 100%.
-        _record_execution_quality(request, order, broker_result)
+        _record_execution_quality(request, order, broker_result, routed)
 
         if broker_result.fill_price is not None and broker_result.status in (
             OrderStatus.ACCEPTED,
@@ -330,11 +330,27 @@ def list_execution_events() -> list[ExecutionEvent]:
         return [_to_event_response(event) for event in events]
 
 
-def _record_execution_quality(request, order, broker_result) -> None:
-    """Archive execution cost for this order. Never raises."""
+def _record_execution_quality(request, order, broker_result, routed) -> None:
+    """Archive execution cost for this order, scoped to the sleeve it belongs to.
+
+    Never raises. The scoping fields are not decoration: attribution pairs
+    round trips within (strategy, symbol, environment, account), promotion
+    evidence is derived from the same scope, and the champion/challenger
+    comparison separates its sides by strategy id. This function used to route
+    an order *by* request.strategy_id and then record the fill without it, so
+    every fill in the archive was unscoped — attribution for a named strategy
+    found nothing, and the evidence a paper sleeve exists to accumulate was
+    being written where no gate would ever read it. Found by the first live
+    paper run, whose first real fill came back with strategy_id="".
+
+    The environment comes from the resolved route, not from the request: the
+    router decided which kind of money this was, and the archive must say what
+    actually happened rather than what the caller intended.
+    """
     try:
         from journal import get_journal
 
+        environment = "live" if routed.decision.is_live else "paper"
         get_journal().record_execution(
             symbol=request.symbol,
             side=request.side,
@@ -349,6 +365,10 @@ def _record_execution_quality(request, order, broker_result) -> None:
                 broker_result.rejection_reason
                 or str(getattr(broker_result.status, "value", broker_result.status)).lower()
             ),
+            strategy_id=request.strategy_id,
+            account_id=request.account_id,
+            environment=environment,
+            broker=routed.adapter_name,
         )
     except Exception as exc:  # pragma: no cover - measurement is best effort
         logger.debug("Execution quality not recorded: %s", exc)
