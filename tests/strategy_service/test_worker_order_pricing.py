@@ -125,6 +125,7 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
         challengers: list | None = None,
         parameters: dict | None = None,
         bars_override: list | None = None,
+        signal_builder=None,
     ) -> ExecutionOrderRequest | None:
         captured.clear()
         if challengers is not None or parameters is not None:
@@ -140,7 +141,8 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
         )
 
         monkeypatch.setattr(
-            "strategy_service.worker._build_deterministic_signal", lambda _s: _signal(action)
+            "strategy_service.worker._build_deterministic_signal",
+            signal_builder or (lambda _s, **_kw: _signal(action)),
         )
         summary = (
             build_ta_summary("AAPL", bars, data_source="intraday") if ta is _UNSET else ta
@@ -499,3 +501,26 @@ class TestTheParameterisedRule:
         assert result.action == "HOLD"
         assert result.size_pct == 0.0
         assert "not evaluated" in result.reasoning
+
+
+class TestTheChampionSignalReadsTheMarket:
+    @pytest.mark.asyncio
+    async def test_the_deterministic_signal_gets_the_snapshot(
+        self, worker_run, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The deterministic path used to build its signal before the snapshot
+        existed, so it fell through to the no-TA fallback and traded a hash of
+        the symbol name — the rule engine was wired, tested, and never
+        consulted on the one path that runs when AI is off."""
+        received: dict = {}
+
+        def spy(symbol, ta_summary=None, sentiment_score=None, bars=None):
+            received["ta"] = ta_summary
+            received["bars"] = bars
+            return _signal(CandidateAction.BUY)
+
+        await worker_run(signal_builder=spy)
+
+        assert received["ta"] is not None, "the signal must see the TA summary"
+        assert received["bars"], "and the bars it was computed from"
+        assert received["ta"].bars_count == len(received["bars"])

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Protocol
 
 from .config import (
@@ -362,14 +365,135 @@ def _nearest_yahoo_interval(minutes: int) -> int:
     return snapped
 
 
-def get_fetcher(settings: MarketDataSettings) -> AlpacaFetcher | YahooFinanceFetcher:
+class FileDropFetcher:
+    """Serves bars and quotes from files an external feeder writes.
+
+    For environments where the process may not open a connection to a market
+    data provider at all — an egress-restricted network, an airgapped test rig,
+    a deterministic replay — but where *something* trusted can drop data into a
+    directory. The stack runs unmodified; only the transport differs.
+
+    Layout, one directory, plain JSON:
+
+        <dir>/AAPL_1d.json    {"bars": [{"timestamp", "open", "high",
+        <dir>/AAPL_15m.json     "low", "close", "volume"}, ...]}
+        <dir>/quotes.json     {"quotes": {"AAPL": {"price": 314.12,
+                                "ts": "2026-08-31T18:01:00+00:00"}}}
+
+    Fail-closed throughout. A missing or unparseable file raises
+    DataUnavailableError — the same refusal an unreachable provider produces —
+    and a quote without a timestamp is not served, because the price-age guard
+    downstream can only reject what it can date. Nothing here invents a bar,
+    interpolates a gap, or serves a default.
+    """
+
+    def __init__(self, directory: str | Path) -> None:
+        self._dir = Path(directory)
+
+    def fetch(self, symbol: str, period_days: int = 60) -> list[OHLCVBar]:
+        bars = self._read_bars(symbol, "1d")
+        cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
+        return [b for b in bars if b.timestamp >= cutoff] or bars[-period_days:]
+
+    def fetch_intraday(
+        self,
+        symbol: str,
+        period_days: int = 5,
+        timeframe_minutes: int = 15,
+    ) -> list[OHLCVBar]:
+        bars = self._read_bars(symbol, f"{timeframe_minutes}m")
+        cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
+        return [b for b in bars if b.timestamp >= cutoff]
+
+    def latest_price(self, symbol: str) -> PriceSnapshot | None:
+        """The feeder's most recent quote, dated by the feeder.
+
+        Returns None rather than raising when quotes are absent — the realtime
+        resolver then falls back to the newest bar's close, exactly as it does
+        for a provider with no trade endpoint. Age is judged downstream by
+        MAX_PRICE_AGE_SECONDS against the timestamp served here, so serving an
+        undated quote would disable that guard; it is refused instead.
+        """
+        path = self._dir / "quotes.json"
+        try:
+            payload = json.loads(path.read_text())
+            quote = payload["quotes"][symbol.upper()]
+            price = float(quote["price"])
+            stamp = datetime.fromisoformat(str(quote["ts"]))
+        except FileNotFoundError:
+            return None
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("FileDropFetcher: unusable quote for %s: %s", symbol, exc)
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if price <= 0:
+            return None
+        return PriceSnapshot(
+            symbol=symbol.upper(), price=price, timestamp=stamp, source="file_quote"
+        )
+
+    def _read_bars(self, symbol: str, timeframe: str) -> list[OHLCVBar]:
+        path = self._dir / f"{symbol.upper()}_{timeframe}.json"
+        try:
+            payload = json.loads(path.read_text())
+            rows = payload["bars"]
+        except FileNotFoundError as exc:
+            raise DataUnavailableError(
+                f"No bar file for {symbol} at {path} — the feeder has not "
+                f"written this symbol/timeframe"
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DataUnavailableError(f"Unreadable bar file {path}: {exc}") from exc
+
+        bars: list[OHLCVBar] = []
+        for row in rows:
+            try:
+                stamp = datetime.fromisoformat(str(row["timestamp"]))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                bars.append(
+                    OHLCVBar(
+                        symbol=symbol.upper(),
+                        timestamp=stamp,
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=float(row.get("volume", 0.0)),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                # One malformed row poisons the file: silently dropping it
+                # would serve a series with an invisible hole.
+                raise DataUnavailableError(f"Malformed bar in {path}: {exc}") from exc
+        if not bars:
+            raise DataUnavailableError(f"Bar file {path} is empty")
+        bars.sort(key=lambda b: b.timestamp)
+        return bars
+
+
+def get_fetcher(
+    settings: MarketDataSettings,
+) -> AlpacaFetcher | YahooFinanceFetcher | FileDropFetcher:
     """Return the appropriate fetcher based on config.
 
     Priority:
-      1. MARKET_DATA_PROVIDER=yahoo  -> always use Yahoo Finance
-      2. ALPACA_API_KEY + ALPACA_SECRET_KEY set -> use Alpaca
-      3. fallback -> Yahoo Finance (no API key required)
+      1. MARKET_DATA_PROVIDER=file   -> serve from MARKET_DATA_FILE_DIR
+      2. MARKET_DATA_PROVIDER=yahoo  -> always use Yahoo Finance
+      3. ALPACA_API_KEY + ALPACA_SECRET_KEY set -> use Alpaca
+      4. fallback -> Yahoo Finance (no API key required)
     """
+    if os.getenv("MARKET_DATA_PROVIDER", "").lower() == "file":
+        directory = os.getenv("MARKET_DATA_FILE_DIR", "").strip()
+        if not directory:
+            # Refused rather than defaulted: a file provider pointed at an
+            # accidental directory serves nothing and looks like an outage.
+            raise DataUnavailableError(
+                "MARKET_DATA_PROVIDER=file requires MARKET_DATA_FILE_DIR"
+            )
+        logger.info("Market data: file drop at %s", directory)
+        return FileDropFetcher(directory)
     if settings.has_alpaca_credentials:
         logger.info("Market data: Alpaca")
         return AlpacaFetcher(settings)

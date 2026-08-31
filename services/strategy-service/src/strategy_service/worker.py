@@ -138,14 +138,18 @@ class TradeWorker:
             logger.debug("Research cache warm failed (non-fatal): %s", exc)
 
     async def _process_symbol(self, symbol: str, result: WorkerRunResult) -> None:
-        # 1. Generate signal
+        # 1. The market snapshot first, then the signal. The deterministic path
+        # used to be called before the snapshot existed, so it fell through to
+        # its no-TA fallback and traded a hash of the symbol name — the rule
+        # engine was wired, tested, and never consulted on this path. The AI
+        # pipeline resolves its own inputs and is unchanged.
+        ta, bars = self._get_market_snapshot(symbol)
         if settings.use_ai:
             pipeline = AISignalPipeline()
             signal = await pipeline.generate(symbol)
         else:
-            signal = _build_deterministic_signal(symbol)
+            signal = _build_deterministic_signal(symbol, ta_summary=ta, bars=bars)
 
-        ta, bars = self._get_market_snapshot(symbol)
         self._apply_entry_gates(signal, ta, bars)
 
         result.signals_generated += 1
