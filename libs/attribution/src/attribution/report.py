@@ -152,3 +152,72 @@ def _totals(attributions: list[Attribution]) -> dict[str, Any]:
         "identity": round(signal + entry + exit_, 4),
         "identity_matches_realized": abs((signal + entry + exit_) - realized) < 1e-4,
     }
+
+
+def realized_series(round_trips: list[RoundTrip]) -> list[float]:
+    """Per-trade realised results, oldest first.
+
+    The input to any performance figure computed from actual trading rather
+    than from an equity curve. Trades without usable fills are skipped rather
+    than counted as zero: a trade whose price was never recorded is not a
+    flat trade.
+    """
+    series = []
+    for trip in sorted(round_trips, key=lambda t: t.exit.at):
+        realized = trip.realized
+        if realized is not None:
+            series.append(realized)
+    return series
+
+
+def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
+    """Sharpe and drawdown from realised round trips.
+
+    Per-trade rather than per-bar, and deliberately so: a live sleeve's health
+    is about the trades it took, and a bar-level curve would need a mark-to-
+    market the journal does not hold. The Sharpe here is therefore a per-trade
+    ratio and is **not** comparable to the annualised, bar-based figure a
+    backtest reports — the health check compares it against a validated
+    out-of-sample number, so the two must be read as the same kind of thing or
+    the comparison is meaningless.
+
+    Returns None for a figure it cannot compute rather than a zero.
+    """
+    series = realized_series(round_trips)
+    result: dict[str, Any] = {
+        "trades": len(series),
+        "realized_total": round(sum(series), 4) if series else 0.0,
+        "sharpe": None,
+        "max_drawdown_pct": None,
+        "win_rate": None,
+    }
+    if len(series) < 2:
+        return result
+
+    mean = sum(series) / len(series)
+    variance = sum((value - mean) ** 2 for value in series) / len(series)
+    deviation = variance**0.5
+    if deviation > 0:
+        result["sharpe"] = round(mean / deviation, 4)
+
+    # Drawdown on the cumulative realised curve, against the running peak —
+    # the journal does not know the capital base, so a percentage of anything
+    # else would be invented.
+    equity = 0.0
+    peak = 0.0
+    worst = 0.0
+    trough = 0.0
+    for value in series:
+        equity += value
+        peak = max(peak, equity)
+        trough = min(trough, equity)
+        if peak > 0:
+            worst = max(worst, (peak - equity) / peak)
+
+    # A sleeve that never went positive has no peak to measure against, and
+    # reporting 0.0 there would read as "no drawdown" for the worst possible
+    # record. None says "not measurable"; max_loss carries the fact instead.
+    result["max_drawdown_pct"] = round(worst, 4) if peak > 0 else None
+    result["max_cumulative_loss"] = round(trough, 4)
+    result["win_rate"] = round(sum(1 for v in series if v > 0) / len(series), 4)
+    return result

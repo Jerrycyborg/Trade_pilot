@@ -223,12 +223,26 @@ nothing runs them on a timer, so "block new entries after a configured safety
 grace period" on a journal gap is enforced at promotion and not yet in the
 live loop. This is the largest remaining gap against requirement E.
 
-**Live decay metrics are thin.** The sweep demotes on drawdown and Sharpe
-decay, but `_live_metrics` currently populates only the trade count from the
-journal: live Sharpe and drawdown have to come from the portfolio's own
-accounting, which is not yet wired in. So the decay trigger is implemented and
-tested and will not fire on real data until that connection is made. The
-drawdown breach is the trigger doing real work today.
+**~~Live decay metrics are thin.~~ Closed.** `_live_metrics` now pairs realised
+round trips through `libs/attribution` and compares live performance against
+the out-of-sample figure recorded in the sleeve's own promotion snapshot —
+against what was actually claimed, rather than a number someone remembers.
+
+Wiring it exposed a hole in the triggers. Both of the original two can go quiet
+on the worst possible record: a sleeve that only ever loses never establishes a
+positive peak, so its drawdown is not measurable as a percentage, and one whose
+losses are identical has no variance and therefore no computable Sharpe. The
+first of those was reporting `0.0`, which reads as "no drawdown" for the
+clearest failure there is; it now reports `None`, and a third trigger asks the
+blunt question — losing money, over enough trades, at a low win rate —
+directly. It still waits for a sample, and a losing sleeve that wins half its
+trades is deliberately left to the other two, being a sizing or exit problem
+rather than a broken strategy.
+
+**Health thresholds are conventions.** 15% drawdown, 2.0 Sharpe decay, a 20%
+win rate, 20 trades, a 60-minute journal-gap grace. Each is defensible and none
+is derived. They are environment variables so they can be argued with, and they
+should be, against real data.
 
 **Correlation is measured on a calm sample.** Unchanged from before, and worth
 restating: correlations rise in a selloff, which is exactly when the

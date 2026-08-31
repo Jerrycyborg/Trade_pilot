@@ -733,12 +733,14 @@ name = "lifecycle"
 version = "0.1.0"
 source = { editable = "libs/lifecycle" }
 dependencies = [
+    { name = "attribution" },
     { name = "journal" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "attribution", editable = "libs/attribution" },
     { name = "journal", editable = "libs/journal" },
     { name = "pydantic", specifier = ">=2.0" },
 ]

@@ -40,6 +40,13 @@ class HealthThresholds:
     """How far live Sharpe may fall below the validated out-of-sample figure
     before the sleeve is treated as broken rather than unlucky."""
 
+    max_losing_win_rate: float = 0.2
+    """A sleeve losing money on this share of trades or fewer wins is not
+    decaying, it is broken. This exists because the other two triggers can both
+    go quiet on the worst case: a sleeve that only ever loses has no positive
+    peak to measure a drawdown against, and one whose losses are identical has
+    no variance and therefore no computable Sharpe."""
+
     journal_gap_grace_minutes: float = 60.0
     """How long a journal gap may persist before new entries stop. Long enough
     that a brief provider outage does not halt trading; short enough that
@@ -56,6 +63,7 @@ class HealthThresholds:
             journal_gap_grace_minutes=float(
                 os.getenv("JOURNAL_GAP_GRACE_MINUTES", "60")
             ),
+            max_losing_win_rate=float(os.getenv("LIFECYCLE_MAX_LOSING_WIN_RATE", "0.2")),
         )
 
 
@@ -68,6 +76,8 @@ class LiveMetrics:
     max_drawdown_pct: float | None = None
     validated_sharpe: float | None = None
     """The out-of-sample figure this sleeve was promoted on, for comparison."""
+    realized_total: float | None = None
+    win_rate: float | None = None
 
 
 @dataclass
@@ -105,6 +115,21 @@ def evaluate_health(
                 f"live Sharpe {live:.2f} is {expected - live:.2f} below the validated "
                 f"{expected:.2f} over {metrics.trades} trades"
             )
+
+    # Losing outright. Not a comparison against a validated figure and not a
+    # drawdown percentage — both of those can go quiet on the worst record
+    # there is, so this asks the blunt question directly.
+    if (
+        metrics.trades >= t.min_live_trades_before_decay_check
+        and metrics.realized_total is not None
+        and metrics.realized_total < 0
+        and metrics.win_rate is not None
+        and metrics.win_rate <= t.max_losing_win_rate
+    ):
+        reasons.append(
+            f"losing outright: {metrics.realized_total:+.2f} over {metrics.trades} "
+            f"trades at a {metrics.win_rate:.0%} win rate"
+        )
 
     if not reasons:
         return HealthCheck(healthy=True)
@@ -283,7 +308,14 @@ def _live_metrics(
     """
     metrics = LiveMetrics()
     try:
-        execution = journal.scoped_execution_metrics(
+        # Realised round trips, not raw fills: a Sharpe or a drawdown needs
+        # closed positions, and pairing them is what libs/attribution does.
+        # It never crosses environments, so a healthy paper record cannot hide
+        # a failing live one.
+        from attribution import load_round_trips, performance_from_trades
+
+        trips = load_round_trips(
+            journal,
             strategy_id=sleeve.strategy_id,
             symbol=sleeve.symbol,
             environment="live",
@@ -291,10 +323,37 @@ def _live_metrics(
             window_start=window_start,
             window_end=moment,
         )
-    except Exception:  # pragma: no cover - health must not raise
+        performance = performance_from_trades(trips)
+    except Exception as exc:  # pragma: no cover - health must not raise
+        logger.debug("Live metrics unavailable for %s: %s", sleeve.key, exc)
         return metrics
 
-    if not execution.get("available"):
-        return metrics
-    metrics.trades = int(execution.get("fills", 0) or 0)
+    metrics.trades = performance["trades"]
+    metrics.sharpe = performance["sharpe"]
+    metrics.max_drawdown_pct = performance["max_drawdown_pct"]
+    metrics.realized_total = performance["realized_total"]
+    metrics.win_rate = performance["win_rate"]
+    metrics.validated_sharpe = _validated_sharpe(service, sleeve)
     return metrics
+
+
+def _validated_sharpe(service: Any, sleeve: Any) -> float | None:
+    """The figure this sleeve was promoted on, for the decay comparison.
+
+    Read from the immutable evidence snapshot attached to its promotion, so the
+    comparison is against what was actually claimed rather than against a
+    number someone remembers.
+    """
+    try:
+        transitions = service.store.transitions(sleeve.id, limit=20)
+    except Exception:  # pragma: no cover
+        return None
+    for transition in transitions:
+        snapshot_id = transition.get("evidence_snapshot_id")
+        if transition.get("to") != "live" or not snapshot_id:
+            continue
+        snapshot = service.store.evidence(snapshot_id)
+        if not snapshot:
+            continue
+        return (snapshot.get("metrics") or {}).get("out_of_sample_sharpe")
+    return None

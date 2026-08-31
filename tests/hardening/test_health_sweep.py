@@ -293,3 +293,201 @@ class TestCompletenessIgnoresMarketHours:
             expected_interval_minutes=15,
         )
         assert result["complete"] is False
+
+
+class TestLiveMetricsComeFromRealisedTrades:
+    """The decay trigger was implemented and could not fire.
+
+    _live_metrics populated only a trade count, so live Sharpe and drawdown
+    were always None and the decay branch was unreachable on real data. It now
+    pairs realised round trips through libs/attribution — which is also what
+    keeps a healthy paper record from hiding a failing live one, since pairing
+    never crosses environments.
+    """
+
+    def _round_trip(self, journal, entry: float, exit_: float, *, environment="live"):
+        for side, price in (("BUY", entry), ("SELL", exit_)):
+            journal.record_execution(
+                symbol="AAPL", side=side, qty=10,
+                decision_price=price, fill_price=price,
+                strategy_id="ema_rsi_macd", environment=environment,
+            )
+
+    def test_sharpe_and_drawdown_are_computed(self, service, journal, store) -> None:
+        from lifecycle.health import _live_metrics
+
+        sleeve = _live_sleeve(store)
+        for entry, exit_ in ((100, 105), (105, 103), (103, 110), (110, 104)):
+            self._round_trip(journal, entry, exit_)
+
+        # A live window, not the module-level NOW: record_execution stamps
+        # recorded_at with the real clock, which is already past it.
+        now = datetime.now(timezone.utc)
+        metrics = _live_metrics(service, journal, sleeve, now - timedelta(days=1), now)
+        assert metrics.trades == 4
+        assert metrics.sharpe is not None
+        assert metrics.max_drawdown_pct is not None
+
+    def test_paper_trades_do_not_count_toward_live_health(
+        self, service, journal, store
+    ) -> None:
+        from lifecycle.health import _live_metrics
+
+        sleeve = _live_sleeve(store)
+        for _ in range(5):
+            self._round_trip(journal, 100, 120, environment="paper")
+
+        now = datetime.now(timezone.utc)
+        metrics = _live_metrics(service, journal, sleeve, now - timedelta(days=1), now)
+        assert metrics.trades == 0, "a healthy simulator must not mask a live sleeve"
+
+    def test_the_validated_figure_comes_from_the_promotion_snapshot(
+        self, service, journal, store
+    ) -> None:
+        """Compared against what was actually claimed at promotion, not a
+        number someone remembers."""
+        from lifecycle.health import _live_metrics
+
+        sleeve = store.register("ema_rsi_macd", "MSFT", strategy_version="v1")
+        sleeve = store.transition(sleeve, "paper", "setup")
+        snapshot = store.record_evidence(
+            strategy_id="ema_rsi_macd", strategy_version="v1", symbol="MSFT",
+            asset_class="equity", environment="backtest", broker="none",
+            account_id="default", portfolio_id="none",
+            window_start=NOW - timedelta(days=60), window_end=NOW,
+            metrics={"out_of_sample_sharpe": 1.75}, source_artifacts=[],
+        )
+        sleeve = store.transition(
+            sleeve, "live", "promoted", evidence_snapshot_id=snapshot
+        )
+
+        now = datetime.now(timezone.utc)
+        metrics = _live_metrics(service, journal, sleeve, now - timedelta(days=1), now)
+        assert metrics.validated_sharpe == 1.75
+
+    def test_a_decayed_live_sleeve_is_demoted_by_the_sweep(
+        self, service, journal, store
+    ) -> None:
+        """The end of the loop: promoted on a claim, measured against it, and
+        taken off live without anyone asking."""
+        sleeve = store.register("ema_rsi_macd", "DECAY", strategy_version="v1")
+        sleeve = store.transition(sleeve, "paper", "setup")
+        snapshot = store.record_evidence(
+            strategy_id="ema_rsi_macd", strategy_version="v1", symbol="DECAY",
+            asset_class="equity", environment="backtest", broker="none",
+            account_id="default", portfolio_id="none",
+            window_start=NOW - timedelta(days=60), window_end=NOW,
+            metrics={"out_of_sample_sharpe": 3.0}, source_artifacts=[],
+        )
+        store.transition(sleeve, "live", "promoted", evidence_snapshot_id=snapshot)
+
+        # Twenty-five losing trades with some spread in them: enough to clear
+        # the sample gate, and a per-trade Sharpe far below the 3.0 it was
+        # promoted on. Identical losses would have zero variance and therefore
+        # no computable Sharpe at all — which is itself worth knowing.
+        import random
+
+        random.seed(4)
+        for _ in range(25):
+            exit_price = 100.0 - abs(random.gauss(1.0, 0.4))
+            for side, price in (("BUY", 100.0), ("SELL", exit_price)):
+                journal.record_execution(
+                    symbol="DECAY", side=side, qty=10,
+                    decision_price=price, fill_price=price,
+                    strategy_id="ema_rsi_macd", environment="live",
+                )
+
+        result = run_health_sweep(service, journal, window_hours=24)
+        assert any("DECAY" in d for d in result.demoted), result.to_dict()
+        assert store.get("ema_rsi_macd", "DECAY").state == "probation"
+
+
+class TestTheWorstCaseIsNotSilent:
+    """Both of the original triggers can go quiet on the worst possible record.
+
+    A sleeve that only ever loses never establishes a positive peak, so its
+    drawdown is not measurable as a percentage — reported as None rather than
+    0.0, which would have read as "no drawdown". And a sleeve whose losses are
+    identical has zero variance, so no Sharpe is computable either. Between
+    them, the two triggers that exist to catch a failing sleeve could both stay
+    silent on the clearest failure there is.
+    """
+
+    def test_an_only_losing_record_has_no_measurable_drawdown(self) -> None:
+        from attribution.models import Leg, RoundTrip
+        from attribution.report import performance_from_trades
+
+        base = datetime(2025, 6, 1, tzinfo=timezone.utc)
+        trips = [
+            RoundTrip(
+                "s", "A", "live", "default",
+                Leg("BUY", 10, 100.0, 100.0, base + timedelta(hours=i)),
+                Leg("SELL", 10, 99.0, 99.0, base + timedelta(hours=i, minutes=30)),
+                10,
+            )
+            for i in range(25)
+        ]
+        performance = performance_from_trades(trips)
+        assert performance["max_drawdown_pct"] is None, (
+            "0.0 would read as 'no drawdown' for the worst possible record"
+        )
+        assert performance["max_cumulative_loss"] < 0, "the fact is carried here instead"
+
+    def test_identical_losses_have_no_computable_sharpe(self) -> None:
+        from attribution.models import Leg, RoundTrip
+        from attribution.report import performance_from_trades
+
+        base = datetime(2025, 6, 1, tzinfo=timezone.utc)
+        trips = [
+            RoundTrip(
+                "s", "A", "live", "default",
+                Leg("BUY", 10, 100.0, 100.0, base + timedelta(hours=i)),
+                Leg("SELL", 10, 99.0, 99.0, base + timedelta(hours=i, minutes=30)),
+                10,
+            )
+            for i in range(25)
+        ]
+        assert performance_from_trades(trips)["sharpe"] is None
+
+    def test_losing_outright_is_caught_when_the_others_cannot_be(self) -> None:
+        check = evaluate_health(
+            "live",
+            LiveMetrics(
+                trades=25, sharpe=None, max_drawdown_pct=None,
+                realized_total=-250.0, win_rate=0.0,
+            ),
+            HealthThresholds(),
+        )
+        assert check.healthy is False
+        assert "losing outright" in check.reasons[0]
+
+    def test_it_still_waits_for_a_sample(self) -> None:
+        """Four bad trades is not a broken strategy."""
+        check = evaluate_health(
+            "live",
+            LiveMetrics(trades=4, realized_total=-100.0, win_rate=0.0),
+            HealthThresholds(),
+        )
+        assert check.healthy is True
+
+    def test_a_profitable_sleeve_is_untouched(self) -> None:
+        check = evaluate_health(
+            "live",
+            LiveMetrics(
+                trades=50, sharpe=1.0, max_drawdown_pct=0.05,
+                realized_total=500.0, win_rate=0.6,
+            ),
+            HealthThresholds(),
+        )
+        assert check.healthy is True
+
+    def test_a_losing_sleeve_that_still_wins_often_is_not_caught_here(self) -> None:
+        """The trigger is for a broken sleeve, not an unprofitable week. A 50%
+        win rate losing money is a sizing or exit problem, which the decay and
+        drawdown triggers are the right instruments for."""
+        check = evaluate_health(
+            "live",
+            LiveMetrics(trades=50, realized_total=-100.0, win_rate=0.5),
+            HealthThresholds(),
+        )
+        assert check.healthy is True
