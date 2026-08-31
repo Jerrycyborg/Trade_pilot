@@ -18,19 +18,27 @@ from contracts import (
     OrderStatus,
 )
 from contracts.auth import verify_internal_key
-from contracts.sanitize import sanitize_symbol, validate_positive_amount
+from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from lifecycle.routing import assert_not_live
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .broker import broker, close_position, resolve_instrument_id
+from .broker import broker, close_position, resolve_instrument_id  # noqa: F401
+from .config import settings as config_settings
 from .database import Base, SessionLocal, engine
 from .logging_utils import log_event
-from .models import ExecutionEventRecord, FillRecord as FillRecordModel, OrderRecord
+from .models import ExecutionEventRecord, OrderRecord
+from .models import FillRecord as FillRecordModel
+from .routing import build_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# One router per process. Reads shared lifecycle state on every order; the
+# route is never cached, so a demotion takes effect on the next order.
+router = build_router(max_qty=config_settings.max_qty)
 
 
 Base.metadata.create_all(bind=engine)
@@ -68,7 +76,26 @@ def create_order(
                 raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
             return _to_response(existing)
 
-        broker_result = broker.place_order(
+        # The route is decided here, from shared lifecycle state — not by the
+        # caller, and not by whichever broker the environment happens to
+        # configure. A CANDIDATE sleeve journals a shadow decision and places
+        # nothing; a PAPER sleeve reaches the simulator and never a live venue.
+        routed = router.route(
+            strategy_id=request.strategy_id,
+            symbol=request.symbol,
+            account_id=request.account_id,
+            reduce_only=request.reduce_only,
+        )
+        if not routed.places_order:
+            return _record_unplaced(session, request, routed, idempotency_key, payload_hash)
+
+        if routed.decision.is_live:
+            # Second, independent check at the boundary. resolve_route already
+            # decided this; a routing bug that got past it would place a real
+            # order, so it takes two mistakes rather than one.
+            assert_not_live(routed.decision.route, routed.adapter_name)
+
+        broker_result = routed.adapter.place_order(
             request,
             stop_loss_rate=request.stop_loss_rate,
             take_profit_rate=request.take_profit_rate,
@@ -141,6 +168,53 @@ def create_order(
         status=response.status.value,
     )
     return response
+
+
+def _record_unplaced(session, request, routed, idempotency_key: str, payload_hash: str):
+    """Persist a decision that reached no broker, and say why.
+
+    A shadow or blocked order is still a decision the system made. Dropping it
+    would leave a CANDIDATE sleeve with no record of what it would have traded
+    — which is exactly the evidence its promotion is supposed to rest on — and
+    would make a halt invisible after the fact.
+    """
+    order = OrderRecord(
+        order_id=str(uuid4()),
+        signal_id=request.signal_id,
+        symbol=request.symbol,
+        side=request.side,
+        qty=request.qty,
+        order_type=request.order_type,
+        time_in_force=request.time_in_force,
+        idempotency_key=idempotency_key,
+        payload_hash=payload_hash,
+        status=OrderStatus.REJECTED.value,
+        external_order_id=None,
+        rejection_reason=f"{routed.decision.route.value}: {routed.decision.reason}",
+    )
+    session.add(order)
+    session.flush()
+    _persist_event(
+        session,
+        order=order,
+        event_type="order.not_placed",
+        payload={
+            "route": routed.decision.route.value,
+            "reason": routed.decision.reason,
+            "strategy_id": request.strategy_id,
+            "account_id": request.account_id,
+            "reduce_only": request.reduce_only,
+        },
+    )
+    session.commit()
+    log_event(
+        "order_not_placed",
+        order_id=order.order_id,
+        signal_id=request.signal_id,
+        route=routed.decision.route.value,
+        reason=routed.decision.reason,
+    )
+    return _to_response(order)
 
 
 @app.post("/v1/orders/close")

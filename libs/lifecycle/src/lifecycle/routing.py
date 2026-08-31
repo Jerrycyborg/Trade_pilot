@@ -58,7 +58,9 @@ class ExecutionRoute(str, Enum):
 
 #: Routes that must never touch a live venue. Asserted at the adapter boundary
 #: as well as here, so a mistake in one place does not become a real order.
-NON_LIVE_ROUTES = frozenset({ExecutionRoute.BLOCKED, ExecutionRoute.SHADOW, ExecutionRoute.SIMULATED})
+NON_LIVE_ROUTES = frozenset(
+    {ExecutionRoute.BLOCKED, ExecutionRoute.SHADOW, ExecutionRoute.SIMULATED}
+)
 
 #: Position environments a sleeve can hold inventory in.
 POSITION_NONE = "none"

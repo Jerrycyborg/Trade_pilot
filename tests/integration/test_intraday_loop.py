@@ -92,6 +92,12 @@ def _execution_client(db_path: Path, broker: PaperBroker, monkeypatch: pytest.Mo
     # monkeypatch so the module-level broker is restored: other integration
     # tests reuse this module and would otherwise inherit our price stub.
     monkeypatch.setattr(main, "broker", broker)
+    # The route is resolved server-side now, so the router is what selects the
+    # adapter. store=None gives a simulated-only router, which is what an
+    # offline integration test wants.
+    from execution_service.routing import BrokerRouter
+
+    monkeypatch.setattr(main, "router", BrokerRouter(store=None, simulated=broker))
     return TestClient(main.app)
 
 

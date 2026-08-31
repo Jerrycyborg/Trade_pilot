@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from brokers import PaperBroker
 from contracts import ExecutionOrderRequest
+from execution_service.routing import BrokerRouter
 
 
 def _setup():
@@ -21,7 +22,12 @@ def _setup():
     database.Base.metadata.create_all(bind=database.engine)
     main.engine = database.engine
     main.SessionLocal = database.SessionLocal
-    main.broker = PaperBroker()
+    # Orders now resolve their route server-side, so the router is what the
+    # test has to supply — setting main.broker alone would leave the real
+    # router in place, reading whatever lifecycle state the environment had.
+    paper = PaperBroker()
+    main.broker = paper
+    main.router = BrokerRouter(store=None, simulated=paper)
     return main
 
 
