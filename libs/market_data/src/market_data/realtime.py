@@ -128,7 +128,10 @@ class RealtimePriceSource:
         cached = self._cache.get(symbol, limit)
         if cached is not None:
             return cached
+        return self._resolve_uncached(symbol, limit)
 
+    def _resolve_uncached(self, symbol: str, limit: float) -> PriceSnapshot | None:
+        """Tiers 2 and 3: the provider, then the last bar, bounded by `limit`."""
         fetcher = self._resolve_fetcher()
         if fetcher is None:
             return None
@@ -165,6 +168,35 @@ class RealtimePriceSource:
     def get_price(self, symbol: str) -> float | None:
         snapshot = self.get_snapshot(symbol)
         return snapshot.price if snapshot else None
+
+    # A cache entry younger than this is as good as a provider round trip; it
+    # keeps a burst of same-symbol fills from hammering the provider without
+    # letting a fill price drift minutes behind the market.
+    FILL_CACHE_TOLERANCE_SECONDS = 5.0
+
+    def get_fresh_price(self, symbol: str) -> float | None:
+        """The freshest obtainable price — for fills, not displays.
+
+        get_price serves any cache entry younger than the timeframe-scaled age
+        limit, which for a daily-cadence deployment is a *day*: fine for a
+        ticker, poison for a fill simulator, where the first orchestrator
+        drill's stop fired on a live 185 and the exit then filled from a
+        two-minute-old cached 220 — a realised loss of cents on a 16% move.
+        This consults the provider unless the cache is seconds old; the
+        overall staleness limit still applies, so an unpriceable market stays
+        None and the fill is refused rather than guessed.
+        """
+        snapshot = self._snapshot_with_tolerance(symbol, self.FILL_CACHE_TOLERANCE_SECONDS)
+        return snapshot.price if snapshot else None
+
+    def _snapshot_with_tolerance(
+        self, symbol: str, cache_tolerance_seconds: float
+    ) -> PriceSnapshot | None:
+        limit = self._settings.price_age_limit_seconds
+        cached = self._cache.get(symbol, min(cache_tolerance_seconds, limit))
+        if cached is not None:
+            return cached
+        return self._resolve_uncached(symbol, limit)
 
     def age_seconds(self, symbol: str) -> float | None:
         """How old our best price for this symbol is, in seconds."""

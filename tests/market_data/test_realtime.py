@@ -244,3 +244,68 @@ class TestFreshnessAppliesToEveryTier:
 
         assert source.get_price("AAPL") is None
         assert cache.peek("AAPL") is not None
+
+
+@pytest.mark.real_price_source
+class TestFillGradeFreshness:
+    """get_fresh_price: the read a fill simulator must use.
+
+    get_price serves any cache entry younger than the timeframe-scaled age
+    limit — a day, on daily cadence. Fine for a ticker; for a fill it means
+    pricing an exit from a minutes-old snapshot while a fresher quote sits at
+    the provider. The first orchestrator drill's stop fired on a live 185 and
+    the exit then filled from a two-minute-old cached 220.
+    """
+
+    def test_a_minutes_old_cache_entry_is_not_a_fill_price(self) -> None:
+        fetcher = StubFetcher(latest=_snapshot(price=185.0))
+        cache = LivePriceCache(max_age_seconds=86400)
+        cache.record(_snapshot(price=220.0, seconds_old=120.0))
+        source = RealtimePriceSource(MarketDataSettings(), cache=cache, fetcher=fetcher)
+
+        assert source.get_price("AAPL") == 220.0, "displays may serve the cache"
+        assert source.get_fresh_price("AAPL") == 185.0, "fills must not"
+        assert fetcher.latest_calls == 1
+
+    def test_a_seconds_old_cache_entry_is_fresh_enough(self) -> None:
+        """A burst of same-symbol fills must not hammer the provider."""
+        fetcher = StubFetcher(latest=_snapshot(price=185.0))
+        cache = LivePriceCache(max_age_seconds=86400)
+        cache.record(_snapshot(price=220.0, seconds_old=1.0))
+        source = RealtimePriceSource(MarketDataSettings(), cache=cache, fetcher=fetcher)
+
+        assert source.get_fresh_price("AAPL") == 220.0
+        assert fetcher.latest_calls == 0
+
+    def test_the_staleness_limit_still_binds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fresh-preference must not turn into accepting a stale provider
+        quote: an unpriceable market stays None and the fill is refused."""
+        monkeypatch.setenv("MAX_PRICE_AGE_SECONDS", "60")
+        fetcher = StubFetcher(latest=_snapshot(price=185.0, seconds_old=3600.0))
+        source = RealtimePriceSource(
+            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
+        )
+        assert source.get_fresh_price("AAPL") is None
+
+    def test_the_paper_broker_prefers_the_fill_grade_read(self) -> None:
+        from brokers import PaperBroker
+
+        class TwoFacedSource:
+            def get_price(self, symbol):  # the display read
+                return 220.0
+
+            def get_fresh_price(self, symbol):  # the fill read
+                return 185.0
+
+        broker = PaperBroker(price_source=TwoFacedSource(), slippage_bps=0.0)
+        assert broker.mark_price("NVDA") == 185.0
+
+    def test_a_source_without_the_fill_read_still_prices(self) -> None:
+        from brokers import PaperBroker
+
+        class PlainSource:
+            def get_price(self, symbol):
+                return 200.0
+
+        broker = PaperBroker(price_source=PlainSource(), slippage_bps=0.0)
+        assert broker.mark_price("NVDA") == 200.0

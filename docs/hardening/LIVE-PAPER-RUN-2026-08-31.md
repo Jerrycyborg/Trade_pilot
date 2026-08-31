@@ -174,7 +174,11 @@ re-runs identical.
   TAKE_PROFIT_STATE_PATH — restored on startup, with a corrupt file starting
   empty and naming the orphaned symbols at ERROR)*; and the monitor and the
   broker can price from different snapshots under lenient freshness limits
-  (the drill's stop fired on 185 while the exit filled from a cached 220).
+  (the drill's stop fired on 185 while the exit filled from a cached 220)
+  *(since fixed: the paper broker's fill pricing prefers a fill-grade read —
+  `get_fresh_price` — that consults the provider unless the cache is seconds
+  old; the display path keeps its timeframe-scaled tolerance, and the
+  staleness limit still refuses an unpriceable market outright)*.
 - **Regime classification is empty for daily-cadence runs** *(resolved)*:
   `attribute_trades.py --timeframe 1d` classifies the run's trade as
   ranging/agitated (ADX 16.2, matching the specialist report) — the plumbing

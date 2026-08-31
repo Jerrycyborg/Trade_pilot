@@ -121,11 +121,22 @@ class PaperBroker:
         return self._price_source
 
     def mark_price(self, symbol: str) -> float | None:
-        """Current market price for a symbol, or None if unavailable."""
+        """Current market price for a symbol, or None if unavailable.
+
+        Fills prefer the source's fill-grade read (`get_fresh_price`) when it
+        offers one: the ordinary get_price serves cache entries up to the
+        timeframe-scaled age limit — a day, on daily cadence — and the first
+        orchestrator drill filled a stop-loss exit from a two-minute-old
+        cached price while the stop had fired on the live one. A source
+        without the method (test stubs, fixed books) is read as before.
+        """
         source = self._resolve_price_source()
         if source is None:
             return None
         try:
+            fresh = getattr(source, "get_fresh_price", None)
+            if callable(fresh):
+                return fresh(symbol)
             return source.get_price(symbol)
         except Exception as exc:
             logger.warning("PaperBroker: price lookup failed for %s: %s", symbol, exc)

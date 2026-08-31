@@ -137,6 +137,12 @@ def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
         "market_data.realtime.RealtimePriceSource.get_snapshot",
         lambda _self, symbol: source.get_snapshot(symbol),
     )
+    # The fill-grade read consults the provider ahead of the cache; offline it
+    # answers from the same stub book as the other two.
+    monkeypatch.setattr(
+        "market_data.realtime.RealtimePriceSource.get_fresh_price",
+        lambda _self, symbol: source.get_price(symbol),
+    )
     return source
 
 
