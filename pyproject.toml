@@ -10,6 +10,7 @@ dependencies = [
   "attribution",
   "lifecycle",
   "market_data",
+  "specialists",
   "brokers",
   "audit-logger",
   "autonomy-orchestrator",
@@ -39,6 +40,7 @@ members = [
   "libs/attribution",
   "libs/lifecycle",
   "libs/market_data",
+  "libs/specialists",
   "libs/brokers",
   "services/audit-logger",
   "services/autonomy-orchestrator",
@@ -59,6 +61,7 @@ journal = { workspace = true }
 attribution = { workspace = true }
 lifecycle = { workspace = true }
 market_data = { workspace = true }
+specialists = { workspace = true }
 brokers = { workspace = true }
 audit-logger = { workspace = true }
 autonomy-orchestrator = { workspace = true }

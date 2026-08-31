@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Specialist assessments from the point-in-time archive. L1 of the roadmap.
+
+Per docs/adr/0001 this phase produces **arguments, not proposals**. There is no
+recommendation in the output and nothing downstream reads it to decide
+anything: the risk veto is L2 and is built before anything can propose,
+deliberately.
+
+    uv run python scripts/specialist_report.py --symbols AAPL,MSFT
+    uv run python scripts/specialist_report.py --symbols AAPL --as-of 2026-08-20T14:00:00Z
+    uv run python scripts/specialist_report.py --symbols AAPL --json
+
+Read the roles line first. Five roles are specified in the ADR; the number that
+have a point-in-time archive to read is the finding this phase exists to
+produce, and it is currently two.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from datetime import datetime, timezone
+
+from journal import get_journal
+from specialists import build_report
+
+GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+STANCE_COLOUR = {"bull": GREEN, "bear": RED, "neutral": DIM}
+
+
+def _render(report: dict) -> None:
+    roles = report["roles"]
+    print(f"\n{'=' * 70}")
+    print("  SPECIALIST ASSESSMENTS")
+    print(f"{'=' * 70}")
+    print(f"  As of                     {report['as_of']}")
+    print(f"  Roles with an archive     {roles['with_an_archive']} of {roles['specified']}")
+
+    repro = report["reproducibility"]
+    if repro["all_reproducible"] is not None:
+        mark = f"{GREEN}yes{RESET}" if repro["all_reproducible"] else f"{RED}NO{RESET}"
+        print(f"  Reproducible              {mark}  ({repro['checked']} re-runs)")
+        if not repro["all_reproducible"]:
+            print(
+                f"  {RED}A role gave different conclusions for the same moment. Every "
+                f"historical\n  claim it made is unfalsifiable until that is fixed.{RESET}"
+            )
+
+    if roles["blocked"]:
+        print(f"\n  {YELLOW}Roles with no point-in-time archive:{RESET}")
+        for role, info in roles["blocked"].items():
+            print(f"    {role:<14} {info['reason']}")
+            print(f"    {'':<14} {DIM}needs: {info['needed']}{RESET}")
+
+    print(f"\n  {DIM}{roles['verdict']}{RESET}")
+
+    for argument in report["arguments"]:
+        print(f"\n{'-' * 70}")
+        print(f"  {argument['symbol']}")
+        print(f"{'-' * 70}")
+        if not argument["roles_reporting"]:
+            print(f"  {DIM}no role could say anything about this symbol{RESET}")
+            continue
+
+        for stance in ("bull", "bear", "neutral"):
+            for claim in argument[stance]:
+                colour = STANCE_COLOUR[stance]
+                measure = "" if claim["measure"] is None else f"{claim['measure']:>12.4f}"
+                against = (
+                    "" if claim["threshold"] is None else f" vs {claim['threshold']:g}"
+                )
+                print(f"  {colour}{stance:<8}{RESET}{claim['role']:<12}{claim['statement']}")
+                if measure:
+                    print(f"  {'':<20}{DIM}{measure.strip()}{against}{RESET}")
+                for ref in claim["evidence"]:
+                    print(f"  {'':<20}{DIM}from {ref['source']}: {ref['detail']}{RESET}")
+
+        silent = argument["roles_silent"]
+        if silent:
+            print(f"\n  {DIM}silent: {', '.join(silent)}{RESET}")
+
+    print(
+        f"\n  {DIM}These are arguments about archived data, not recommendations. "
+        f"Nothing\n  here is read by anything that places an order, and this phase "
+        f"proposes\n  no change of any kind.{RESET}\n"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--symbols", default="AAPL", help="comma-separated")
+    parser.add_argument(
+        "--as-of",
+        default=None,
+        help="ISO timestamp to reason as of; defaults to now. Reading a past "
+             "moment uses only what the archive held then.",
+    )
+    parser.add_argument("--no-reproducibility-check", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
+
+    as_of = None
+    if args.as_of:
+        as_of = datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+
+    report = build_report(
+        get_journal(),
+        [s.strip().upper() for s in args.symbols.split(",") if s.strip()],
+        as_of=as_of,
+        check_reproducibility=not args.no_reproducibility_check,
+    )
+
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        _render(report)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

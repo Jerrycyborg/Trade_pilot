@@ -1,7 +1,8 @@
 # ADR 0001 — A constrained offline improvement loop
 
-**Status:** Proposed. No learner code exists, and none should be written until
-the hardening acceptance criteria pass and have been reviewed.
+**Status:** Partially implemented. L0 (attribution) and L1 (specialist
+artifacts) are built; both are read-only and propose nothing. L2 onwards are
+not started. Each remaining phase is gated on review of the previous one.
 
 **Date:** 2026-08-31
 
@@ -156,9 +157,47 @@ Each phase gated on the previous one being reviewed.
   a condition well enough to say which regime a trade was taken in, an LLM
   narrating one is generating text, not reading data. Regime slices are the
   cheap version of that check, and they had to work first.
-- **L1 — specialist artifacts.** The typed roles, producing structured
-  assessments with provenance. Still no proposals. Purpose: establish whether
-  the arguments are reproducible from the archive.
+- **L1 — specialist artifacts. Implemented** (`libs/specialists`,
+  `scripts/specialist_report.py`). The typed roles, producing structured
+  assessments with provenance. No proposals, and no component reads the output
+  to decide anything.
+
+  Two constraints are enforced in code rather than documented. A specialist is
+  handed a `PointInTimeArchive` pinned to a moment, never the journal, and that
+  object has no method returning the corrected series — so a role cannot
+  consult one even by mistake. And a `Claim` constructed without evidence
+  raises, rather than being filtered out later by something that might not run.
+
+  **Reproducibility is measured, not asserted**, since establishing it is the
+  phase's entire purpose. Determinism is the easy half and a deterministic
+  analyser gets it free. The half that bites is point-in-time isolation: a role
+  can be perfectly deterministic and still silently improve every time the
+  archive is corrected, which makes every historical conclusion unfalsifiable,
+  because re-running it never reproduces what was originally said. A test
+  records a series, assesses at T, stores a revision that would flip the
+  classification, re-assesses at T, and requires an identical digest — with a
+  second test requiring that an assessment made *after* the revision does see
+  it, so the first cannot pass by ignoring revisions altogether.
+
+  **The finding: two of the five specified roles have an archive to read.**
+  News has no headline store with observed-at times. Sentiment is computed on
+  request into a process-local dict and never persisted, so no past score is
+  recoverable. Fundamentals has a research table, but it is a TTL cache keyed
+  by symbol — it holds the current answer rather than the sequence of answers,
+  which is the opposite of a point-in-time archive. All three are kept in the
+  roster reporting `unavailable` with the specific storage each needs, because
+  a missing role is a gap someone has to close and an absent one is a gap
+  nobody can see. None was built against its live source: an assessment "as of"
+  a past moment constructed from today's data is precisely the leakage the
+  archive exists to prevent, and it would not be visible in the output.
+
+  On a two-symbol archive the roles disagreed usefully. For a ranging symbol
+  the technical role reported a bullish average cross and positive MACD while
+  the market role reported no directional trend — "a trend-following entry here
+  is being taken in conditions it is not built for". That is the same finding
+  L0's regime slices produced from realised losses, recovered from the archive
+  *before* a trade rather than after it, which is the first evidence that these
+  arguments are worth anything.
 - **L2 — the risk veto.** Independent rejection, exercised against L1 output.
   Built before anything can propose, deliberately.
 - **L3 — bounded challengers.** Parameter and weight proposals within declared
@@ -186,7 +225,24 @@ iterations. A generator that produces hundreds of challengers makes that worse
 unless every one is counted. Every challenger evaluated must increment the
 trial count for every other, or the statistic becomes decorative.
 
-**Open question.** Whether specialist roles should be LLM-backed at all, or
-whether typed deterministic analysers would produce the same arguments more
-cheaply and reproducibly. L1 is where that gets answered, and answering it
-honestly means being willing to conclude "no".
+**Answered at L1: no, not for the roles that are buildable today.** The two
+roles with an archive — market and technical — make claims that are arithmetic
+over an archived series: an ADX reading against a threshold, an average cross,
+a histogram sign. A model restating those would add a paraphrase and remove the
+property the phase was built to establish, since the same prompt and the same
+data need not produce the same words, and a digest that changes between runs
+cannot distinguish "the market changed" from "the model did".
+
+That is not an argument that models have no place here. It is an argument that
+the place is not this one. The three blocked roles are exactly the ones whose
+input is unstructured text — headlines, filings, commentary — where a model
+would do work no threshold can. They cannot be built at all until their
+archives exist, so the question of how to make a model-backed role reproducible
+does not arise yet, and answering it early would have meant answering it
+speculatively.
+
+Two things should be settled before it does. A model-backed role needs its
+output pinned to a recorded prompt, model version and seed, or its assessments
+are not reproducible in the sense L1 established and every historical claim it
+makes is unfalsifiable. And constraint 5 still binds: whatever such a role
+emits is an argument about data, never a control input.

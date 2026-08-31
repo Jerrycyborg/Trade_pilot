@@ -845,6 +845,61 @@ class Journal:
             return {"enabled": True, "error": str(exc)}
 
 
+    def decisions_as_of(
+        self,
+        as_of: datetime,
+        *,
+        symbol: str | None = None,
+        stage: str | None = None,
+        window_start: datetime | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Decisions the system had already made by `as_of`, oldest first.
+
+        The point-in-time read of the decision log. `recent_decisions` answers
+        "what happened lately", which is the wrong question for research: a
+        specialist reasoning about a moment must not see a decision taken after
+        it. A decision row is point-in-time by construction — `inputs_json` is
+        what the system could see when it decided — so this is the one archive
+        besides bars that supports an honest as-of query.
+        """
+        if not self.enabled:
+            return []
+        cutoff = _utc(as_of)
+        try:
+            with self._session_factory() as session:  # type: ignore[misc]
+                conditions = [Decision.ts <= cutoff]
+                if symbol is not None:
+                    conditions.append(Decision.symbol == symbol.upper())
+                if stage is not None:
+                    conditions.append(Decision.stage == stage)
+                if window_start is not None:
+                    conditions.append(Decision.ts >= _utc(window_start))
+                rows = session.scalars(
+                    select(Decision)
+                    .where(*conditions)
+                    .order_by(Decision.ts)
+                    .limit(limit)
+                ).all()
+                return [
+                    {
+                        "decision_id": r.decision_id,
+                        "correlation_id": r.correlation_id,
+                        "ts": _read_utc(r.ts),
+                        "symbol": r.symbol,
+                        "stage": r.stage,
+                        "action": r.action,
+                        "outcome": r.outcome,
+                        "reason": r.reason,
+                        "inputs": json.loads(r.inputs_json or "{}"),
+                        "outputs": json.loads(r.outputs_json or "{}"),
+                    }
+                    for r in rows
+                ]
+        except Exception as exc:
+            logger.warning("Decision as-of read failed: %s", exc)
+            return []
+
     def recent_decisions(self, limit: int = 50, symbol: str | None = None) -> list[dict]:
         if not self.enabled:
             return []

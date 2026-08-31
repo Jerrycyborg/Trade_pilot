@@ -28,6 +28,7 @@ members = [
     "portfolio-service",
     "research-service",
     "sentiment-aggregator",
+    "specialists",
     "strategy-service",
     "trading-stack",
 ]
@@ -1514,6 +1515,23 @@ wheels = [
 ]
 
 [[package]]
+name = "specialists"
+version = "0.1.0"
+source = { editable = "libs/specialists" }
+dependencies = [
+    { name = "attribution" },
+    { name = "journal" },
+    { name = "market-data" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "attribution", editable = "libs/attribution" },
+    { name = "journal", editable = "libs/journal" },
+    { name = "market-data", editable = "libs/market_data" },
+]
+
+[[package]]
 name = "sqlalchemy"
 version = "2.0.48"
 source = { registry = "https://pypi.org/simple" }
@@ -1639,6 +1657,7 @@ dependencies = [
     { name = "portfolio-service" },
     { name = "research-service" },
     { name = "sentiment-aggregator" },
+    { name = "specialists" },
     { name = "strategy-service" },
 ]
 
@@ -1668,6 +1687,7 @@ requires-dist = [
     { name = "portfolio-service", editable = "services/portfolio-service" },
     { name = "research-service", editable = "services/research-service" },
     { name = "sentiment-aggregator", editable = "services/sentiment-aggregator" },
+    { name = "specialists", editable = "libs/specialists" },
     { name = "strategy-service", editable = "services/strategy-service" },
 ]
 

@@ -847,6 +847,73 @@ opinion about ADX.
   never crosses environments, so a paper entry can never be matched to a live
   exit — but it also assumes FIFO matches how you think about your lots.
 
+## Arguing About a Symbol Before Trading It
+
+```bash
+uv run python scripts/specialist_report.py --symbols AAPL,MSFT
+uv run python scripts/specialist_report.py --symbols AAPL --as-of 2026-08-20T14:00:00Z
+```
+
+L1 of [ADR 0001](docs/adr/0001-constrained-offline-adaptive-learning.md). Typed
+specialist roles read the point-in-time archive and produce structured claims —
+each with the measurement behind it, the threshold it was judged against, and a
+reference to the rows it came from. **It proposes nothing.** No component reads
+the output to decide anything; the risk veto is L2 and is deliberately built
+before anything can propose.
+
+Two constraints are enforced in code rather than written down. A specialist
+receives a `PointInTimeArchive` pinned to a moment, never the journal, and that
+object has no method returning the corrected series — so no role can consult
+one even by accident. And a `Claim` built without evidence raises at
+construction, rather than being filtered out later by something that might not
+run.
+
+### Reproducibility is measured, because it is the whole point
+
+Determinism is the easy half. The half that bites is point-in-time isolation: a
+role can be perfectly deterministic and still silently improve every time the
+archive is corrected, which makes every historical conclusion unfalsifiable —
+re-running it never reproduces what was originally said. A test records a
+series, assesses at T, stores a revision that would flip the classification,
+re-assesses at T, and requires an identical digest. A second test requires that
+an assessment made *after* the revision does see it, so the first cannot pass
+by ignoring revisions altogether.
+
+### Two of five roles have an archive to read
+
+That is the finding, not a limitation of the code:
+
+| Role | Status |
+|---|---|
+| Market | reads `bar_observations` as-of |
+| Technical | reads `bar_observations` as-of |
+| News | **blocked** — no headline store with observed-at times |
+| Sentiment | **blocked** — computed on request into a process-local dict, never persisted |
+| Fundamentals | **blocked** — research reports are a TTL cache keyed by symbol; it holds the current answer, not the sequence |
+
+The blocked three stay in the roster reporting `unavailable` with the storage
+each needs. A missing role is a gap someone has to close; an absent one is a
+gap nobody can see. None was built against its live source — an assessment "as
+of" a past moment constructed from today's data is exactly the leakage the
+archive prevents, and it would not be visible in the output.
+
+### What it produced
+
+On a ranging symbol the technical role reported a bullish average cross and
+positive MACD, while the market role reported no directional trend — *"a
+trend-following entry here is being taken in conditions it is not built for"*.
+That is the same finding the regime slices above produced from realised losses,
+recovered from the archive **before** a trade rather than after one.
+
+> **Should these roles be LLM-backed?** Answered at L1: not the two that are
+> buildable. Their claims are arithmetic over an archived series — an ADX
+> reading against a threshold, an average cross, a histogram sign — and a model
+> restating them would add a paraphrase while removing reproducibility, since a
+> digest that changes between runs cannot distinguish "the market changed" from
+> "the model did". The three *blocked* roles are the ones whose input is
+> unstructured text, where a model would do work no threshold can. That
+> question becomes live when their archives exist.
+
 ## Pattern Day Trader (PDT) Protection
 
 Intraday trading in the US runs into a rule that automated systems breach
