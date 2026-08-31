@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -8,6 +9,8 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 POSITIVE_WORDS = {"beat", "surge", "gain", "bullish", "growth", "record", "upside", "strong"}
 NEGATIVE_WORDS = {"miss", "drop", "loss", "bearish", "fraud", "weak", "downside", "lawsuit"}
@@ -113,6 +116,19 @@ async def _fetch_sentiment(symbol: str) -> SentimentScore:
     )
     _cache[symbol] = sentiment
     _cache_expiry[symbol] = now + timedelta(seconds=settings.cache_ttl_seconds)
+    # Every computed score lands in the point-in-time archive. The TTL cache
+    # above holds only the current answer — a new score overwrites it and
+    # expiry deletes it — so before this line no past sentiment could be
+    # recovered and the sentiment specialist role had nothing to read.
+    # Best-effort: an unwritable archive must not block serving the score.
+    try:
+        from journal import get_journal
+
+        get_journal().record_sentiment(
+            symbol, score=score, confidence=confidence, sources=sources
+        )
+    except Exception as exc:
+        logger.warning("Sentiment archive write failed for %s: %s", symbol, exc)
     return sentiment
 
 

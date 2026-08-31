@@ -293,9 +293,12 @@ class TestTheRosterIsHonestAboutWhatItCannotDo:
             "market", "technical", "news", "sentiment", "fundamentals",
         ]
 
-    def test_the_three_unarchived_roles_name_why_and_what_is_needed(self) -> None:
+    def test_the_unarchived_roles_name_why_and_what_is_needed(self) -> None:
+        """Sentiment left this list when the aggregator started journalling
+        every computed score; news and fundamentals still have no
+        point-in-time store to read."""
         blocked = [s for s in default_roster() if isinstance(s, UnarchivedRole)]
-        assert {s.role for s in blocked} == {"news", "sentiment", "fundamentals"}
+        assert {s.role for s in blocked} == {"news", "fundamentals"}
         for role in blocked:
             assert role.needed
 
@@ -317,8 +320,8 @@ class TestTheRosterIsHonestAboutWhatItCannotDo:
         report = build_report(journal, [SYMBOL])
 
         assert report["roles"]["specified"] == 5
-        assert report["roles"]["with_an_archive"] == 2
-        assert set(report["roles"]["blocked"]) == {"news", "sentiment", "fundamentals"}
+        assert report["roles"]["with_an_archive"] == 3
+        assert set(report["roles"]["blocked"]) == {"news", "fundamentals"}
         assert report["reproducibility"]["all_reproducible"] is True
 
 
@@ -359,3 +362,67 @@ class TestL1ProposesNothing:
             source = module.read_text()
             assert "import lifecycle" not in source
             assert "from lifecycle" not in source
+
+
+class TestTheSentimentRoleReadsTheArchive:
+    """Sentiment was an UnarchivedRole until the aggregator started
+    journalling every computed score. The properties that matter are the same
+    ones the other roles carry: claims rest on archived observations, an
+    empty archive is unavailability rather than neutrality, and a score
+    recorded after the moment in question does not exist for it."""
+
+    def _record(self, journal, scores, symbol=SYMBOL):
+        for score in scores:
+            journal.record_sentiment(symbol, score=score, confidence=0.5, sources=["t"])
+
+    def test_positive_scores_make_a_bull_claim(self, journal) -> None:
+        from specialists.roles import SentimentSpecialist
+
+        self._record(journal, [0.5, 0.4, 0.6])
+        assessment = SentimentSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert not assessment.unavailable
+        assert assessment.claims[0].stance == "bull"
+        assert assessment.claims[0].measure == pytest.approx(0.5)
+        assert assessment.claims[0].evidence
+
+    def test_negative_scores_make_a_bear_claim(self, journal) -> None:
+        from specialists.roles import SentimentSpecialist
+
+        self._record(journal, [-0.5, -0.4, -0.6])
+        assessment = SentimentSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert assessment.claims[0].stance == "bear"
+
+    def test_too_few_observations_is_unavailability_not_neutrality(
+        self, journal
+    ) -> None:
+        from specialists.roles import SentimentSpecialist
+
+        self._record(journal, [0.9])
+        assessment = SentimentSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert assessment.unavailable
+        assert not assessment.claims
+
+    def test_a_score_recorded_after_the_moment_does_not_exist_for_it(
+        self, journal
+    ) -> None:
+        """Point-in-time isolation — the property that makes historical
+        claims falsifiable at all."""
+        from specialists.roles import SentimentSpecialist
+
+        moment = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self._record(journal, [0.5, 0.4, 0.6])  # recorded now, after `moment`
+        assessment = SentimentSpecialist().assess(
+            PointInTimeArchive(journal, moment), SYMBOL
+        )
+        assert assessment.unavailable
+
+    def test_the_roster_now_supports_three_roles(self, journal) -> None:
+        report = build_report(journal, [SYMBOL], check_reproducibility=False)
+        assert report["roles"]["with_an_archive"] == 3
+        assert set(report["roles"]["blocked"]) == {"news", "fundamentals"}

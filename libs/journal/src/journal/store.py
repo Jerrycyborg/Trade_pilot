@@ -20,7 +20,7 @@ import logging
 import os
 import threading
 from collections.abc import Iterable, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -35,6 +35,7 @@ from .models import (
     Decision,
     ExecutionQuality,
     PriceObservation,
+    SentimentObservation,
 )
 
 logger = logging.getLogger(__name__)
@@ -385,6 +386,74 @@ class Journal:
                 "accepted": 1 if accepted else 0,
             },
         )
+
+    def record_sentiment(
+        self,
+        symbol: str,
+        score: float,
+        confidence: float = 0.0,
+        sources: list[str] | None = None,
+    ) -> None:
+        """Archive one computed sentiment score with its observed-at moment.
+
+        Append-only: the aggregator's TTL cache holds only the current answer,
+        which is exactly what a point-in-time read must not be built from.
+        """
+        if not self.enabled:
+            return
+        self._insert(
+            SentimentObservation,
+            {
+                "symbol": symbol.upper(),
+                "score": float(score),
+                "confidence": float(confidence),
+                "sources": ",".join(sources or [])[:256],
+                "observed_at": datetime.now(timezone.utc),
+            },
+        )
+
+    def sentiment_as_of(
+        self,
+        symbol: str,
+        as_of: datetime,
+        window_days: float = 7.0,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Sentiment observations knowable at `as_of`, oldest first.
+
+        Only observations made *by* the cutoff and inside the lookback window
+        are returned — a score computed afterwards is correctly absent rather
+        than silently improving the analysis.
+        """
+        if not self.enabled:
+            return []
+        cutoff = _utc(as_of)
+        window_start = cutoff - timedelta(days=window_days)
+        try:
+            with self._session_factory() as session:  # type: ignore[misc]
+                rows = session.scalars(
+                    select(SentimentObservation)
+                    .where(
+                        SentimentObservation.symbol == symbol.upper(),
+                        SentimentObservation.observed_at <= cutoff,
+                        SentimentObservation.observed_at >= window_start,
+                    )
+                    .order_by(SentimentObservation.observed_at)
+                    .limit(limit)
+                ).all()
+                return [
+                    {
+                        "symbol": r.symbol,
+                        "score": r.score,
+                        "confidence": r.confidence,
+                        "sources": [s for s in (r.sources or "").split(",") if s],
+                        "observed_at": _read_utc(r.observed_at),
+                    }
+                    for r in rows
+                ]
+        except Exception as exc:
+            logger.warning("Sentiment read failed: %s", exc)
+            return []
 
     def record_decision(
         self,

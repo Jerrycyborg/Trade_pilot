@@ -120,6 +120,32 @@ class PriceObservation(Base):
     """False when refused as stale. Rejections are as informative as fills."""
 
 
+class SentimentObservation(Base):
+    """One computed sentiment score, as the system held it when it was computed.
+
+    Append-only on purpose: the aggregator's TTL cache holds only the current
+    answer, so an assessment "as of" a past moment built from it would be built
+    from today's sentiment — the leakage the archive exists to prevent. Every
+    computed score lands here with its observed_at, and as-of reads see only
+    what had been observed by then.
+    """
+
+    __tablename__ = "sentiment_observations"
+    __table_args__ = (Index("ix_sentiment_symbol_observed", "symbol", "observed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    """[-1, 1], as the aggregator scored it."""
+
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    sources: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    """Comma-joined source names the score was built from."""
+
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    """When this system computed it. The as-of cutoff reads against this."""
+
+
 class ExecutionQuality(Base):
     """What one order actually cost, versus what the decision assumed.
 

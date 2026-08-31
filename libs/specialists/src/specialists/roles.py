@@ -1,14 +1,13 @@
 """The typed roles from ADR 0001, and which of them the archive can support.
 
-Five roles are specified. Two can be built today. The other three are declared
-here as unavailable, with the specific reason each is blocked, because that is
-L1's real finding and deleting them from the table would hide it:
+Five roles are specified. Three can be built today — market, technical, and
+sentiment (unblocked when the aggregator started journalling every computed
+score into an append-only archive). The remaining two are declared here as
+unavailable, with the specific reason each is blocked, because that is L1's
+real finding and deleting them from the table would hide it:
 
 - **News** has no headline archive. Nothing stores headlines with an
   observed-at time, so there is no way to ask what was known at a moment.
-- **Sentiment** is computed on request and kept in a process-local dict
-  (`sentiment_aggregator._cache`). It is never persisted, so a score cannot be
-  recovered for any past moment, including one minute ago.
 - **Fundamentals** has a research-report table, but it is a TTL cache keyed by
   symbol: a new report overwrites the old one and expiry deletes it. It records
   the current answer, not the sequence of answers, which is the opposite of a
@@ -281,6 +280,80 @@ class TechnicalSpecialist(_Base):
         )
 
 
+SENTIMENT_BULL_THRESHOLD = 0.3
+SENTIMENT_BEAR_THRESHOLD = -0.3
+SENTIMENT_MIN_OBSERVATIONS = 3
+"""One score is a mood; a claim needs a short series to rest on."""
+
+
+class SentimentSpecialist(_Base):
+    """Crowd mood from the append-only sentiment archive.
+
+    This role was an UnarchivedRole until the aggregator started journalling
+    every computed score: its TTL cache held only the current answer, so no
+    past sentiment could be recovered and an as-of read had nothing honest to
+    read. It still reports itself unavailable when the archive holds too few
+    observations by the moment in question — an empty archive is a finding,
+    not a neutral market.
+    """
+
+    role = "sentiment"
+    input_scope = ("sentiment_observations",)
+
+    def assess(self, archive: PointInTimeArchive, symbol: str) -> Assessment:
+        rows = archive.sentiment(symbol)
+        if len(rows) < SENTIMENT_MIN_OBSERVATIONS:
+            return self._blank(
+                archive,
+                symbol,
+                f"need {SENTIMENT_MIN_OBSERVATIONS} archived sentiment scores "
+                f"inside the lookback window, have {len(rows)}",
+            )
+
+        scores = [float(r["score"]) for r in rows]
+        mean = sum(scores) / len(scores)
+        latest = scores[-1]
+        evidence = (
+            EvidenceRef(
+                source="sentiment_observations",
+                detail=f"sentiment_as_of({symbol}) -> {len(rows)} scores",
+                value={"mean": round(mean, 4), "latest": round(latest, 4)},
+            ),
+        )
+        if mean >= SENTIMENT_BULL_THRESHOLD:
+            claim = Claim(
+                statement="archived sentiment runs positive across the window",
+                stance="bull",
+                measure=round(mean, 4),
+                threshold=SENTIMENT_BULL_THRESHOLD,
+                evidence=evidence,
+            )
+        elif mean <= SENTIMENT_BEAR_THRESHOLD:
+            claim = Claim(
+                statement="archived sentiment runs negative across the window",
+                stance="bear",
+                measure=round(mean, 4),
+                threshold=SENTIMENT_BEAR_THRESHOLD,
+                evidence=evidence,
+            )
+        else:
+            claim = Claim(
+                statement="archived sentiment is mixed and argues for neither side",
+                stance="neutral",
+                measure=round(mean, 4),
+                threshold=SENTIMENT_BULL_THRESHOLD,
+                evidence=evidence,
+            )
+        return Assessment(
+            role=self.role,
+            symbol=symbol,
+            as_of=archive.as_of,
+            produced_by=self.produced_by,
+            claims=[claim],
+            queries=[q.to_dict() for q in archive.queries],
+        )
+
+
 class UnarchivedRole(_Base):
     """A role ADR 0001 specifies that has no point-in-time archive to read.
 
@@ -314,12 +387,7 @@ def default_roster() -> list[Specialist]:
             "time, so there is no moment to ask about",
             needed="a headline store with observed_at, written on fetch",
         ),
-        UnarchivedRole(
-            "sentiment",
-            "sentiment is computed on request into a process-local dict and "
-            "never persisted, so no past score can be recovered",
-            needed="persist each computed score with its observed_at",
-        ),
+        SentimentSpecialist(),
         UnarchivedRole(
             "fundamentals",
             "research reports are a TTL cache keyed by symbol: a new report "

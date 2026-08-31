@@ -85,6 +85,20 @@ class PointInTimeArchive:
         )
         return rows
 
+    def sentiment(self, symbol: str) -> list[dict[str, Any]]:
+        """Sentiment scores observed by `as_of`, oldest first.
+
+        Served from the append-only sentiment archive, never from the
+        aggregator's TTL cache: the cache holds today's answer, and an
+        assessment 'as of' a past moment built from today's sentiment is the
+        leakage the archive exists to prevent.
+        """
+        return self._safe(
+            lambda: self._journal.sentiment_as_of(symbol, self._as_of),
+            f"sentiment_as_of({symbol})",
+            "sentiment_observations",
+        )
+
     def decisions(
         self, symbol: str | None = None, stage: str | None = None
     ) -> list[dict[str, Any]]:

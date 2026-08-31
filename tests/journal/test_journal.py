@@ -384,3 +384,36 @@ class TestBarTimeframes:
 
     def test_a_disabled_journal_lists_nothing(self, tmp_path: Path) -> None:
         assert Journal(path=tmp_path / "off.db", enabled=False).bar_timeframes("NVDA") == {}
+
+
+class TestSentimentArchive:
+    """Append-only sentiment: the aggregator's TTL cache holds only the
+    current answer, so this table is the only honest input for an as-of read."""
+
+    def test_scores_are_returned_oldest_first_within_the_window(
+        self, archive: Journal
+    ) -> None:
+        from datetime import datetime, timezone
+
+        archive.record_sentiment("NVDA", score=0.4, confidence=0.5, sources=["news"])
+        archive.record_sentiment("NVDA", score=-0.2, confidence=0.6, sources=["social"])
+        rows = archive.sentiment_as_of("NVDA", datetime.now(timezone.utc))
+        assert [r["score"] for r in rows] == [0.4, -0.2]
+        assert rows[0]["sources"] == ["news"]
+        assert rows[0]["observed_at"].tzinfo is not None
+
+    def test_a_later_score_is_absent_from_an_earlier_moment(
+        self, archive: Journal
+    ) -> None:
+        """The point-in-time property itself: what was knowable then, only."""
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        archive.record_sentiment("NVDA", score=0.9)
+        assert archive.sentiment_as_of("NVDA", cutoff) == []
+
+    def test_symbols_do_not_share_scores(self, archive: Journal) -> None:
+        from datetime import datetime, timezone
+
+        archive.record_sentiment("NVDA", score=0.4)
+        assert archive.sentiment_as_of("AAPL", datetime.now(timezone.utc)) == []

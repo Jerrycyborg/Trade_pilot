@@ -22,6 +22,7 @@ from .report import build_argument, build_report
 from .reproduce import ReproductionResult, assess_at, reproduce
 from .roles import (
     MarketSpecialist,
+    SentimentSpecialist,
     Specialist,
     TechnicalSpecialist,
     UnarchivedRole,
@@ -39,6 +40,7 @@ __all__ = [
     "PointInTimeArchive",
     "Query",
     "ReproductionResult",
+    "SentimentSpecialist",
     "Specialist",
     "TechnicalSpecialist",
     "UnarchivedRole",
