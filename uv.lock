@@ -338,6 +338,12 @@ wheels = [
 name = "challengers"
 version = "0.1.0"
 source = { editable = "libs/challengers" }
+dependencies = [
+    { name = "attribution" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "attribution", editable = "libs/attribution" }]
 
 [[package]]
 name = "charset-normalizer"

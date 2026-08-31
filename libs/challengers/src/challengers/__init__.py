@@ -22,6 +22,14 @@ winner against its own 81 measures a search nobody performed.
 
 from .bounds import BOUNDS_VERSION, Bound, ChallengerBounds
 from .campaign import CampaignResult, ChallengerResult, evaluate_campaign
+from .compare import (
+    Comparison,
+    Side,
+    champion_of,
+    compare,
+    derived_strategy_id,
+    is_derived,
+)
 from .generate import DEFAULT_STEPS, describe, perturbations
 from .proposal import Challenger, Clamp, UnboundedParameter, build_challenger
 
@@ -32,6 +40,12 @@ __all__ = [
     "Challenger",
     "ChallengerBounds",
     "ChallengerResult",
+    "Comparison",
+    "Side",
+    "champion_of",
+    "compare",
+    "derived_strategy_id",
+    "is_derived",
     "Clamp",
     "DEFAULT_STEPS",
     "UnboundedParameter",

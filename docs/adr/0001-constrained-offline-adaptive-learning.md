@@ -1,11 +1,12 @@
 # ADR 0001 — A constrained offline improvement loop
 
 **Status:** Partially implemented. L0 (attribution), L1 (specialist artifacts)
-L2 (the risk veto) and L3 (bounded challengers) are built. L0-L2 are
-read-only. L3 proposes, and can do nothing else: its output is a frozen object
-with no lifecycle state and no path to registration or promotion. L4
-(champion/challenger in paper) is not started. Each remaining phase is gated on
-review of the previous one.
+L2 (the risk veto), L3 (bounded challengers) and L4 (champion/challenger in
+paper) are built. L0-L2 are read-only. L3 proposes and can do nothing else. L4
+is the only phase that writes: it persists proposals and registers a challenger
+as a *paper* sleeve, which a categorical barrier prevents from ever reaching
+live without a named person adopting it. Real-money execution remains disabled
+by default and no automated component can enable it.
 
 **Date:** 2026-08-31
 
@@ -281,26 +282,64 @@ Each phase gated on the previous one being reviewed.
   implementation writes nothing at all, which is safer but means a campaign
   result is not persisted — so L4's champion/challenger comparison, which needs
   a durable record of what was proposed and when, has that to build first.
-- **L4 — champion/challenger in paper. Not started, and materially different
-  from the four before it.** Both running, both recorded, compared.
-  Human-approved promotion only.
+- **L4 — champion/challenger in paper. Implemented** (migration 0003,
+  `lifecycle.store`, `challengers.compare`). Both running, both recorded,
+  compared. Human-approved promotion only.
 
-  L0–L3 are analysis: they read the archive and, at L3, emit an inert object.
-  L4 changes what the system *runs* — two sleeves trading the same symbols in
-  paper, distinguished by strategy version — and it has to write, because a
-  comparison needs a durable record of what was proposed, when, and under which
-  bounds. Two things should be settled before any of it is built:
+  The two questions this entry previously said should be settled first were
+  settled as follows.
 
-  1. **Where a proposal is persisted.** `lifecycle.validation_artifact` already
-     exists and is additive-friendly, but a challenger is not a validation
-     result and storing it there would blur the two. A separate proposal store
-     is probably right, and it is a schema decision rather than a coding one.
-  2. **How a paper challenger is prevented from becoming a live one by
-     accident.** L3's safety rests on a challenger having nowhere to go. The
-     moment one is registered as a sleeve — even a paper one — that stops being
-     true structurally and starts depending on the lifecycle gates, which is a
-     weaker guarantee resting on code that has already been wrong twice this
-     branch.
+  **A proposal is persisted in `lifecycle.challenger_proposal`, not in
+  `validation_artifact`.** A challenger is a proposal; an artifact is a
+  measurement; promotion reads artifacts. Putting something a generator
+  produced into the table the promotion gate trusts is the one place it must
+  never appear. The table is append-only and stores both deflated figures —
+  per-run and pooled — so a reviewer months later can see they differ, and by
+  how much, without reconstructing the campaign.
+
+  **A challenger cannot reach live at all, and the barrier is categorical.**
+  `sleeve.origin` marks a roster row derived from a proposal, and
+  `store.transition(..., "live")` refuses such a sleeve regardless of evidence.
+  This was the concern this entry raised: once a proposal becomes a sleeve, its
+  safety stops being structural and starts depending on gates it is designed to
+  pass. A refusal it *cannot satisfy* restores the stronger property. The check
+  reads `origin` from the row under lock rather than from the caller's `Sleeve`,
+  because a snapshot is something an in-memory edit walks past — a test forges
+  exactly that and still gets refused. `resolve_route` refuses a live route for
+  a challenger too; the store barrier should make that unreachable, which is
+  why it is worth having on the one row where being wrong costs real money.
+  Neither check touches exits: a challenger that somehow holds a live position
+  must still be able to close it, or a safety check becomes a trapped position.
+
+  Clearing the barrier is `adopt_challenger`, which requires a **named human
+  actor** — "system", "learner", "auto" are refused — takes a reason, and is
+  recorded as a transition from the sleeve's state to itself. Nothing moved,
+  but a person accepted a sleeve the system had refused, and that belongs in
+  the same append-only record as every other decision. Adoption does not
+  promote: it only stops the refusal, and the sleeve still has to earn live
+  through the ordinary gates on its own evidence.
+
+  **One deviation from this ADR.** It says champion and challenger are
+  "distinguished by strategy version". The roster's identity constraint is
+  `UNIQUE (strategy_id, symbol, account_id)` and does not include the version,
+  so two such sleeves cannot coexist. Widening that constraint would permit two
+  roster rows for one (strategy, symbol, account) while `store.get`/`require`
+  return a single row — and the invariant that a sleeve has exactly one state
+  is what every gate rests on. So a challenger runs under a derived strategy id
+  (`champion@chal-abc123`) instead. The constraint stays intact, every existing
+  lookup keeps working, and the pairing is visible in the journal.
+
+  `compare` reports both sides over the same window from realised round trips
+  and **declares no winner** — no `winner` field, no score. Picking one from a
+  paper comparison is the step where a promotion gate gets bypassed by
+  arithmetic. It flags a thin sample, mismatched spans, and a side with no
+  trades, and it never mixes environments: live fills cannot enter a paper
+  comparison.
+
+  End to end on a demonstration archive: a challenger doubled the champion's
+  paper return over 24 trades each, was refused live anyway, resisted an
+  automated adoption attempt, and became promotable only after a named person
+  adopted it — with their name on the transition.
 
 ## Consequences
 
