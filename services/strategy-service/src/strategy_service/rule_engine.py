@@ -11,9 +11,9 @@ _SIZE_BY_RISK = {"LOW": 0.02, "MEDIUM": 0.015, "HIGH": 0.005}
 
 @dataclass
 class RuleSignal:
-    action: str          # "BUY" | "SELL" | "HOLD"
+    action: str  # "BUY" | "SELL" | "HOLD"
     confidence: float
-    risk_score: str      # "LOW" | "MEDIUM" | "HIGH"
+    risk_score: str  # "LOW" | "MEDIUM" | "HIGH"
     reasoning: str
     size_pct: float
 
@@ -51,16 +51,8 @@ def evaluate_rules(
     adx = ta.adx
 
     # --- Determine action ---
-    buy_conditions = (
-        ema_20 > ema_50
-        and 45 < rsi < 70
-        and macd_hist > 0
-    )
-    sell_conditions = (
-        ema_20 < ema_50
-        and 30 < rsi < 55
-        and macd_hist < 0
-    )
+    buy_conditions = ema_20 > ema_50 and 45 < rsi < 70 and macd_hist > 0
+    sell_conditions = ema_20 < ema_50 and 30 < rsi < 55 and macd_hist < 0
 
     if buy_conditions:
         action = "BUY"
@@ -95,11 +87,16 @@ def evaluate_rules(
     )
 
     sentiment_block_threshold = float((config or {}).get("sentiment_block_threshold", -0.3))
-    if action == "BUY" and sentiment_score is not None and sentiment_score < sentiment_block_threshold:
+    if (
+        action == "BUY"
+        and sentiment_score is not None
+        and sentiment_score < sentiment_block_threshold
+    ):
         action = "HOLD"
         reasoning = (
             reasoning
-            + f" | Sentiment gate blocked BUY (score={sentiment_score:.2f} < {sentiment_block_threshold})"
+            + f" | Sentiment gate blocked BUY (score={sentiment_score:.2f} < "
+            + f"{sentiment_block_threshold})"
         )
         confidence = min(confidence, 0.55)
 

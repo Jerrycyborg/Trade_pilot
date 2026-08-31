@@ -73,7 +73,9 @@ def create_order(
         )
         if existing:
             if existing.payload_hash != payload_hash:
-                raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                raise HTTPException(
+                status_code=409, detail="Idempotency key payload mismatch"
+            ) from None
             return _to_response(existing)
 
         # The route is decided here, from shared lifecycle state — not by the
@@ -124,7 +126,9 @@ def create_order(
             )
             if existing and existing.payload_hash == payload_hash:
                 return _to_response(existing)
-            raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+            raise HTTPException(
+                status_code=409, detail="Idempotency key payload mismatch"
+            ) from None
         _persist_event(
             session,
             order=order,
@@ -146,10 +150,10 @@ def create_order(
         # an assumption. Misses are recorded too, or fill rate reads as 100%.
         _record_execution_quality(request, order, broker_result)
 
-        if (
-            broker_result.fill_price is not None
-            and broker_result.status
-            in (OrderStatus.ACCEPTED, OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
+        if broker_result.fill_price is not None and broker_result.status in (
+            OrderStatus.ACCEPTED,
+            OrderStatus.FILLED,
+            OrderStatus.PARTIALLY_FILLED,
         ):
             fill = _persist_fill(session, order=order, fill_price=broker_result.fill_price)
             _persist_event(
@@ -218,7 +222,9 @@ def _record_unplaced(session, request, routed, idempotency_key: str, payload_has
 
 
 @app.post("/v1/orders/close")
-def close_order(request: ClosePositionRequest, _: None = Depends(verify_internal_key)) -> dict[str, object]:
+def close_order(
+    request: ClosePositionRequest, _: None = Depends(verify_internal_key)
+) -> dict[str, object]:
     request.symbol = sanitize_symbol(request.symbol)
     units = None if request.qty == 0 else request.qty
     try:
@@ -228,9 +234,9 @@ def close_order(request: ClosePositionRequest, _: None = Depends(verify_internal
             units=request.units if request.units is not None else units,
         )
     except NotImplementedError as exc:
-        raise HTTPException(status_code=501, detail=str(exc))
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if not closed:
         raise HTTPException(status_code=502, detail="position_close_failed")
@@ -280,7 +286,9 @@ def list_orders(
             statement = statement.where(OrderRecord.symbol == symbol)
         if status:
             statement = statement.where(OrderRecord.status == status.upper())
-        orders = session.scalars(statement.order_by(OrderRecord.created_at.desc()).limit(limit)).all()
+        orders = session.scalars(
+            statement.order_by(OrderRecord.created_at.desc()).limit(limit)
+        ).all()
         return [_to_response(order) for order in orders]
 
 

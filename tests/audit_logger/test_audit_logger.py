@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 def _setup(tmp_path: Path):
     db_file = tmp_path / "audit.db"
     import audit_logger.config as config

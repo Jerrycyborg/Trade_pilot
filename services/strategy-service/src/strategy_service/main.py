@@ -54,7 +54,9 @@ if settings.worker_enabled:
 @app.post("/v1/signals/generate", response_model=SignalCandidate)
 async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
     """Generate a trading signal. Uses AI pipeline when ANTHROPIC_API_KEY is set."""
-    symbols = [symbol.strip().upper() for symbol in (request.symbols or []) if symbol and symbol.strip()]
+    symbols = [
+        symbol.strip().upper() for symbol in (request.symbols or []) if symbol and symbol.strip()
+    ]
     target_symbol = symbols[0] if symbols else (request.symbol or "AAPL").strip().upper()
     should_use_ai = request.use_ai if request.use_ai is not None else settings.use_ai
 
@@ -64,7 +66,9 @@ async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
     else:
         signal = _build_deterministic_signal(target_symbol)
 
-    event_blackout = is_earnings_blackout(target_symbol, blackout_days=settings.earnings_blackout_days)
+    event_blackout = is_earnings_blackout(
+        target_symbol, blackout_days=settings.earnings_blackout_days
+    )
     if event_blackout:
         logger.info("Earnings blackout active for %s — signal suppressed to HOLD", target_symbol)
         if signal.candidate_action.value == "BUY":
@@ -111,12 +115,14 @@ def get_watchlist() -> dict:
     return {"symbols": settings.watchlist, "count": len(settings.watchlist)}
 
 
-
 @app.get("/v1/strategy/watchlist/etoro")
 async def etoro_watchlist() -> dict:
     """Fetch and return the live eToro watchlist for this account."""
-    import os, uuid
+    import os
+    import uuid
+
     import httpx
+
     api_key = os.getenv("ETORO_API_KEY", "")
     user_key = os.getenv("ETORO_USER_KEY", "")
     if not api_key or not user_key:
@@ -146,10 +152,12 @@ async def etoro_watchlist() -> dict:
     except Exception as exc:
         return {"error": str(exc), "symbols": []}
 
+
 @app.get("/v1/worker/status", response_model=WorkerStatus)
 def get_worker_status() -> WorkerStatus:
     """Return trade worker / scheduler state."""
     from .worker import worker_state
+
     return WorkerStatus(
         last_run_at=worker_state.last_run_at,
         next_run_at=worker_state.next_run_at,
@@ -163,6 +171,7 @@ def get_worker_status() -> WorkerStatus:
 async def trigger_worker_run() -> dict:
     """Manually trigger one worker cycle (useful for operator testing)."""
     from .worker import TradeWorker, worker_state
+
     if worker_state.is_running:
         return {"status": "already_running", "message": "A cycle is already in progress."}
     worker = TradeWorker()
@@ -200,7 +209,7 @@ def get_quote(symbol: str) -> dict:
             "data_source": ta.data_source,
         }
     except DataUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/v1/market/chart/{symbol}")
@@ -218,19 +227,24 @@ def get_chart(
 
         # Build EMA series for overlay
         from market_data.indicators import compute_ema
+
         closes = [b.close for b in bars]
         ema20_series: list[dict] = []
         ema50_series: list[dict] = []
         for i in range(len(bars)):
             slice_closes = closes[: i + 1]
-            ema20_series.append({
-                "time": bars[i].timestamp.strftime("%Y-%m-%d"),
-                "value": round(compute_ema(slice_closes, 20), 4),
-            })
-            ema50_series.append({
-                "time": bars[i].timestamp.strftime("%Y-%m-%d"),
-                "value": round(compute_ema(slice_closes, 50), 4),
-            })
+            ema20_series.append(
+                {
+                    "time": bars[i].timestamp.strftime("%Y-%m-%d"),
+                    "value": round(compute_ema(slice_closes, 20), 4),
+                }
+            )
+            ema50_series.append(
+                {
+                    "time": bars[i].timestamp.strftime("%Y-%m-%d"),
+                    "value": round(compute_ema(slice_closes, 50), 4),
+                }
+            )
 
         return {
             "symbol": symbol.upper(),
@@ -261,7 +275,7 @@ def get_chart(
             "data_source": ta.data_source,
         }
     except DataUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/v1/market/quotes")
@@ -277,21 +291,27 @@ def get_quotes(symbols: str = Query(description="Comma-separated symbols")) -> l
                 latest = bars[-1].close
                 prev = bars[-2].close
                 change_pct = (latest - prev) / prev * 100
-                results.append({
-                    "symbol": sym,
-                    "price": round(latest, 4),
-                    "change_pct": round(change_pct, 2),
-                    "direction": "up" if change_pct >= 0 else "down",
-                })
+                results.append(
+                    {
+                        "symbol": sym,
+                        "price": round(latest, 4),
+                        "change_pct": round(change_pct, 2),
+                        "direction": "up" if change_pct >= 0 else "down",
+                    }
+                )
             elif bars:
-                results.append({
-                    "symbol": sym,
-                    "price": round(bars[-1].close, 4),
-                    "change_pct": 0.0,
-                    "direction": "neutral",
-                })
+                results.append(
+                    {
+                        "symbol": sym,
+                        "price": round(bars[-1].close, 4),
+                        "change_pct": 0.0,
+                        "direction": "neutral",
+                    }
+                )
         except DataUnavailableError:
-            results.append({"symbol": sym, "price": None, "change_pct": None, "direction": "neutral"})
+            results.append(
+                {"symbol": sym, "price": None, "change_pct": None, "direction": "neutral"}
+            )
     return results
 
 
@@ -305,6 +325,7 @@ def get_market_events(symbol: str) -> dict:
 # Manual trade endpoint (operator-triggered single trade)
 # ---------------------------------------------------------------------------
 
+
 class ManualTradeRequest(BaseModel):
     symbol: str
     side: str  # BUY | SELL
@@ -315,8 +336,9 @@ class ManualTradeRequest(BaseModel):
 @app.post("/v1/trade/manual")
 async def manual_trade(request: ManualTradeRequest) -> dict:
     """Submit a manual trade directly through policy → execution pipeline."""
-    import httpx
     from uuid import uuid4
+
+    import httpx
 
     signal_id = f"manual-{uuid4()}"
 
@@ -382,6 +404,7 @@ async def manual_trade(request: ManualTradeRequest) -> dict:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _persist_signal(signal: SignalCandidate) -> None:
     ta_json = signal.ta_summary.model_dump_json() if signal.ta_summary else None

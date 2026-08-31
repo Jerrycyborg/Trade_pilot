@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 
-import pytest
 from contracts import (
     CandidateAction,
     ExecutionEvent,
@@ -71,7 +70,6 @@ def test_signal_candidate_ignores_extra_fields() -> None:
 
 
 def test_signal_candidate_new_risk_fields() -> None:
-    from contracts import TechnicalSummaryContract
     from datetime import datetime, timezone
 
     signal = SignalCandidate(

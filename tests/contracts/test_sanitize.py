@@ -1,9 +1,8 @@
 """Tests for input sanitisation helpers."""
 
 import pytest
-from fastapi import HTTPException
-
 from contracts.sanitize import sanitize_symbol, validate_positive_amount
+from fastapi import HTTPException
 
 
 def test_sanitize_symbol_uppercase():

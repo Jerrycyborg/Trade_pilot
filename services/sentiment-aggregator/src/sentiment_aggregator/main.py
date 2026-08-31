@@ -35,8 +35,14 @@ async def get_sentiment(symbol: str) -> SentimentScore:
 
 
 @app.get("/v1/sentiment/batch")
-async def get_batch(symbols: str = Query(description="Comma-separated symbols")) -> list[SentimentScore]:
-    return [await _fetch_sentiment(symbol.strip().upper()) for symbol in symbols.split(",") if symbol.strip()]
+async def get_batch(
+    symbols: str = Query(description="Comma-separated symbols"),
+) -> list[SentimentScore]:
+    return [
+        await _fetch_sentiment(symbol.strip().upper())
+        for symbol in symbols.split(",")
+        if symbol.strip()
+    ]
 
 
 async def _fetch_sentiment(symbol: str) -> SentimentScore:
@@ -55,7 +61,9 @@ async def _fetch_sentiment(symbol: str) -> SentimentScore:
                     headers={"x-api-key": settings.newsapi_key},
                 )
                 for item in response.json().get("articles", []):
-                    texts.append(" ".join(filter(None, [item.get("title"), item.get("description")])))
+                    texts.append(
+                        " ".join(filter(None, [item.get("title"), item.get("description")]))
+                    )
                 if response.status_code == 200:
                     sources.append("newsapi")
             except Exception:
@@ -64,7 +72,11 @@ async def _fetch_sentiment(symbol: str) -> SentimentScore:
             try:
                 response = await client.get(
                     "https://www.alphavantage.co/query",
-                    params={"function": "NEWS_SENTIMENT", "tickers": symbol, "apikey": settings.alphavantage_key},
+                    params={
+                        "function": "NEWS_SENTIMENT",
+                        "tickers": symbol,
+                        "apikey": settings.alphavantage_key,
+                    },
                 )
                 for item in response.json().get("feed", [])[:5]:
                     texts.append(" ".join(filter(None, [item.get("title"), item.get("summary")])))

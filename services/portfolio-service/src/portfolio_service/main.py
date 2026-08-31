@@ -6,7 +6,12 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from contracts import PortfolioReconcileRequest, PortfolioReconcileResponse, PortfolioSnapshot, PositionRecord
+from contracts import (
+    PortfolioReconcileRequest,
+    PortfolioReconcileResponse,
+    PortfolioSnapshot,
+    PositionRecord,
+)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, select
@@ -36,7 +41,9 @@ def list_positions() -> list[PositionRecord]:
     """Return current derived positions."""
 
     with SessionLocal() as session:
-        rows = session.scalars(select(PositionRecordModel).order_by(PositionRecordModel.symbol)).all()
+        rows = session.scalars(
+            select(PositionRecordModel).order_by(PositionRecordModel.symbol)
+        ).all()
         return [
             PositionRecord(
                 symbol=row.symbol,

@@ -9,7 +9,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
 from market_data.models import OHLCVBar
 from strategy_service.worker import TradeWorker, _compute_qty
 

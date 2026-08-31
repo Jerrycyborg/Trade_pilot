@@ -5,8 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from market_data.models import TASummary, TechnicalIndicators
-
-from strategy_service.rule_engine import RuleSignal, evaluate_rules
+from strategy_service.rule_engine import evaluate_rules
 
 
 def _ta(

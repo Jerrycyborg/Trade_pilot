@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from market_data.config import YAHOO_INTRADAY_MAX_DAYS, MarketDataSettings
 from market_data.fetcher import (
     AlpacaFetcher,

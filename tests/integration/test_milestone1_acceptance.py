@@ -198,7 +198,9 @@ def _policy_evaluate(payload: dict[str, object]) -> dict[str, object]:
     return decision.model_dump(mode="json")
 
 
-def _list_evaluations(*, limit: int = 20, symbol: str | None = None, decision: str | None = None) -> list[dict[str, object]]:
+def _list_evaluations(
+    *, limit: int = 20, symbol: str | None = None, decision: str | None = None
+) -> list[dict[str, object]]:
     import policy_service.main as main
 
     return [

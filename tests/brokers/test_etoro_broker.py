@@ -1,6 +1,5 @@
-from contracts import ExecutionOrderRequest, OrderStatus
-
 from brokers.etoro_broker import EtoroBroker
+from contracts import ExecutionOrderRequest, OrderStatus
 
 
 def test_etoro_broker_place_order_with_mocked_requests(monkeypatch) -> None:

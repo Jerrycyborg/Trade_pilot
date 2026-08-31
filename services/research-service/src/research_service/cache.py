@@ -6,9 +6,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy.orm import Session
-
 from contracts import ResearchReport
+from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import ResearchReportRecord

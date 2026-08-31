@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 from contracts import ResearchReport
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import select
 
 from .cache import ResearchCache, _to_report
 from .config import settings

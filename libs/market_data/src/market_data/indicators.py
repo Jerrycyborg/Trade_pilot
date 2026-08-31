@@ -105,8 +105,14 @@ def compute_bollinger(
     return upper, middle, lower
 
 
-def compute_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
-    """Wilder's ATR using rolling window. Returns mean(H-L) of last `period` bars if insufficient data."""
+def compute_atr(
+    highs: list[float], lows: list[float], closes: list[float], period: int = 14
+) -> float:
+    """Wilder's ATR using a rolling window.
+
+    Falls back to mean(H-L) over the last `period` bars when there is not
+    enough history to smooth.
+    """
     if len(highs) < 2 or len(lows) < 2 or len(closes) < 2:
         return (highs[-1] - lows[-1]) if highs and lows else 0.0
 
@@ -130,7 +136,9 @@ def compute_atr(highs: list[float], lows: list[float], closes: list[float], peri
     return atr
 
 
-def compute_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
+def compute_adx(
+    highs: list[float], lows: list[float], closes: list[float], period: int = 14
+) -> float:
     """Compute Average Directional Index. Returns 25.0 (neutral) if insufficient data."""
     if len(highs) < period + 2 or len(lows) < period + 2 or len(closes) < period + 2:
         return 25.0
@@ -183,18 +191,20 @@ def compute_adx(highs: list[float], lows: list[float], closes: list[float], peri
     return adx
 
 
-def detect_patterns(opens: list[float], highs: list[float], lows: list[float], closes: list[float]) -> list[str]:
+def detect_patterns(
+    opens: list[float], highs: list[float], lows: list[float], closes: list[float]
+) -> list[str]:
     """Detect candlestick patterns. Returns list of pattern names present in the last 2 bars."""
     patterns: list[str] = []
     if len(opens) < 2 or len(highs) < 2 or len(lows) < 2 or len(closes) < 2:
         return patterns
 
     # Current bar (index -1)
-    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
+    o, h, low, c = opens[-1], highs[-1], lows[-1], closes[-1]
     body = abs(c - o)
-    candle_range = h - l if h != l else 1e-9
+    candle_range = h - low if h != low else 1e-9
     upper_shadow = h - max(o, c)
-    lower_shadow = min(o, c) - l
+    lower_shadow = min(o, c) - low
 
     # Doji: body <= 10% of range
     if body <= 0.1 * candle_range:
@@ -209,7 +219,9 @@ def detect_patterns(opens: list[float], highs: list[float], lows: list[float], c
         patterns.append("shooting_star")
 
     # Previous bar
-    po, ph, pl, pc = opens[-2], highs[-2], lows[-2], closes[-2]
+    # Only the previous open and close are used; the high and low are
+    # unpacked for symmetry with the current-bar line below.
+    po, _ph, _pl, pc = opens[-2], highs[-2], lows[-2], closes[-2]
 
     # Bullish engulfing: prev bar bearish, current bar bullish and engulfs prior body
     if pc < po and c > o and c >= po and o <= pc:
@@ -259,20 +271,24 @@ def _derive_signal_tags(
 
 
 def _derive_trend(rsi: float, macd_hist: float, ema_20: float, ema_50: float, price: float) -> str:
-    bullish_signals = sum([
-        price > ema_20,
-        price > ema_50,
-        ema_20 > ema_50,
-        macd_hist > 0,
-        rsi > 55,
-    ])
-    bearish_signals = sum([
-        price < ema_20,
-        price < ema_50,
-        ema_20 < ema_50,
-        macd_hist < 0,
-        rsi < 45,
-    ])
+    bullish_signals = sum(
+        [
+            price > ema_20,
+            price > ema_50,
+            ema_20 > ema_50,
+            macd_hist > 0,
+            rsi > 55,
+        ]
+    )
+    bearish_signals = sum(
+        [
+            price < ema_20,
+            price < ema_50,
+            ema_20 < ema_50,
+            macd_hist < 0,
+            rsi < 45,
+        ]
+    )
     if bullish_signals >= 3:
         return "bullish"
     if bearish_signals >= 3:

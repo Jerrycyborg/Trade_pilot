@@ -60,7 +60,9 @@ def test_build_exit_signal_for_short_reversal_and_max_hold(monkeypatch) -> None:
         max_hold_hours=48,
     )
     worker = worker_mod.TradeWorker()
-    monkeypatch.setattr(worker, "_get_ta_snapshot", lambda symbol: _ta_snapshot(price=100.0, rsi=25.0))
+    monkeypatch.setattr(
+        worker, "_get_ta_snapshot", lambda symbol: _ta_snapshot(price=100.0, rsi=25.0)
+    )
 
     signal = worker._build_exit_signal(
         {

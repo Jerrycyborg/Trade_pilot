@@ -156,7 +156,11 @@ class TradeWorker:
                 volumes = [float(getattr(bar, "volume", 0.0) or 0.0) for bar in bars]
                 current_volume = volumes[-1] if volumes else None
                 avg_volume = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else None
-                if current_volume is not None and avg_volume is not None and current_volume <= avg_volume:
+                if (
+                    current_volume is not None
+                    and avg_volume is not None
+                    and current_volume <= avg_volume
+                ):
                     logger.debug("volume_confirm: below avg, suppressing BUY")
                     signal.candidate_action = CandidateAction.HOLD
 
@@ -235,7 +239,9 @@ class TradeWorker:
         if gate is not None:
             logger.info(
                 "Not trading %s %s: %s (signal recorded, no order placed)",
-                signal.candidate_action, symbol, gate,
+                signal.candidate_action,
+                symbol,
+                gate,
             )
             self._record_gated_decision(signal, symbol, qty, reference_price, gate)
             result.orders_gated += 1
@@ -264,10 +270,14 @@ class TradeWorker:
             limit_price=limit_price,
             decision_price=reference_price,
         )
-        submitted = await self._submit_order(order_req, idempotency_key=f"worker-{signal.signal_id}")
+        submitted = await self._submit_order(
+            order_req, idempotency_key=f"worker-{signal.signal_id}"
+        )
         if submitted:
             result.orders_submitted += 1
-            logger.info("Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action)
+            logger.info(
+                "Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action
+            )
 
     def _lifecycle_gate(self, signal: SignalCandidate) -> str | None:
         """Why this signal may not reach the broker, or None if it may."""
@@ -376,11 +386,11 @@ class TradeWorker:
         # Prefer the live price over the last bar close: at intraday resolution a
         # stop that reacts only on bar boundaries is a stop that fires late.
         live_price = self._prices.get_price(symbol)
-        current_price = float(
-            live_price if live_price is not None else ta.current_price
-        )
+        current_price = float(live_price if live_price is not None else ta.current_price)
         qty = int(position.get("net_qty", 0))
-        opened_at = _parse_datetime(position.get("opened_at")) or _parse_datetime(position.get("updated_at"))
+        opened_at = _parse_datetime(position.get("opened_at")) or _parse_datetime(
+            position.get("updated_at")
+        )
         max_hold = timedelta(hours=settings.max_hold_hours)
 
         reasons: list[str] = []

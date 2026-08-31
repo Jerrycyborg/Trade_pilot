@@ -93,8 +93,12 @@ class EtoroBroker:
                     symbol=str(item.get("internalSymbolFull") or item.get("symbol") or "").upper(),
                     qty=float(item.get("amount") or item.get("qty") or 0.0),
                     market_value=float(item.get("marketValue") or item.get("market_value") or 0.0),
-                    average_price=float(item.get("averageOpen") or item.get("average_price") or 0.0),
-                    unrealized_pnl=float(item.get("profitLoss") or item.get("unrealized_pnl") or 0.0),
+                    average_price=float(
+                        item.get("averageOpen") or item.get("average_price") or 0.0
+                    ),
+                    unrealized_pnl=float(
+                        item.get("profitLoss") or item.get("unrealized_pnl") or 0.0
+                    ),
                 )
                 for item in positions
             ]
@@ -128,7 +132,9 @@ class EtoroBroker:
             )
         except Exception as exc:
             logger.error("EtoroBroker.get_account failed: %s", exc)
-            return AccountInfo(buying_power=0.0, equity=0.0, cash=0.0, mode="paper" if self._demo else "live")
+            return AccountInfo(
+                buying_power=0.0, equity=0.0, cash=0.0, mode="paper" if self._demo else "live"
+            )
 
     def close_position(
         self,
@@ -179,7 +185,9 @@ class EtoroBroker:
                 "internalSymbolFull": normalized,
             },
         )
-        items = payload.get("items") or payload.get("results") or payload.get("instruments") or payload
+        items = (
+            payload.get("items") or payload.get("results") or payload.get("instruments") or payload
+        )
         if isinstance(items, list):
             for item in items:
                 internal = str(item.get("internalSymbolFull") or "").upper()
@@ -215,7 +223,9 @@ class EtoroBroker:
         json: dict[str, object] | None = None,
     ) -> dict[str, object]:
         with httpx.Client(base_url=self._base_url, timeout=15.0) as client:
-            response = client.request(method, path, headers=self._headers(), params=params, json=json)
+            response = client.request(
+                method, path, headers=self._headers(), params=params, json=json
+            )
             response.raise_for_status()
             if not response.content:
                 return {}

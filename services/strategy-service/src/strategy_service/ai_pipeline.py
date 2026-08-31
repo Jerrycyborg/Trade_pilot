@@ -10,7 +10,6 @@ from typing import Optional
 from uuid import uuid4
 
 import httpx
-
 from contracts import ResearchReport, SentimentScore, SignalCandidate, TechnicalSummaryContract
 from market_data import MarketDataSettings, build_ta_summary, get_fetcher
 from market_data.fetcher import DataUnavailableError
@@ -61,24 +60,32 @@ class AISignalPipeline:
                 bars = None
                 try:
                     fetcher = get_fetcher(self._market_settings)
-                    bars = fetcher.fetch(symbol, period_days=self._market_settings.default_lookback_days)
+                    bars = fetcher.fetch(
+                        symbol, period_days=self._market_settings.default_lookback_days
+                    )
                     if bars:
                         from market_data import build_ta_summary
+
                         ta = build_ta_summary(symbol, bars)
                 except Exception:
                     pass
                 # Best-effort sentiment fetch for fallback path
                 fallback_sentiment_score: float | None = None
                 try:
-                    import asyncio
-                    from .config import settings as _s
                     import httpx
-                    resp = httpx.get(f"{_s.sentiment_service_url}/v1/sentiment/{symbol.upper()}", timeout=2.0)
+
+                    from .config import settings as _s
+
+                    resp = httpx.get(
+                        f"{_s.sentiment_service_url}/v1/sentiment/{symbol.upper()}", timeout=2.0
+                    )
                     if resp.status_code == 200:
                         fallback_sentiment_score = resp.json().get("score")
                 except Exception:
                     pass
-                return _build_deterministic_signal(symbol, ta, sentiment_score=fallback_sentiment_score, bars=bars)
+                return _build_deterministic_signal(
+                    symbol, ta, sentiment_score=fallback_sentiment_score, bars=bars
+                )
             raise
 
     async def _do_generate(self, symbol: str) -> SignalCandidate:

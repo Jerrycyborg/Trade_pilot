@@ -34,7 +34,9 @@ def _main(tmp_path: Path) -> tuple[object, object, object, object]:
     portfolio_database.Base.metadata.create_all(bind=portfolio_database.engine)
 
     execution_database.engine = create_engine(
-        config.settings.execution_database_url, future=True, connect_args={"check_same_thread": False}
+        config.settings.execution_database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
     )
     execution_database.SessionLocal = sessionmaker(
         bind=execution_database.engine, autoflush=False, autocommit=False, future=True
@@ -42,7 +44,9 @@ def _main(tmp_path: Path) -> tuple[object, object, object, object]:
     execution_database.Base.metadata.create_all(bind=execution_database.engine)
 
     execution_reader.execution_engine = create_engine(
-        config.settings.execution_database_url, future=True, connect_args={"check_same_thread": False}
+        config.settings.execution_database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
     )
     execution_reader.ExecutionSessionLocal = sessionmaker(
         bind=execution_reader.execution_engine, autoflush=False, autocommit=False, future=True
@@ -124,7 +128,9 @@ def test_rejected_orders_do_not_affect_positions(tmp_path: Path) -> None:
 def test_partial_fills_update_position_incrementally(tmp_path: Path) -> None:
     main, execution_models, execution_database, _ = _main(tmp_path)
     now = datetime.now(timezone.utc)
-    _insert_fill(execution_database, execution_models, fill_id="1", qty=4, price=100.0, filled_at=now)
+    _insert_fill(
+        execution_database, execution_models, fill_id="1", qty=4, price=100.0, filled_at=now
+    )
     _insert_fill(
         execution_database,
         execution_models,

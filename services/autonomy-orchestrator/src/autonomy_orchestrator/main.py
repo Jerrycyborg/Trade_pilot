@@ -1,24 +1,31 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import uuid4
 
-import asyncio
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from contracts import ApprovalRequest, AuditEvent, NotificationEvent, PolicyEvaluationRequest, SignalCandidate
+from contracts import (
+    ApprovalRequest,
+    AuditEvent,
+    NotificationEvent,
+    PolicyEvaluationRequest,
+    SignalCandidate,
+)
 from contracts.auth import verify_admin_key, verify_internal_key
-from contracts.rate_limit import rate_limit_write
 from contracts.execution import (
     average_daily_volume,
     marketable_limit_price,
     participation_capped_qty,
 )
+from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from lifecycle import (
     DEFAULT_LIVE_STRATEGY,
     Evidence,
@@ -26,8 +33,6 @@ from lifecycle import (
     State,
     summarise,
 )
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from market_data import (
     LivePriceCache,
     MarketDataSettings,
@@ -41,11 +46,11 @@ from pydantic import BaseModel
 
 from .config import settings
 from .day_trade_tracker import DayTradeTracker
+from .policy_config import is_market_hours, load_policy_config, update_policy_config
 from .reconciliation import Reconciler
+from .risk_engine import evaluate_risk
 from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
-from .policy_config import is_market_hours, load_policy_config, update_policy_config
-from .risk_engine import evaluate_risk
 
 logger = logging.getLogger(__name__)
 
@@ -296,9 +301,7 @@ def realtime_status() -> dict[str, object]:
         "intraday_minutes": market_settings.intraday_minutes,
         "provider": "alpaca" if market_settings.has_alpaca_credentials else "yahoo",
         "cycle_interval_seconds": _cycle_interval_seconds(),
-        "stop_loss_check_seconds": _risk_check_interval_seconds(
-            "STOP_LOSS_CHECK_INTERVAL_MINUTES"
-        ),
+        "stop_loss_check_seconds": _risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES"),
         "take_profit_check_seconds": _risk_check_interval_seconds(
             "TAKE_PROFIT_CHECK_INTERVAL_MINUTES"
         ),
@@ -438,6 +441,7 @@ def status() -> dict[str, object]:
         "trading_mode": config.get("trading_mode", "demo"),
     }
 
+
 @app.get("/v1/orchestrator/client-config")
 async def client_config(request: Request) -> dict[str, str]:
     """Dashboard client configuration.
@@ -469,7 +473,8 @@ async def client_config(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=403, detail="not allowed")
     logger.warning(
         "EXPOSE_CLIENT_KEYS=true — serving API keys to %s. Anyone who can reach "
-        "the dashboard can read the admin key.", client_host,
+        "the dashboard can read the admin key.",
+        client_host,
     )
     return {
         "internalKey": os.getenv("INTERNAL_API_KEY", ""),
@@ -477,23 +482,22 @@ async def client_config(request: Request) -> dict[str, str]:
     }
 
 
-
-
 @app.get("/v1/orchestrator/cycle/last")
 def last_cycle() -> dict[str, object]:
     return state.last_cycle_summary
+
 
 @app.post("/v1/orchestrator/cycle/trigger")
 async def trigger_cycle(x_internal_key: str = Header(...)) -> dict[str, object]:
     """Manually trigger a cycle (bypasses market hours gate — for testing)."""
     from .policy_config import load_policy_config
+
     config = load_policy_config(settings.policy_config_path)
     if config.get("kill_switch"):
         return {"status": "halted", "reason": "kill_switch_active"}
     if state.running:
         return {"status": "busy", "reason": "cycle_already_running"}
     return await run_cycle()
-
 
 
 @app.get("/v1/orchestrator/health/deps")
@@ -546,11 +550,18 @@ async def live_mode(
         if request.confirmation != "I CONFIRM LIVE TRADING":
             raise HTTPException(status_code=400, detail="Confirmation string mismatch")
         if config.get("kill_switch"):
-            raise HTTPException(status_code=400, detail="Kill switch must be off before enabling live mode")
+            raise HTTPException(
+                status_code=400, detail="Kill switch must be off before enabling live mode"
+            )
         if not config.get("weekly_notional_cap_usd"):
-            raise HTTPException(status_code=400, detail="Weekly cap must be set before enabling live mode")
+            raise HTTPException(
+                status_code=400, detail="Weekly cap must be set before enabling live mode"
+            )
         if not config.get("symbol_allowlist"):
-            raise HTTPException(status_code=400, detail="Symbol allowlist must be non-empty before enabling live mode")
+            raise HTTPException(
+                status_code=400,
+                detail="Symbol allowlist must be non-empty before enabling live mode",
+            )
         update_policy_config(settings.policy_config_path, {"trading_mode": "live"})
     else:
         update_policy_config(settings.policy_config_path, {"trading_mode": "demo"})
@@ -595,7 +606,9 @@ async def run_cycle() -> dict[str, object]:
         await _process_approvals()
         if not _monthly_limits_ok():
             return summary
-        signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
+        signals = [
+            signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"
+        ]
         portfolio_state = await _portfolio_state()
 
         # Pattern-day-trader budget. The equity lookup is a network call so it
@@ -672,7 +685,9 @@ async def run_cycle() -> dict[str, object]:
                 )
                 continue
             price_bars = _fetch_price_bars(signal.symbol)
-            risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
+            risk = evaluate_risk(
+                signal, portfolio_state, weekly_spend, config, price_bars=price_bars
+            )
             if not risk.approved:
                 summary["rejected"] += 1
                 _journal().record_decision(
@@ -741,9 +756,7 @@ async def run_cycle() -> dict[str, object]:
                     await _mark_signal_acted(signal.signal_id)
                     continue
 
-                order = await _submit_order(
-                    signal, risk, config, portfolio_state, price_bars
-                )
+                order = await _submit_order(signal, risk, config, portfolio_state, price_bars)
                 if not _order_accepted(order):
                     # execution-service answers 200 with status REJECTED (no cash,
                     # qty limit). Recording an open here would burn a day-trade
@@ -907,7 +920,9 @@ async def _portfolio_state() -> dict[str, object]:
             headers=_internal_headers(),
         )
     positions = positions_resp.json() if positions_resp.status_code == 200 else []
-    account = account_resp.json() if account_resp.status_code == 200 else {"buying_power": 100_000.0}
+    account = (
+        account_resp.json() if account_resp.status_code == 200 else {"buying_power": 100_000.0}
+    )
     return {
         "positions": positions,
         "buying_power": float(account.get("buying_power", 100_000.0)),
@@ -915,7 +930,9 @@ async def _portfolio_state() -> dict[str, object]:
     }
 
 
-async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
+async def _policy_evaluate(
+    signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]
+) -> dict[str, object]:
     try:
         from strategy_service.earnings_calendar import is_earnings_blackout as _iec
 
@@ -934,7 +951,8 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
             "market_open": is_market_hours(config),
             "event_blackout_active": event_blackout,
             "liquidity_score": 0.95,
-            "symbol_allowed": signal.symbol.upper() in {str(sym).upper() for sym in config.get("symbol_allowlist", [])},
+            "symbol_allowed": signal.symbol.upper()
+            in {str(sym).upper() for sym in config.get("symbol_allowlist", [])},
         },
         portfolio_context={
             "gross_exposure_pct": min(len(portfolio_state.get("positions", [])) / 10.0, 1.0),
@@ -984,14 +1002,20 @@ async def _submit_order(
     if capped < qty:
         logger.info(
             "Order for %s trimmed %d -> %d shares (%.1f%% of ~%.0f ADV)",
-            signal.symbol, qty, capped, max_participation * 100, adv or 0,
+            signal.symbol,
+            qty,
+            capped,
+            max_participation * 100,
+            adv or 0,
         )
         qty = capped
 
     if qty < 1:
         logger.info(
             "Order for %s sizes to 0 shares ($%.2f at %.4f) — skipping",
-            signal.symbol, amount_usd, current_price,
+            signal.symbol,
+            amount_usd,
+            current_price,
         )
         return {"status": "REJECTED", "rejection_reason": "qty_below_one_share"}
 
@@ -1217,12 +1241,8 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     # Mirror image: a short profits as price FALLS, so its target sits below the
     # entry. An above-entry target is already satisfied at the moment of entry.
     is_short = _side_of(signal.candidate_action) == "SELL"
-    gain_per_share = (
-        settings.take_profit_target_usd / qty if qty > 0 else entry_price * 0.06
-    )
-    target_price = (
-        entry_price - gain_per_share if is_short else entry_price + gain_per_share
-    )
+    gain_per_share = settings.take_profit_target_usd / qty if qty > 0 else entry_price * 0.06
+    target_price = entry_price - gain_per_share if is_short else entry_price + gain_per_share
     state.take_profit_monitor.register(
         TakeProfitRecord(
             symbol=signal.symbol,
@@ -1300,8 +1320,8 @@ async def _run_stop_loss_check() -> None:
         realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
         if realized is None:
             logger.warning(
-                "Stop-loss on %s: position size unknown, loss not attributed to the "
-                "monthly limit", symbol,
+                "Stop-loss on %s: position size unknown, loss not attributed to the monthly limit",
+                symbol,
             )
         else:
             state.monthly_realized_loss_usd += max(0.0, -realized)
@@ -1309,13 +1329,15 @@ async def _run_stop_loss_check() -> None:
         if state.monthly_realized_loss_usd >= settings.monthly_loss_limit_usd * 0.7:
             await _notify_smart(
                 "loss_warning",
-                f"⚠️ Monthly loss ${state.monthly_realized_loss_usd:.2f} approaching ${settings.monthly_loss_limit_usd:.2f} limit",
+                f"⚠️ Monthly loss ${state.monthly_realized_loss_usd:.2f} approaching "
+                f"${settings.monthly_loss_limit_usd:.2f} limit",
                 tier=2,
             )
         if state.monthly_realized_loss_usd >= settings.monthly_loss_limit_usd:
             await _notify_smart(
                 "loss_limit_hit",
-                f"🛑 Monthly ${settings.monthly_loss_limit_usd:.2f} loss limit reached — trading paused",
+                f"🛑 Monthly ${settings.monthly_loss_limit_usd:.2f} loss limit reached "
+                "— trading paused",
                 tier=3,
             )
 
@@ -1333,7 +1355,8 @@ async def _run_take_profit_check() -> None:
         if realized is None:
             logger.warning(
                 "Take-profit on %s: position size unknown, gain not attributed to the "
-                "monthly target", symbol,
+                "monthly target",
+                symbol,
             )
         else:
             state.monthly_realized_profit_usd += max(0.0, realized)
@@ -1341,7 +1364,8 @@ async def _run_take_profit_check() -> None:
         if state.monthly_realized_profit_usd >= settings.monthly_profit_target_usd:
             await _notify_smart(
                 "profit_target_hit",
-                f"🎯 Monthly ${settings.monthly_profit_target_usd:.2f} profit target reached — coasting",
+                f"🎯 Monthly ${settings.monthly_profit_target_usd:.2f} profit target "
+                "reached — coasting",
                 tier=1,
             )
 
@@ -1433,7 +1457,8 @@ async def _process_approvals() -> None:
             approved_rows = response.json()
     except Exception as exc:
         logger.error(
-            "Approval gateway unreachable: %s — treating all pending approvals as REJECTED (fail safe)",
+            "Approval gateway unreachable: %s — treating all pending approvals as "
+            "REJECTED (fail safe)",
             exc,
         )
         return
@@ -1476,25 +1501,29 @@ async def _process_approvals() -> None:
         # Re-run risk + policy with current state before executing
         risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
         if not risk.approved:
-            await _audit(AuditEvent(
-                event_type="approval.stale_rejected",
-                symbol=signal.symbol,
-                signal_id=signal.signal_id,
-                decision="REJECT",
-                reasoning=f"deferred approval failed re-check: {risk.reason}",
-                metadata={"tier": risk.tier},
-            ))
+            await _audit(
+                AuditEvent(
+                    event_type="approval.stale_rejected",
+                    symbol=signal.symbol,
+                    signal_id=signal.signal_id,
+                    decision="REJECT",
+                    reasoning=f"deferred approval failed re-check: {risk.reason}",
+                    metadata={"tier": risk.tier},
+                )
+            )
             continue
         policy = await _policy_evaluate(signal, risk, config, portfolio_state)
         if policy.get("decision") != "APPROVE":
-            await _audit(AuditEvent(
-                event_type="approval.stale_rejected",
-                symbol=signal.symbol,
-                signal_id=signal.signal_id,
-                decision="REJECT",
-                reasoning="deferred approval failed policy re-check",
-                metadata={"policy": policy},
-            ))
+            await _audit(
+                AuditEvent(
+                    event_type="approval.stale_rejected",
+                    symbol=signal.symbol,
+                    signal_id=signal.signal_id,
+                    decision="REJECT",
+                    reasoning="deferred approval failed policy re-check",
+                    metadata={"policy": policy},
+                )
+            )
             continue
         order = await _submit_order(signal, risk, config, portfolio_state, price_bars)
         if not _order_accepted(order):
@@ -1512,14 +1541,16 @@ async def _process_approvals() -> None:
         weekly_spend += float(order.get("amount_usd", 0.0))
         state.weekly_notional_used = weekly_spend
         await _notify_trade_executed(signal, order)
-        await _audit(AuditEvent(
-            event_type="trade.executed.approval",
-            symbol=signal.symbol,
-            signal_id=signal.signal_id,
-            decision="APPROVED",
-            reasoning="approval executed after re-check",
-            metadata=order,
-        ))
+        await _audit(
+            AuditEvent(
+                event_type="trade.executed.approval",
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                decision="APPROVED",
+                reasoning="approval executed after re-check",
+                metadata=order,
+            )
+        )
         await _mark_signal_acted(signal.signal_id)
 
 
@@ -1578,7 +1609,9 @@ async def _process_exit_signals() -> int:
         position = position_map.get(signal.symbol.upper())
         if not position:
             continue
-        position_id = str(position.get("position_id") or position.get("positionId") or signal.symbol)
+        position_id = str(
+            position.get("position_id") or position.get("positionId") or signal.symbol
+        )
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{settings.execution_service_url}/v1/orders/close",
@@ -1671,10 +1704,7 @@ def _check_monthly_reset() -> None:
     now = datetime.now(timezone.utc)
     current_month = now.month
     current_year = now.year
-    if (
-        current_month != state.monthly_reset_month
-        or current_year != state.monthly_reset_year
-    ):
+    if current_month != state.monthly_reset_month or current_year != state.monthly_reset_year:
         state.monthly_realized_loss_usd = 0.0
         state.monthly_realized_profit_usd = 0.0
         state.monthly_reset_month = current_month
@@ -1689,6 +1719,8 @@ def _monthly_limits_ok() -> bool:
         logger.warning("Monthly loss limit $%.2f reached", settings.monthly_loss_limit_usd)
         return False
     if state.monthly_realized_profit_usd >= settings.monthly_profit_target_usd:
-        logger.info("Monthly profit target $%.2f reached — coasting", settings.monthly_profit_target_usd)
+        logger.info(
+            "Monthly profit target $%.2f reached — coasting", settings.monthly_profit_target_usd
+        )
         return False
     return True
