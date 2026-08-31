@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "libs" / "contracts" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "lifecycle" / "src"))
+sys.path.insert(0, str(ROOT / "libs" / "attribution" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "brokers" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "market_data" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "audit-logger" / "src"))

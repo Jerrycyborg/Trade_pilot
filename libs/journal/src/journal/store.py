@@ -617,6 +617,87 @@ class Journal:
             "last_at": max(stamps).isoformat(),
         }
 
+    def execution_rows(
+        self,
+        *,
+        strategy_id: str | None = None,
+        symbol: str | None = None,
+        environment: str | None = None,
+        account_id: str | None = "default",
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """Raw execution records, for callers that need the individual orders.
+
+        `scoped_execution_metrics` aggregates; attribution has to pair opening
+        fills to closing fills, which needs the rows themselves. Filters are
+        optional here because a coverage report legitimately spans everything —
+        but the caller is responsible for not mixing environments in a
+        *calculation*, which `attribution.pair_round_trips` enforces by
+        grouping rather than trusting.
+        """
+        if not self.enabled:
+            return []
+        try:
+            with self._session_factory() as session:  # type: ignore[misc]
+                conditions = []
+                if strategy_id is not None:
+                    conditions.append(ExecutionQuality.strategy_id == strategy_id)
+                if symbol is not None:
+                    conditions.append(ExecutionQuality.symbol == symbol.upper())
+                if environment is not None:
+                    conditions.append(ExecutionQuality.environment == environment)
+                if account_id is not None:
+                    conditions.append(ExecutionQuality.account_id == account_id)
+                if window_start is not None:
+                    conditions.append(ExecutionQuality.recorded_at >= _utc(window_start))
+                if window_end is not None:
+                    conditions.append(ExecutionQuality.recorded_at <= _utc(window_end))
+
+                rows = session.scalars(
+                    select(ExecutionQuality)
+                    .where(*conditions)
+                    .order_by(ExecutionQuality.recorded_at)
+                    .limit(limit)
+                ).all()
+
+                return [
+                    {
+                        "order_id": r.order_id,
+                        "signal_id": r.signal_id,
+                        "symbol": r.symbol,
+                        "side": r.side,
+                        "qty": r.qty,
+                        "filled_qty": r.filled_qty,
+                        "strategy_id": r.strategy_id,
+                        "strategy_version": r.strategy_version,
+                        "environment": r.environment,
+                        "account_id": r.account_id,
+                        "portfolio_id": r.portfolio_id,
+                        "broker": r.broker,
+                        "decision_id": r.decision_id,
+                        "order_intent_id": r.order_intent_id,
+                        "order_type": r.order_type,
+                        "limit_price": r.limit_price,
+                        "decision_price": r.decision_price,
+                        "fill_price": r.fill_price,
+                        "shortfall_bps": r.shortfall_bps,
+                        "fees": r.fees,
+                        "spread_bps": r.spread_bps,
+                        "filled": bool(r.filled),
+                        "cancelled": bool(r.cancelled),
+                        "rejected": bool(r.rejected),
+                        "outcome": r.outcome,
+                        "decision_ts": _read_utc(r.decision_ts),
+                        "recorded_at": _read_utc(r.recorded_at),
+                    }
+                    for r in rows
+                ]
+        except Exception as exc:
+            logger.warning("Execution row read failed: %s", exc)
+            return []
+
     def completeness(
         self,
         *,

@@ -196,29 +196,39 @@ defaults to 600. Too short and a container restart halts trading; too long and
 the system opens positions it cannot verify. Ten minutes is defensible and is
 not derived from anything. Watch it and tune.
 
-**Journal health is computed, not scheduled.** `Journal.completeness` and
+*(The three gaps below were closed after this document was first written; they
+are kept here with their resolution rather than deleted, because what a system
+did not do is part of its record.)*
+
+**~~Journal health is computed, not scheduled.~~ Closed.** A health sweep runs
+every `HEALTH_SWEEP_INTERVAL_SECONDS`, demotes live sleeves that breached or
+decayed, records journal health per sleeve, and halts entries on a gap past its
+grace period. Two defects surfaced while wiring it: the sweep reported a halt
+that had not happened (a gap was routed through a counter needing two passes),
+and completeness was derived from a wall-clock expected count that would have
+condemned every window crossing an overnight close.
+
+**~~Evidence is supplied, not harvested.~~ Closed.**
+`run_backtest.py --walk-forward` records its own artifact and prints the
+promote call to copy.
+
+**~~The orchestrator and worker still hold their own JSON registries.~~
+Closed.** The JSON registry is deleted. A second implementation of the roster
+is exactly the failure the roster prevents, and both callers now read the
+shared authority. With none configured, nothing attempts an entry.
+
+**Journal health remains approximate.** `Journal.completeness` and
 `store.record_journal_health` exist and are used by evidence derivation, but
 nothing runs them on a timer, so "block new entries after a configured safety
 grace period" on a journal gap is enforced at promotion and not yet in the
 live loop. This is the largest remaining gap against requirement E.
 
-**Health checks are called, not scheduled.** Same shape: the demotion triggers
-are implemented and tested, but something has to invoke them with current live
-figures. Until that is wired to the orchestrator's cycle, decay detection is
-manual.
-
-**Evidence is supplied, not harvested.** A promotion cites artifact IDs, and
-those artifacts are written when a validation runs — but nothing yet writes one
-automatically from `run_backtest.py --walk-forward`. Today an operator records
-the artifact. That is honest but manual.
-
-**The orchestrator and worker still hold their own JSON registries.** The
-shared store is wired into `execution-service`, which is the component that
-actually reaches a broker, so the safety property holds. But the two callers
-still consult the old per-process roster for their pre-flight gate, which means
-they can disagree with the authority about what to *attempt*. They will be
-refused correctly; the log will just be noisier than it needs to be. Migrating
-those two call sites is follow-up work, not a safety hole.
+**Live decay metrics are thin.** The sweep demotes on drawdown and Sharpe
+decay, but `_live_metrics` currently populates only the trade count from the
+journal: live Sharpe and drawdown have to come from the portfolio's own
+accounting, which is not yet wired in. So the decay trigger is implemented and
+tested and will not fire on real data until that connection is made. The
+drawdown breach is the trigger doing real work today.
 
 **Correlation is measured on a calm sample.** Unchanged from before, and worth
 restating: correlations rise in a selloff, which is exactly when the

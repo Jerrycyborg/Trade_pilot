@@ -25,6 +25,7 @@ conservative: nothing trades until it is registered and promoted.
 | Run more than one strategy | [Strategies and the Portfolio](#strategies-and-the-portfolio) |
 | Control what is allowed to trade | [The Strategy Lifecycle](#the-strategy-lifecycle) |
 | See what an order actually cost | [Execution Quality](#execution-quality) |
+| Understand why a trade lost | [Explaining Trades After the Fact](#explaining-trades-after-the-fact) |
 | Go live | [Enabling Live Mode](#enabling-live-mode-step-by-step) |
 
 Operational procedures — what to do when something breaks — are in
@@ -727,6 +728,81 @@ Being explicit, because "autonomous" oversells it:
   environment variables so you can argue with them.
 - **It cannot make a bad strategy good.** It only stops one reaching real money
   before it has shown anything, and takes it away when it stops working.
+
+## Explaining Trades After the Fact
+
+```bash
+uv run python scripts/attribute_trades.py --environment paper
+```
+
+This answers one question and deliberately only one: **when a trade went wrong,
+do the recorded facts say why?** It is not a performance report — the backtest
+and `/v1/execution/quality` already do that — and it produces no
+recommendation.
+
+### The decomposition adds up
+
+```
+  From the signal            +75.08
+  Entry execution            -25.82
+  Exit execution             -22.70
+  ------------------------------------------
+  Realised                   +26.56
+```
+
+Those three components are an **exact identity**: they reconstruct the realised
+result, which is what makes them worth arguing about rather than a set of
+categories that feel meaningful. "Signal" is what the strategy's own decisions
+would have earned with perfect fills; the other two are what trading cost. A
+test asserts the identity on every attribution.
+
+The reading above is the point of the exercise: *the strategy was right, and
+execution took 65% of what it earned.* The realised number alone cannot
+distinguish that from a strategy that was simply wrong, and they call for
+completely different responses.
+
+Everything approximate — max favourable/adverse excursion, capture ratio, exit
+reason — is reported as a diagnostic rather than folded in. Folding an
+approximation into an identity is how the identity stops being one.
+
+### Coverage is the deliverable
+
+```
+  Closed round trips        20
+  Fully attributable        18  (90%)
+
+  Missing inputs — this is the work L0 implies:
+    entry_decision_price         missing on 2 trade(s)
+```
+
+An attribution that cannot be computed **names the field it is missing** rather
+than substituting a zero. A zero would read as "execution cost nothing" instead
+of "we did not record what it cost", and would make the archive look richer
+than it is — which is the one outcome that would make this stage worthless.
+
+### Counterfactuals use what was knowable
+
+Alternative stops, holding longer, and the best exit available are computed
+against `bars_as_of(exit)` — the series as the system held it when the trade
+closed, not the corrected one. A revision that arrived afterwards must not
+decide that a different exit was better; that is hindsight wearing the clothes
+of analysis.
+
+They are questions for a later phase, not recommendations. Per
+[ADR 0001](docs/adr/0001-constrained-offline-adaptive-learning.md) nothing may
+propose a change until attribution has shown the archive can explain outcomes
+at all — this is L0 of that roadmap, and it proposes nothing.
+
+### What it cannot tell you
+
+- **Regime attribution is not implemented.** The decomposition separates signal
+  from execution; it does not yet say whether the signal was wrong because the
+  regime changed.
+- **It cannot see a trade it has no record of.** Coverage below 100% means
+  exactly that, and the fix is upstream in what gets recorded.
+- **Pairing is FIFO within one (strategy, symbol, environment, account).** It
+  never crosses environments, so a paper entry can never be matched to a live
+  exit — but it also assumes FIFO matches how you think about your lots.
 
 ## Pattern Day Trader (PDT) Protection
 

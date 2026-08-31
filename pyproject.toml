@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "contracts",
   "journal",
+  "attribution",
   "lifecycle",
   "market_data",
   "brokers",
@@ -35,6 +36,7 @@ dev = [
 members = [
   "libs/contracts",
   "libs/journal",
+  "libs/attribution",
   "libs/lifecycle",
   "libs/market_data",
   "libs/brokers",
@@ -54,6 +56,7 @@ members = [
 [tool.uv.sources]
 contracts = { workspace = true }
 journal = { workspace = true }
+attribution = { workspace = true }
 lifecycle = { workspace = true }
 market_data = { workspace = true }
 brokers = { workspace = true }

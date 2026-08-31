@@ -117,10 +117,28 @@ These are the decision, not caveats to it.
 
 Each phase gated on the previous one being reviewed.
 
-- **L0 — attribution only.** Post-trade attribution and counterfactuals over
-  the existing archive. No proposals. Purpose: find out whether the recorded
-  data is rich enough to explain outcomes. If it is not, everything after this
-  is built on sand.
+- **L0 — attribution only. Implemented** (`libs/attribution`,
+  `scripts/attribute_trades.py`). Post-trade attribution and counterfactuals
+  over the existing archive. No proposals, no writes back, no path to changing
+  what the system trades.
+
+  The decomposition is an exact identity — signal + entry execution + exit
+  execution reconstructs the realised result — so the components can be argued
+  with rather than merely believed. Anything approximate (excursions, capture
+  ratio, exit reason, regime) is reported as a diagnostic instead of being
+  folded in, because folding an approximation into an identity is how the
+  identity stops being one.
+
+  Counterfactuals read `Journal.bars_as_of(exit)`, so a revision the live
+  system never received cannot decide that a different exit was better.
+
+  What it found on the first real run: coverage is the deliverable, not
+  performance. An attribution that cannot be computed names the field it is
+  missing rather than substituting a zero, and the report's verdict is written
+  so a low number reads as a finding rather than a failure. On a representative
+  paper archive it separated "the signal earned X, execution took most of it"
+  from "the strategy lost money" — a distinction the realised number alone
+  cannot make, and the reason this phase comes first.
 - **L1 — specialist artifacts.** The typed roles, producing structured
   assessments with provenance. Still no proposals. Purpose: establish whether
   the arguments are reproducible from the archive.
