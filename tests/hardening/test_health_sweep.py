@@ -350,7 +350,33 @@ class TestLiveMetricsComeFromRealisedTrades:
         metrics = _live_metrics(service, journal, sleeve, now - timedelta(days=1), now)
         assert metrics.trades == 4
         assert metrics.sharpe is not None
+        assert metrics.max_drawdown_amount is not None
+        assert metrics.max_drawdown_pct is None, (
+            "a percentage needs a capital base, and none was declared"
+        )
+
+    def test_a_drawdown_percentage_needs_a_declared_capital_base(
+        self, service, journal, store
+    ) -> None:
+        """It used to divide by the running peak of cumulative P&L, so a sleeve
+        that won $20 early and bled to -$168 reported a 940% drawdown and
+        breached a limit labelled 15%. The denominator has to be the money at
+        risk or the number is not a drawdown percentage."""
+        from lifecycle.health import _live_metrics
+
+        sleeve = _live_sleeve(store)
+        for entry, exit_ in ((100, 105), (105, 103), (103, 110), (110, 104)):
+            self._round_trip(journal, entry, exit_)
+
+        now = datetime.now(timezone.utc)
+        metrics = _live_metrics(
+            service, journal, sleeve, now - timedelta(days=1), now,
+            capital_base=100_000.0,
+        )
         assert metrics.max_drawdown_pct is not None
+        assert metrics.max_drawdown_pct < 0.01, (
+            f"{metrics.max_drawdown_amount} against $100,000 is well under 1%"
+        )
 
     def test_paper_trades_do_not_count_toward_live_health(
         self, service, journal, store
@@ -635,3 +661,69 @@ class TestThresholdsHaveOneSourceOfTruth:
         operator's existing setting means."""
         monkeypatch.setenv("LIFECYCLE_MAX_SHARPE_DECAY", "99")
         assert HealthThresholds.from_env().sharpe_decay_sigmas == 1.0
+
+
+class TestTheDrawdownTriggerKnowsWhatItIsAFractionOf:
+    """A percentage with no denominator is not a percentage. This trigger used
+    to divide the peak-to-trough fall of cumulative P&L by the running peak of
+    that same curve — a number that is tiny early in a sleeve's life — so it
+    breached its 15% limit on almost any losing sleeve that had one good trade
+    first, at magnitudes like 940%.
+    """
+
+    def test_a_percentage_limit_fires_against_the_capital_base(self) -> None:
+        check = evaluate_health(
+            "live",
+            LiveMetrics(trades=2, max_drawdown_pct=0.30, max_drawdown_amount=30_000.0),
+            HealthThresholds(capital_base=100_000.0),
+        )
+        assert check.healthy is False
+        assert "capital base" in check.reasons[0]
+
+    def test_a_small_real_loss_is_not_a_breach(self) -> None:
+        """$188 lost on a $100,000 account is 0.19%, not 940%."""
+        check = evaluate_health(
+            "live",
+            LiveMetrics(trades=30, max_drawdown_pct=0.0019, max_drawdown_amount=188.0),
+            HealthThresholds(capital_base=100_000.0),
+        )
+        assert check.healthy is True
+
+    def test_an_absolute_limit_works_without_a_capital_base(self) -> None:
+        check = evaluate_health(
+            "live",
+            LiveMetrics(trades=30, max_drawdown_amount=5_000.0),
+            HealthThresholds(max_live_drawdown_amount=2_500.0),
+        )
+        assert check.healthy is False
+        assert "5,000.00" in check.reasons[0]
+
+    def test_neither_configured_warns_rather_than_passing_quietly(self) -> None:
+        """"We did not check" reported as "healthy" is how a safety control
+        becomes decoration."""
+        check = evaluate_health(
+            "live",
+            LiveMetrics(trades=30, max_drawdown_amount=50_000.0),
+            HealthThresholds(),
+        )
+        assert check.healthy is True, "it cannot demote on a check it did not run"
+        assert check.warnings, "but it must not be silent about not running it"
+        assert "LIFECYCLE_CAPITAL_BASE_USD" in check.warnings[0]
+
+    def test_the_sweep_surfaces_the_warning_once(self, service, journal, store) -> None:
+        _live_sleeve(store, "AAPL")
+        _live_sleeve(store, "MSFT")
+        for symbol in ("AAPL", "MSFT"):
+            journal.record_bars(symbol, "15m", _bars(symbol))
+            for _ in range(3):
+                for side, price in (("BUY", 100), ("SELL", 96)):
+                    journal.record_execution(
+                        symbol=symbol, side=side, qty=10, decision_price=price,
+                        fill_price=price, strategy_id="ema_rsi_macd",
+                        environment="live",
+                    )
+
+        result = run_health_sweep(service, journal, window_hours=6)
+
+        assert result.warnings, "an undeclared capital base is a finding"
+        assert len(result.warnings) == 1, "one configuration problem, not one per sleeve"

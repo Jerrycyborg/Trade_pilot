@@ -29,8 +29,25 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class HealthThresholds:
     max_live_drawdown_pct: float = 0.15
-    """A hard breach. Demotes at any sample size, because it is a fact about
-    money already lost rather than a statistical claim."""
+    """A hard breach, as a fraction of the capital at risk. Demotes at any
+    sample size, because it is a fact about money already lost rather than a
+    statistical claim.
+
+    Needs `LIFECYCLE_CAPITAL_BASE_USD` to be usable at all: a percentage
+    without a denominator is not a percentage. Before this was enforced the
+    check divided by the running peak of cumulative P&L, so a sleeve that won
+    $20 early and then bled to -$168 reported a 940% drawdown and breached a
+    limit labelled 15%."""
+
+    max_live_drawdown_amount: float | None = None
+    """The same breach in currency, for a deployment that has not declared a
+    capital base. Either this or a capital base must be set, or the drawdown
+    trigger cannot run and says so rather than passing quietly."""
+
+    capital_base: float | None = None
+    """The money at risk for this account, in the same currency as the journal
+    records fills in. There is no default: guessing an account size and then
+    demoting a live sleeve against the guess is worse than declining to check."""
 
     min_live_trades_before_decay_check: int = 20
     """Below this, live underperformance is noise. Demoting on it would churn a
@@ -85,6 +102,8 @@ class HealthThresholds:
     #: worse than a variable that is gone.
     _ENV: ClassVar[dict[str, str]] = {
         "max_live_drawdown_pct": "LIFECYCLE_MAX_LIVE_DRAWDOWN",
+        "max_live_drawdown_amount": "LIFECYCLE_MAX_LIVE_DRAWDOWN_USD",
+        "capital_base": "LIFECYCLE_CAPITAL_BASE_USD",
         "min_live_trades_before_decay_check": "LIFECYCLE_MIN_LIVE_TRADES",
         "sharpe_decay_sigmas": "LIFECYCLE_SHARPE_DECAY_SIGMAS",
         "min_sharpe_decay": "LIFECYCLE_MIN_SHARPE_DECAY",
@@ -107,7 +126,7 @@ class HealthThresholds:
             raw = os.getenv(variable)
             if raw is None or raw.strip() == "":
                 continue
-            caster = int if types[name] == "int" else float
+            caster = int if types[name].startswith("int") else float
             try:
                 overrides[name] = caster(raw)
             except ValueError as exc:
@@ -135,6 +154,12 @@ class LiveMetrics:
     span_days: float | None = None
 
     max_drawdown_pct: float | None = None
+    """A fraction of the declared capital base. None when none is declared —
+    never a fraction of an early P&L peak, which is what it used to be."""
+
+    max_drawdown_amount: float | None = None
+    """The same fall in currency, which needs no denominator."""
+
     validated_sharpe: float | None = None
     """The out-of-sample figure this sleeve was promoted on, for comparison.
     Annualised and bar-based, which is what forced the scaling above."""
@@ -147,6 +172,10 @@ class HealthCheck:
     healthy: bool
     demote_to: str | None = None
     reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    """Checks that could not run. Separate from `reasons` because a check that
+    did not run is not a clean result, and folding the two together would make
+    an unconfigured system look like a healthy one."""
 
 
 def evaluate_health(
@@ -163,11 +192,33 @@ def evaluate_health(
         return HealthCheck(healthy=True)
 
     reasons: list[str] = []
+    warnings: list[str] = []
 
+    # Percentage first when a capital base is declared, currency otherwise.
+    # Neither means the trigger cannot run: it says so rather than passing,
+    # because "we did not check" reported as "healthy" is how a safety control
+    # becomes decoration.
     drawdown = metrics.max_drawdown_pct
+    amount = metrics.max_drawdown_amount
     if drawdown is not None and drawdown > t.max_live_drawdown_pct:
         reasons.append(
-            f"live drawdown {drawdown:.1%} exceeds the {t.max_live_drawdown_pct:.1%} limit"
+            f"live drawdown {drawdown:.1%} of the declared capital base exceeds "
+            f"the {t.max_live_drawdown_pct:.1%} limit"
+        )
+    elif (
+        drawdown is None
+        and amount is not None
+        and t.max_live_drawdown_amount is not None
+        and amount > t.max_live_drawdown_amount
+    ):
+        reasons.append(
+            f"live drawdown {amount:,.2f} exceeds the "
+            f"{t.max_live_drawdown_amount:,.2f} limit"
+        )
+    elif drawdown is None and amount is not None and t.max_live_drawdown_amount is None:
+        warnings.append(
+            "drawdown not checked: set LIFECYCLE_CAPITAL_BASE_USD for a percentage "
+            "limit, or LIFECYCLE_MAX_LIVE_DRAWDOWN_USD for an absolute one"
         )
 
     # Annualised against annualised. The raw per-trade ratio used to be
@@ -209,8 +260,10 @@ def evaluate_health(
         )
 
     if not reasons:
-        return HealthCheck(healthy=True)
-    return HealthCheck(healthy=False, demote_to="probation", reasons=reasons)
+        return HealthCheck(healthy=True, warnings=warnings)
+    return HealthCheck(
+        healthy=False, demote_to="probation", reasons=reasons, warnings=warnings
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +276,11 @@ class SweepResult:
     journal_gaps: list[str] = field(default_factory=list)
     entries_blocked: bool = False
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    """Checks that could not run — a missing capital base, say. Not errors, and
+    deliberately not silence either: a sweep that skipped its drawdown check
+    and reported nothing looks exactly like one that ran it and found nothing
+    wrong."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +289,7 @@ class SweepResult:
             "journal_gaps": self.journal_gaps,
             "entries_blocked": self.entries_blocked,
             "errors": self.errors,
+            "warnings": self.warnings,
         }
 
 
@@ -286,8 +345,16 @@ def run_health_sweep(
             _record_gap(service, sleeve, completeness, window_start, moment, t, result)
 
         # --- decay and breach ------------------------------------------------
-        metrics = _live_metrics(service, journal, sleeve, window_start, moment)
+        metrics = _live_metrics(
+            service, journal, sleeve, window_start, moment,
+            capital_base=t.capital_base,
+        )
         check = evaluate_health(sleeve.state, metrics, t)
+        for warning in check.warnings:
+            # Deduplicated: an unset capital base is one configuration problem,
+            # not one per sleeve, and repeating it per sleeve buries it.
+            if warning not in result.warnings:
+                result.warnings.append(warning)
         if check.healthy:
             continue
 
@@ -376,7 +443,12 @@ def _record_gap(
 
 
 def _live_metrics(
-    service: Any, journal: Any, sleeve: Any, window_start: datetime, moment: datetime
+    service: Any,
+    journal: Any,
+    sleeve: Any,
+    window_start: datetime,
+    moment: datetime,
+    capital_base: float | None = None,
 ) -> LiveMetrics:
     """What this sleeve has done live, from the durable record.
 
@@ -400,7 +472,7 @@ def _live_metrics(
             window_start=window_start,
             window_end=moment,
         )
-        performance = performance_from_trades(trips)
+        performance = performance_from_trades(trips, capital_base=capital_base)
     except Exception as exc:  # pragma: no cover - health must not raise
         logger.debug("Live metrics unavailable for %s: %s", sleeve.key, exc)
         return metrics
@@ -412,6 +484,7 @@ def _live_metrics(
     metrics.trades_per_year = performance["trades_per_year"]
     metrics.span_days = performance["span_days"]
     metrics.max_drawdown_pct = performance["max_drawdown_pct"]
+    metrics.max_drawdown_amount = performance["max_drawdown_amount"]
     metrics.realized_total = performance["realized_total"]
     metrics.win_rate = performance["win_rate"]
     metrics.validated_sharpe = _validated_sharpe(service, sleeve)

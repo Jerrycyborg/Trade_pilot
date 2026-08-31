@@ -286,6 +286,31 @@ produces a number that looks comparable and is not. The drawdown and
 losing-outright triggers still cover the worst case there, and neither needs a
 scaling to be true. Four tests fail if the raw ratio is restored.
 
+**~~The drawdown limit was a fraction of the wrong thing.~~ Fixed.** Found by
+running the end-to-end loop again after the change above: the sweep demoted a
+sleeve for a *"live drawdown of 940.0%"*.
+
+`max_drawdown_pct` divided the peak-to-trough fall of cumulative realised P&L
+by the running peak **of that same curve**. That is not a capital base and it
+is often tiny — a sleeve that won $20 early and then bled to −$168 reports
+940%, and against a limit labelled 15% the trigger fires on nearly any losing
+sleeve that had one good trade first. The same $168 on a $100,000 account is
+0.17%.
+
+A drawdown percentage is a fraction of the money at risk, and the journal
+records fills rather than account sizes, so the denominator has to be declared:
+`LIFECYCLE_CAPITAL_BASE_USD`, or `LIFECYCLE_MAX_LIVE_DRAWDOWN_USD` for an
+absolute limit instead. There is no default account size — demoting a live
+sleeve against a guessed denominator is worse than declining to check.
+`max_drawdown_amount`, in currency, is always available and needs no
+denominator.
+
+With neither declared the trigger does not run, and it does not pass quietly
+either: `HealthCheck.warnings` and `SweepResult.warnings` carry the fact,
+deduplicated to one entry per sweep rather than one per sleeve. A check that
+did not run reported as "healthy" is how a safety control becomes decoration —
+which is what this one had become, firing constantly on a meaningless number.
+
 **One threshold is now derived; the rest are conventions.** The absolute
 `max_sharpe_decay: 2.0` is gone, replaced by a band of
 `sharpe_decay_sigmas × SE(Sharpe)`, where the standard error is Lo (2002)'s

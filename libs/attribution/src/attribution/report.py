@@ -204,7 +204,9 @@ MIN_SPAN_DAYS_TO_ANNUALISE = 5.0
 DAYS_PER_YEAR = 365.25
 
 
-def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
+def performance_from_trades(
+    round_trips: list[RoundTrip], capital_base: float | None = None
+) -> dict[str, Any]:
     """Sharpe and drawdown from realised round trips.
 
     Per-trade rather than per-bar, and deliberately so: a live sleeve's health
@@ -224,6 +226,16 @@ def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
     because a wrong scaling is worse than an absent one: it produces a number
     that looks comparable and is not.
 
+    `max_drawdown_amount` is the peak-to-trough fall of the cumulative realised
+    curve, in currency, and is always available. `max_drawdown_pct` needs a
+    `capital_base` and is None without one — a drawdown percentage is a
+    fraction *of the money at risk*, and the journal does not know what that
+    is. This used to divide by the running peak of cumulative P&L instead,
+    which is not a capital base and is often tiny: a sleeve that won $20 early
+    and then bled to -$168 reported a 940% drawdown, which against a limit
+    labelled "15%" meant the trigger fired on almost any losing sleeve that had
+    one good trade first.
+
     Returns None for a figure it cannot compute rather than a zero.
     """
     series = realized_series(round_trips)
@@ -235,7 +247,9 @@ def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
         "sharpe_annualised_std_error": None,
         "trades_per_year": None,
         "span_days": None,
+        "max_drawdown_amount": None,
         "max_drawdown_pct": None,
+        "capital_base": capital_base,
         "win_rate": None,
     }
     if len(series) < 2:
@@ -247,9 +261,10 @@ def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
     if deviation > 0:
         result["sharpe"] = round(mean / deviation, 4)
 
-    # Drawdown on the cumulative realised curve, against the running peak —
-    # the journal does not know the capital base, so a percentage of anything
-    # else would be invented.
+    # Drawdown on the cumulative realised curve, peak to trough, in currency.
+    # Currency because it is the only form that is unambiguous here: a
+    # percentage needs a denominator, and the only honest one is the capital
+    # actually at risk, which the caller has to supply.
     equity = 0.0
     peak = 0.0
     worst = 0.0
@@ -258,14 +273,12 @@ def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
         equity += value
         peak = max(peak, equity)
         trough = min(trough, equity)
-        if peak > 0:
-            worst = max(worst, (peak - equity) / peak)
+        worst = max(worst, peak - equity)
 
-    # A sleeve that never went positive has no peak to measure against, and
-    # reporting 0.0 there would read as "no drawdown" for the worst possible
-    # record. None says "not measurable"; max_loss carries the fact instead.
-    result["max_drawdown_pct"] = round(worst, 4) if peak > 0 else None
+    result["max_drawdown_amount"] = round(worst, 4)
     result["max_cumulative_loss"] = round(trough, 4)
+    if capital_base and capital_base > 0:
+        result["max_drawdown_pct"] = round(worst / capital_base, 6)
     result["win_rate"] = round(sum(1 for v in series if v > 0) / len(series), 4)
     result.update(_annualised(round_trips, result["sharpe"], len(series)))
     return result
