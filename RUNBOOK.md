@@ -202,6 +202,85 @@ only loses money quicker.
 so there is nothing to evaluate. Lengthen `--days` or check the warm-up (EMA-50
 needs 51 bars before any signal is possible).
 
+## Deciding Whether an Edge Is Real
+
+Run this before a strategy change reaches paper, and again before paper reaches
+live. It is the check that a profitable-looking backtest cannot substitute for.
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+```
+
+Three verdicts come back. Act on them in this order:
+
+### [FAIL] Out-of-sample profitable
+
+The strategy made money on the data it was tuned on and lost it on the data
+that followed. Nothing else in the report matters. Do not deploy, do not widen
+the grid to find a configuration that passes — that is more of the same error.
+
+### [FAIL] Survives the search
+
+Out-of-sample was profitable, but not by more than a search of this size finds
+in noise. Options, in descending order of honesty:
+
+1. **Get more data.** The deflated ratio rises with sample length. A 59-day
+   intraday window is short; the same result over a year may clear the bar.
+   Note that Yahoo caps intraday history (7 days at 1-minute, 60 at most other
+   resolutions), so this usually means Alpaca.
+2. **Narrow the grid.** Fewer configurations set a lower bar — but only do this
+   by removing parameters you had no reason to vary, never by removing the ones
+   that happened to lose.
+3. **Accept it as unproven.** Paper trade it and collect out-of-sample evidence
+   forward in time, which is the only kind that does not cost a trial.
+
+What not to do: re-run with a different seed, symbol or window until one
+passes. Each attempt is another trial, and none of them get counted.
+
+### [FAIL] Folds agree on parameters
+
+Each fold picked different "optimal" settings, which means the optimum is a
+property of the window rather than of the market. The strategy may still have
+an edge — try fixing the parameters at the default and running walk-forward
+with a single-point grid. If it survives without being tuned per fold, the
+tuning was the problem, not the idea.
+
+### Everything passed
+
+It has cleared one specific way of being wrong. It has not cleared:
+
+- **Multiple symbols.** Running this on twenty symbols and deploying the best
+  is the same selection error one level up. Decide the symbol list first.
+- **Small samples.** Below 30 out-of-sample trades the report warns, and the
+  warning should be read as disqualifying rather than advisory.
+- **Assumed costs.** Re-run with the measured figure from
+  `/v1/execution/quality` (see the section above) before believing the return.
+
+### Parameter sensitivity
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --sensitivity
+```
+
+Use it to understand *why* a walk-forward result came out the way it did, not
+as a pass/fail on its own. A spike — the best configuration far above its
+immediate neighbours — explains a failed walk-forward. A plateau does not
+prove anything on its own: on a sample that happened to trend, every momentum
+configuration profits and they form a plateau together.
+
+### "Not enough data for N walk-forward folds"
+
+Each fold needs an initial training window plus a test window, on top of the
+indicator warm-up. Either raise `--days`, drop `--splits` to 2 or 3, or move to
+a smaller `--minutes` so the same calendar window yields more bars.
+
+### The run is slow
+
+The grid is 81 configurations by default and the walk-forward runs it once per
+fold. A year of 1-minute bars is a large job. Narrow the grid via the service's
+`grid` parameter rather than reducing folds — folds are the part doing the
+actual validating.
+
 ## Checking What Execution Is Costing You
 
 ```bash
@@ -360,7 +439,7 @@ curl "http://localhost:8006/v1/audit/summary"
 
 ```bash
 # All services
-for port in 8001 8002 8003 8004 8005 8006 8007 8008 8009 8010; do
+for port in 8001 8002 8003 8004 8005 8006 8007 8008 8009 8010 8011; do
   echo -n "Port $port: "
   curl -s http://localhost:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))"
 done

@@ -8,9 +8,18 @@ from fastapi import FastAPI, HTTPException
 from market_data import MarketDataSettings
 from market_data.fetcher import DataUnavailableError, get_fetcher
 from market_data.models import OHLCVBar
+from pydantic import Field
 
 from .engine import MIN_WARMUP_BARS, run_backtest, run_cost_sensitivity
-from .models import BacktestRequest, BacktestResult, CostSensitivityResult
+from .models import (
+    BacktestRequest,
+    BacktestResult,
+    CostSensitivityResult,
+    ParameterGrid,
+    ParameterSensitivityResult,
+    WalkForwardResult,
+)
+from .validation import parameter_sensitivity, walk_forward
 
 logger = logging.getLogger(__name__)
 
@@ -85,5 +94,55 @@ async def cost_sensitivity(request: BacktestRequest) -> CostSensitivityResult:
     bars = _bars_or_422(request)
     try:
         return run_cost_sensitivity(request, bars)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class ValidationRequest(BacktestRequest):
+    """A backtest request plus the search to run over it."""
+
+    grid: ParameterGrid = Field(default_factory=ParameterGrid)
+    n_splits: int = Field(default=4, ge=1, le=20)
+    embargo_bars: int | None = Field(default=None, ge=0)
+    """Bars dropped between each training window and the test window that
+    follows it. Defaults to the indicator warm-up length."""
+    objective: str = Field(default="sharpe", pattern="^(sharpe|return|profit_factor)$")
+
+
+@app.post("/backtest/walk-forward", response_model=WalkForwardResult)
+async def walk_forward_endpoint(request: ValidationRequest) -> WalkForwardResult:
+    """Choose parameters on past data, judge them on the data that followed.
+
+    Read `sharpe_degradation` and `deflated_sharpe_ratio` before anything else.
+    A large drop from in-sample to out-of-sample, or a deflated ratio below
+    0.95, means the result is a description of this sample rather than evidence
+    about the next one.
+    """
+    bars = _bars_or_422(request)
+    try:
+        return walk_forward(
+            request,
+            bars,
+            grid=request.grid,
+            n_splits=request.n_splits,
+            embargo_bars=request.embargo_bars,
+            objective=request.objective,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/backtest/parameter-sensitivity", response_model=ParameterSensitivityResult)
+async def parameter_sensitivity_endpoint(
+    request: ValidationRequest,
+) -> ParameterSensitivityResult:
+    """Score the whole grid and report the shape of the surface.
+
+    In-sample by design: the question is whether the best configuration sits on
+    a plateau or a spike. A spike is a fit, whatever its Sharpe says.
+    """
+    bars = _bars_or_422(request)
+    try:
+        return parameter_sensitivity(request, bars, grid=request.grid)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

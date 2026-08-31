@@ -47,6 +47,7 @@ Production-minded AI trading stack: strategy proposes, policy approves, executio
 | sentiment-aggregator | 8008 | News/sentiment scoring |
 | notification-service | 8009 | Webhook notifications (tiered) |
 | approval-gateway | 8010 | Human approval flow (PENDING/APPROVE/REJECT) |
+| backtest-service | 8011 | Backtesting, walk-forward, parameter sensitivity |
 | dashboard | 8080 | Web UI (kill switch, approvals, stats bar) |
 
 ## Environment Variables
@@ -128,6 +129,7 @@ uv run uvicorn autonomy_orchestrator.main:app --port 8007
 uv run uvicorn sentiment_aggregator.main:app --port 8008
 uv run uvicorn notification_service.main:app --port 8009
 uv run uvicorn approval_gateway.main:app --port 8010
+uv run uvicorn backtest_service.main:app --port 8011
 
 # Open dashboard
 open apps/dashboard/index.html
@@ -278,7 +280,156 @@ execution will fix that. Fix the strategy or stop.
 - It assumes every order fills at the next bar's open. Real market orders in
   fast markets do worse.
 - Past results do not predict future returns. A strategy tuned until a backtest
-  looks good is a strategy fitted to history.
+  looks good is a strategy fitted to history — which is what the next section
+  is for.
+
+## Is the Edge Real, or Fitted?
+
+A backtest over the whole history answers "what would have happened?". It
+cannot answer "would it happen again?", and it is trivially gamed: try enough
+parameter combinations and one of them fits the sample.
+
+This is not a subtle risk. The suite contains a test that builds **200
+strategies out of pure random noise**, picks the best one, and checks the
+numbers it produces:
+
+```
+best of 200 noise runs:  annualised Sharpe 10.45
+naive confidence:        99.8%
+deflated Sharpe ratio:    0.53   <- a coin flip
+```
+
+Nothing was there. The first two numbers would still get a strategy funded.
+
+Two commands exist to catch this.
+
+### Walk-forward: choose on the past, judge on what followed
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+```
+
+The data is split into sequential folds. For each fold, every configuration in
+the grid is scored on the bars *before* the test window, the best one is
+selected, and only then is it run on the test window. The out-of-sample
+segments are stitched together and reported; the in-sample figures appear for
+one reason, which is to show the size of the drop.
+
+```
+  fold 1  2025-05-07 -> 2025-05-10  ema10/60 rsi40-70 macd>0
+          in-sample    3.66   out-of-sample   -0.22   return -0.35%  (5 trades)
+  fold 2  2025-05-10 -> 2025-05-14  ema10/60 rsi40-70 macd>0
+          in-sample    1.97   out-of-sample    3.26   return +3.71%  (3 trades)
+
+  Out-of-sample Sharpe             5.20
+  In-sample Sharpe (mean)          2.75
+  Degradation                     -2.44
+
+  [PASS] Out-of-sample profitable     +20.78%
+  [FAIL] Survives the search          deflated Sharpe ratio 0.949
+  [PASS] Folds agree on parameters    67% picked the same configuration
+```
+
+The three checks, and why each is there:
+
+| Check | What it catches |
+|---|---|
+| Out-of-sample profitable | The strategy only worked on the data it was tuned on |
+| Survives the search | The winner is what a search of this size finds in noise |
+| Folds agree on parameters | Each fold's "optimal" settings are a property of its window |
+
+**Read `sharpe_degradation` first.** A strategy scoring 2.5 in-sample and 0.1
+out-of-sample has not found an edge; it has memorised a sample. A *negative*
+degradation means out-of-sample beat in-sample, which is luck rather than
+vindication — with few folds it happens often.
+
+Two design points worth knowing, because they are where leakage would hide:
+
+- **The embargo.** Bars immediately before each test window are dropped from
+  training. Adjacent bars carry nearly the same information — an EMA at the
+  boundary is largely built from bars about to become test data — so optimising
+  right up to the edge is close to optimising on the test set. Defaults to the
+  indicator warm-up length.
+- **Warm-up is not leakage.** The test segment computes its indicators from the
+  bars preceding it. That is what live trading does; leakage would be using
+  data from *after* the decision. Trades and equity are counted only from the
+  test window's first bar.
+
+### The deflated Sharpe ratio
+
+The probability that the result beats what the best of N random configurations
+would produce by luck alone. Below 0.95 it does not.
+
+It rises with sample length and falls with the number of configurations tried
+and how much they differ from each other — so a wider grid is not a more
+thorough search, it is a more expensive one. It also corrects for skew and
+kurtosis, which matters because "wins small and often, loses catastrophically"
+has a flattering Sharpe and a real risk of ruin.
+
+What is compared, precisely: the *out-of-sample* record is tested against a
+benchmark built from the spread of the configurations' *in-sample* Sharpe
+ratios. The textbook version tests the in-sample winner against that benchmark;
+holding the out-of-sample record to it is the stricter of the two. Worth
+knowing so the number is not read as the canonical statistic.
+
+**The caveat no formula can fix:** the trial count is the configurations *this
+run* evaluated. Every parameter you tried by hand beforehand, every strategy
+variant abandoned along the way, and every symbol swapped in and out is also a
+trial, and none of them are counted. The true multiple-testing burden is higher
+than what is reported. Treat the number as an upper bound on your confidence,
+not a measurement of it.
+
+### Parameter sensitivity: plateau or spike?
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --sensitivity
+```
+
+Scores every configuration in the grid and looks at the shape of the surface
+rather than its peak. A real effect is a plateau — the neighbours of the best
+configuration work nearly as well. A fitted one is a spike, alone above
+configurations that lose money.
+
+```
+  Profitable configurations    81/81 (100%)
+  Neighbours of the best       4.35 Sharpe vs its 4.81 (90% retained)
+  [PASS] Plateau, not a spike  the result survives one step in any parameter
+```
+
+**A plateau is necessary but not sufficient.** In a sample that happened to
+trend, every momentum configuration profits and they form a plateau together —
+this is reproducible on synthetic random-walk data. Sensitivity is in-sample by
+design and reads as a companion to `--walk-forward`, never as a substitute.
+
+### Via the service
+
+```bash
+curl -X POST http://localhost:8011/backtest/walk-forward \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"AAPL","timeframe":"intraday","period_days":59,"n_splits":4}'
+
+curl -X POST http://localhost:8011/backtest/parameter-sensitivity \
+  -H "Content-Type: application/json" -d '{"symbol":"AAPL"}'
+```
+
+Both accept a `grid` object to narrow or widen the search, and walk-forward
+accepts `n_splits`, `embargo_bars` and `objective` (`sharpe`, `return` or
+`profit_factor`).
+
+### What this still does not prove
+
+Being explicit, because these checks are easy to over-read:
+
+- **It is one symbol at a time.** Passing on AAPL says nothing about the
+  portfolio, and running the same test on twenty symbols and reporting the best
+  is the same multiple-testing error at a different level.
+- **The out-of-sample sample is small.** Walk-forward over a 60-day intraday
+  window produces a handful of round trips per fold. A Sharpe from nine trades
+  is an anecdote; the report says so when the count is below 30.
+- **Costs are still assumed.** Feed the measured `mean_shortfall_bps` from
+  `/v1/execution/quality` into `--slippage-bps` so this is validating the
+  strategy you would actually run.
+- **Passing is not a green light.** It removes one specific way of being wrong.
 
 ## Pattern Day Trader (PDT) Protection
 

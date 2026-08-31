@@ -24,9 +24,10 @@ import zoneinfo
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from market_data.indicators import compute_atr, compute_ema, compute_macd, compute_rsi
+from market_data.indicators import compute_atr
 from market_data.models import OHLCVBar
 
+from . import indicator_series
 from .models import (
     TRADING_DAYS_PER_YEAR,
     US_SESSION_MINUTES,
@@ -41,8 +42,11 @@ from .models import (
 # trading day it actually belongs to.
 MARKET_TZ = zoneinfo.ZoneInfo("America/New_York")
 
-# EMA-50 plus MACD's 26+9 warm-up: below this the indicators return defaults
-# rather than signal, so no position is taken.
+# Warm-up for the *default* parameters: EMA-50 plus MACD's 26+9. Below this the
+# indicators return defaults rather than signal, so no position is taken. A
+# request that changes ema_slow computes its own requirement via
+# StrategyParams.min_warmup_bars; this constant is the figure the service uses
+# to decide whether it fetched enough data to bother running at all.
 MIN_WARMUP_BARS = 51
 
 
@@ -77,22 +81,35 @@ def periods_per_year_for(request: BacktestRequest, bars: list[OHLCVBar]) -> floa
 
 def _compute_signals(bars: list[OHLCVBar], request: BacktestRequest) -> list[str]:
     """BUY/SELL/HOLD per bar, using only data available at that bar."""
+    params = request.params
+    warmup = params.min_warmup_bars
+    closes = [b.close for b in bars]
+    # One pass for the whole series rather than one per bar. Verified
+    # value-for-value against market_data.indicators in
+    # tests/backtest/test_indicator_series.py.
+    series = indicator_series.build(closes, params.ema_fast, params.ema_slow)
+
     signals: list[str] = []
     for i in range(len(bars)):
-        slice_ = bars[: i + 1]
-        closes = [b.close for b in slice_]
-
-        if len(closes) < MIN_WARMUP_BARS:
+        if i + 1 < warmup:
             signals.append("HOLD")
             continue
 
-        ema_20 = compute_ema(closes, 20)
-        ema_50 = compute_ema(closes, 50)
-        rsi = compute_rsi(closes)
-        _, _, macd_hist = compute_macd(closes)
+        ema_fast = series.ema_fast[i]
+        ema_slow = series.ema_slow[i]
+        rsi = series.rsi[i]
+        macd_hist = series.macd_hist[i]
 
-        buy = ema_20 > ema_50 and 45 < rsi < 70 and macd_hist > 0
-        sell = ema_20 < ema_50 and 30 < rsi < 55 and macd_hist < 0
+        buy = (
+            ema_fast > ema_slow
+            and params.rsi_buy_min < rsi < params.rsi_buy_max
+            and macd_hist > params.macd_hist_min
+        )
+        sell = (
+            ema_fast < ema_slow
+            and params.rsi_sell_min < rsi < params.rsi_sell_max
+            and macd_hist < -params.macd_hist_min
+        )
 
         signals.append("BUY" if buy else "SELL" if sell else "HOLD")
 
@@ -120,8 +137,16 @@ def _simulate(
     bars: list[OHLCVBar],
     signals: list[str],
     cost_per_side: float,
+    start_index: int = 0,
 ) -> _Simulation:
-    """Run the strategy once at the given one-way cost fraction."""
+    """Run the strategy once at the given one-way cost fraction.
+
+    `start_index` is the first bar that may be traded. Bars before it still
+    feed the indicators — an EMA needs history, and using past prices is what
+    live trading does — but produce no trades and no equity movement. This is
+    what makes an out-of-sample segment genuinely out of sample: the strategy
+    sees the run-up, it just cannot have profited from it.
+    """
     equity = request.initial_capital
     position = 0.0
     entry_price = 0.0
@@ -133,7 +158,7 @@ def _simulate(
     equity_curve: list[float] = [equity]
     total_costs = 0.0
 
-    for i in range(len(bars) - 1):
+    for i in range(max(0, start_index), len(bars) - 1):
         bar = bars[i]
         next_bar = bars[i + 1]
         signal = signals[i]
@@ -330,9 +355,10 @@ def _max_drawdown(equity_curve: list[float]) -> float:
 
 def run_backtest(request: BacktestRequest, bars: list[OHLCVBar]) -> BacktestResult:
     """Simulate the strategy, reporting net and gross results side by side."""
-    if len(bars) < MIN_WARMUP_BARS + 1:
+    warmup = request.params.min_warmup_bars
+    if len(bars) < warmup + 1:
         raise ValueError(
-            f"Need at least {MIN_WARMUP_BARS + 1} bars for indicator warm-up, got {len(bars)}"
+            f"Need at least {warmup + 1} bars for indicator warm-up, got {len(bars)}"
         )
 
     signals = _compute_signals(bars, request)

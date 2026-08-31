@@ -13,6 +13,13 @@ happily trade a strategy with no edge. Run this before trusting it with money.
     # how much cost does the edge survive?
     uv run python scripts/run_backtest.py --symbols AAPL --sweep
 
+    # is the edge real, or fitted? (choose params on past data, judge on what
+    # followed — this is the one that matters)
+    uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+
+    # plateau or spike? score the whole parameter grid
+    uv run python scripts/run_backtest.py --symbols AAPL --sensitivity
+
 Costs default to 5bps spread + 1bps slippage + zero commission, which is
 roughly a liquid US large-cap at a commission-free broker. Set them to match
 YOUR broker and YOUR symbols — a wider spread is the single fastest way for an
@@ -27,7 +34,8 @@ import sys
 
 from backtest_service.engine import run_backtest, run_cost_sensitivity
 from backtest_service.main import load_bars
-from backtest_service.models import BacktestRequest
+from backtest_service.models import BacktestRequest, ParameterGrid
+from backtest_service.validation import parameter_sensitivity, walk_forward
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 
@@ -105,6 +113,131 @@ def _sweep(request: BacktestRequest, bars) -> None:
         )
 
 
+def _verdict(label: str, ok: bool, detail: str) -> None:
+    mark = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
+    print(f"  [{mark}] {label:<28} {detail}")
+
+
+def _walk_forward_report(request: BacktestRequest, bars, args) -> None:
+    grid = ParameterGrid()
+    print(f"\n{'-' * 62}")
+    print(f"  WALK-FORWARD  {request.symbol}")
+    print(f"{'-' * 62}")
+    try:
+        result = walk_forward(
+            request, bars, grid=grid, n_splits=args.splits, objective=args.objective
+        )
+    except ValueError as exc:
+        print(f"  {RED}{exc}{RESET}")
+        return
+
+    print(
+        f"  {DIM}{result.n_folds} folds, {result.n_trials} configurations per fold, "
+        f"{result.embargo_bars}-bar embargo, selecting on {result.objective}{RESET}\n"
+    )
+    for fold in result.folds:
+        print(
+            f"  fold {fold.fold}  {fold.test_start:%Y-%m-%d} -> {fold.test_end:%Y-%m-%d}  "
+            f"{fold.selected_params.label()}"
+        )
+        print(
+            f"          in-sample {fold.in_sample_sharpe:>7.2f}   "
+            f"out-of-sample {fold.out_of_sample_sharpe:>7.2f}   "
+            f"return {_pct(fold.out_of_sample_return_pct)}  "
+            f"({fold.out_of_sample_trades} "
+            f"{'trade' if fold.out_of_sample_trades == 1 else 'trades'})"
+        )
+
+    print(f"\n  {'Out-of-sample Sharpe':<28} {result.out_of_sample_sharpe:>8.2f}")
+    print(f"  {'In-sample Sharpe (mean)':<28} {result.in_sample_sharpe:>8.2f}")
+    print(f"  {'Degradation':<28} {result.sharpe_degradation:>8.2f}")
+    print(f"  {'Out-of-sample return':<28} {_pct(result.out_of_sample_return_pct):>8}")
+    print(f"  {'Out-of-sample max drawdown':<28} {result.out_of_sample_max_drawdown_pct:>8.2%}")
+    print(f"  {'Out-of-sample trades':<28} {result.out_of_sample_trades:>8}")
+
+    print()
+    dsr = result.deflated_sharpe_ratio
+    _verdict(
+        "Out-of-sample profitable",
+        result.out_of_sample_return_pct > 0,
+        f"{result.out_of_sample_return_pct:+.2%}",
+    )
+    _verdict(
+        "Survives the search",
+        dsr is not None and dsr >= 0.95,
+        f"deflated Sharpe ratio {dsr:.3f}" if dsr is not None else "not computable",
+    )
+    _verdict(
+        "Folds agree on parameters",
+        result.parameter_stability >= 0.5,
+        f"{result.parameter_stability:.0%} picked the same configuration",
+    )
+
+    for warning in result.warnings:
+        print(f"\n  {YELLOW}! {warning}{RESET}")
+
+    print(
+        f"\n  {DIM}The deflated Sharpe ratio is the probability this result beats what "
+        f"the best of\n  {result.n_trials} random configurations would have produced by "
+        f"luck. Below 0.95, it does not.\n  It counts only the configurations tried here "
+        f"— every parameter you tried by hand\n  beforehand is also a trial, and none of "
+        f"them are in that number.{RESET}"
+    )
+
+
+def _sensitivity_report(request: BacktestRequest, bars, args) -> None:
+    print(f"\n{'-' * 62}")
+    print(f"  PARAMETER SENSITIVITY  {request.symbol}")
+    print(f"{'-' * 62}")
+    try:
+        result = parameter_sensitivity(request, bars, grid=ParameterGrid())
+    except ValueError as exc:
+        print(f"  {RED}{exc}{RESET}")
+        return
+
+    print(f"  {DIM}{result.grid_size} configurations, scored in-sample{RESET}\n")
+    print(f"  {'configuration':<34} {'sharpe':>8} {'return':>10} {'trades':>7}")
+    for score in result.scores[:5]:
+        print(
+            f"  {score.params.label():<34} {score.sharpe_ratio:>8.2f} "
+            f"{score.total_return_pct:>9.2%} {score.total_trades:>7}"
+        )
+    if len(result.scores) > 6:
+        print(f"  {DIM}{'...':<34}{RESET}")
+    worst = result.worst
+    print(
+        f"  {worst.params.label():<34} {worst.sharpe_ratio:>8.2f} "
+        f"{worst.total_return_pct:>9.2%} {worst.total_trades:>7}"
+    )
+
+    print(
+        f"\n  {'Profitable configurations':<28} "
+        f"{result.profitable_count}/{result.grid_size} ({result.profitable_fraction:.0%})"
+    )
+    if result.plateau_ratio is not None:
+        print(
+            f"  {'Neighbours of the best':<28} "
+            f"{result.neighbour_mean_sharpe:.2f} Sharpe vs its {result.best.sharpe_ratio:.2f} "
+            f"({result.plateau_ratio:.0%} retained)"
+        )
+        _verdict(
+            "Plateau, not a spike",
+            result.plateau_ratio >= 0.5,
+            "the result survives one step in any parameter"
+            if result.plateau_ratio >= 0.5
+            else "the result does not survive one step away",
+        )
+
+    for warning in result.warnings:
+        print(f"\n  {YELLOW}! {warning}{RESET}")
+
+    print(
+        f"\n  {DIM}A plateau is necessary but not sufficient: in a sample that happened "
+        f"to trend,\n  every momentum configuration profits and they form a plateau "
+        f"together. Read this\n  alongside --walk-forward, never instead of it.{RESET}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", default="AAPL,MSFT,NVDA")
@@ -117,6 +250,23 @@ def main() -> int:
     parser.add_argument("--slippage-bps", type=float, default=1.0)
     parser.add_argument("--commission-pct", type=float, default=0.0)
     parser.add_argument("--sweep", action="store_true", help="run a cost sensitivity ladder")
+    parser.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help="choose parameters on past data and judge them on what followed",
+    )
+    parser.add_argument(
+        "--sensitivity",
+        action="store_true",
+        help="score the whole parameter grid: plateau or spike?",
+    )
+    parser.add_argument("--splits", type=int, default=4, help="walk-forward folds")
+    parser.add_argument(
+        "--objective",
+        choices=("sharpe", "return", "profit_factor"),
+        default="sharpe",
+        help="what the walk-forward selects parameters on",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -148,9 +298,14 @@ def main() -> int:
             continue
 
         try:
-            _report(run_backtest(request, bars))
+            if not args.walk_forward and not args.sensitivity:
+                _report(run_backtest(request, bars))
             if args.sweep:
                 _sweep(request, bars)
+            if args.walk_forward:
+                _walk_forward_report(request, bars, args)
+            if args.sensitivity:
+                _sensitivity_report(request, bars, args)
         except ValueError as exc:
             print(f"\n  {RED}{symbol}: {exc}{RESET}")
             failures += 1
