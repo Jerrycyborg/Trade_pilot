@@ -257,10 +257,51 @@ cannot hold across a $3 stock and a $900 one. Regime stays a diagnostic and
 never enters the identity — a label with a threshold in it is an opinion, and
 the three price components have to add up regardless.
 
-**Health thresholds are conventions.** 15% drawdown, 2.0 Sharpe decay, a 20%
-win rate, 20 trades, a 60-minute journal-gap grace. Each is defensible and none
-is derived. They are environment variables so they can be argued with, and they
-should be, against real data.
+**~~The decay trigger compared two incommensurable numbers.~~ Fixed.** Found
+while trying to derive the thresholds below. `out_of_sample_sharpe` is
+`annualise(per_period_sharpe, periods_per_year)` — annualised and bar-based —
+and `performance_from_trades` returns a raw per-trade ratio. The health check
+subtracted one from the other.
+
+The error is not small and it points the wrong way. A per-trade 0.20 at roughly
+250 trades a year is an annualised 3.16, so a sleeve comfortably beating a
+validated 2.50 read as 2.30 *below* it and was demoted for outperforming.
+Systematically, sleeves validated with a high annualised Sharpe were the most
+likely to be demoted for it.
+
+`performance_from_trades` now also reports `sharpe_annualised`, scaled by the
+trade frequency the sleeve actually ran at — measured from its own exits, not
+assumed — and the comparison is annualised against annualised. When the live
+record is too short to measure a frequency from, the annualised figure is
+`None` and the trigger stays quiet rather than falling back: a wrong scaling
+produces a number that looks comparable and is not. The drawdown and
+losing-outright triggers still cover the worst case there, and neither needs a
+scaling to be true. Four tests fail if the raw ratio is restored.
+
+**One threshold is now derived; the rest are conventions.** The absolute
+`max_sharpe_decay: 2.0` is gone, replaced by a band of
+`sharpe_decay_sigmas × SE(Sharpe)`, where the standard error is Lo (2002)'s
+`sqrt((1 + SR²/2)/n)` on the same annualised footing. The same shortfall is
+evidence over 500 trades and noise over 20, and a constant cannot express that.
+
+The sigma count defaults to **1.0, not the conventional 2.0**, because the two
+errors do not cost the same: a false demotion parks a working sleeve in
+probation and is reversible, while a false clean bill leaves a broken one
+trading real money. At two sigmas a sleeve running at an annualised −2.4
+against a validated +2.5 still passed, which is not a health check.
+
+Still conventions, and named as such: 15% drawdown, a 20% win rate, 20 trades,
+a 60-minute journal-gap grace, the 0.5 absolute floor under the sigma band, and
+the five-day minimum span before a trade frequency is worth annualising. Each
+is defensible and none is derived.
+
+`LIFECYCLE_MAX_SHARPE_DECAY` is deleted rather than rebound to the sigma count:
+a variable that quietly stops meaning what its name says is worse than one that
+is gone. `HealthThresholds.from_env` now reads defaults from the fields
+themselves rather than keeping a second copy — which is how the sigma default
+was changed in one place and silently not the other while this was written —
+and refuses an unparseable value instead of falling back to a default the
+operator believes they replaced.
 
 **Correlation is measured on a calm sample.** Unchanged from before, and worth
 restating: correlations rise in a selloff, which is exactly when the

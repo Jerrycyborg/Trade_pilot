@@ -542,3 +542,90 @@ class TestRegimeReachesTheReport:
         # The regime lives in diagnostics only — nothing about it appears among
         # the summed components.
         assert set(attribution) & {"entry_regime", "regime_shift"} == set()
+
+
+class TestAnnualisationMakesTheComparisonPossible:
+    """`performance_from_trades` reports a per-trade Sharpe, and the lifecycle
+    health check compares it against a validated figure that is annualised and
+    bar-based. Those are different units, and the health check was making that
+    comparison — so the annualised figure is computed here, from the trade
+    frequency this sleeve actually ran at rather than an assumed one.
+    """
+
+    def _trips(self, results, *, spacing_days=1.0):
+        from attribution import Leg, RoundTrip
+
+        trips = []
+        for i, value in enumerate(results):
+            at = NOW + timedelta(days=spacing_days * i)
+            trips.append(
+                RoundTrip(
+                    strategy_id="ema_rsi_macd", symbol="AAPL", environment="live",
+                    account_id="default", qty=1.0,
+                    entry=Leg("BUY", 1.0, 100.0, 100.0, at),
+                    exit=Leg("SELL", 1.0, 100.0 + value, 100.0 + value,
+                             at + timedelta(minutes=30)),
+                )
+            )
+        return trips
+
+    def test_the_annualised_figure_scales_the_per_trade_one(self) -> None:
+        from attribution import performance_from_trades
+
+        # 21 trades one day apart: 20 intervals over 20 days.
+        result = performance_from_trades(self._trips([1.0, -0.5] * 10 + [1.0]))
+
+        assert result["span_days"] == pytest.approx(20.0)
+        assert result["trades_per_year"] == pytest.approx(365.25, rel=1e-3)
+        assert result["sharpe_annualised"] == pytest.approx(
+            result["sharpe"] * 365.25**0.5, rel=1e-3
+        )
+
+    def test_frequency_is_measured_not_assumed(self) -> None:
+        """The same per-trade edge at twice the rate is a different annual
+        Sharpe. A strategy firing twice a day and one firing twice a month
+        produce identical per-trade ratios from very different edges."""
+        from attribution import performance_from_trades
+
+        results = [1.0, -0.5] * 10 + [1.0]
+        slow = performance_from_trades(self._trips(results, spacing_days=4.0))
+        fast = performance_from_trades(self._trips(results, spacing_days=1.0))
+
+        assert slow["sharpe"] == pytest.approx(fast["sharpe"])
+        assert fast["sharpe_annualised"] > slow["sharpe_annualised"]
+        assert fast["sharpe_annualised"] == pytest.approx(
+            slow["sharpe_annualised"] * 2.0, rel=1e-3
+        )
+
+    def test_a_short_record_reports_no_annualised_figure(self) -> None:
+        """Annualising three days of intraday activity is extrapolation, and a
+        wrong scaling is worse than an absent one: it produces a number that
+        looks comparable and is not."""
+        from attribution import performance_from_trades
+
+        result = performance_from_trades(self._trips([1.0, -0.5, 1.0], spacing_days=0.5))
+
+        assert result["sharpe"] is not None, "the per-trade ratio is still reported"
+        assert result["sharpe_annualised"] is None
+        assert result["trades_per_year"] is None
+
+    def test_the_standard_error_shrinks_with_the_sample(self) -> None:
+        """It is what turns a fixed demotion gap into a sample-aware band."""
+        from attribution import performance_from_trades
+
+        few = performance_from_trades(self._trips([1.0, -0.5] * 10 + [1.0]))
+        many = performance_from_trades(self._trips([1.0, -0.5] * 100 + [1.0]))
+
+        assert many["sharpe_annualised_std_error"] < few["sharpe_annualised_std_error"]
+
+    def test_the_span_covers_intervals_not_trades(self) -> None:
+        """n exits span n-1 intervals. Dividing by n overstates the rate mildly
+        at 200 trades and by a third at four."""
+        from attribution import performance_from_trades
+
+        result = performance_from_trades(self._trips([1.0, -0.5, 1.0, -0.5, 1.0] * 2,
+                                                     spacing_days=2.0))
+        n = result["trades"]
+        assert result["trades_per_year"] == pytest.approx(
+            (n - 1) * 365.25 / result["span_days"], rel=1e-3
+        )  # the reported value is rounded to two places

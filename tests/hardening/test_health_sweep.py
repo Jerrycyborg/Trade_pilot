@@ -67,6 +67,30 @@ def _bars(symbol: str, *, hours: int = 6, skip: set[int] | None = None):
     ]
 
 
+def _decay(
+    *,
+    trades: int,
+    annualised: float,
+    validated: float,
+    std_error: float = 0.4,
+    **kw,
+) -> LiveMetrics:
+    """LiveMetrics for the decay trigger, on the *annualised* footing.
+
+    The comparison is annualised-against-annualised: `sharpe` alone is a
+    per-trade ratio and deliberately no longer feeds it. A default standard
+    error is supplied so these tests state a band rather than depending on one
+    computed elsewhere.
+    """
+    return LiveMetrics(
+        trades=trades,
+        sharpe_annualised=annualised,
+        sharpe_annualised_std_error=std_error,
+        validated_sharpe=validated,
+        **kw,
+    )
+
+
 class TestTriggersActWithoutBeingAsked:
     def test_a_drawdown_breach_needs_no_sample(self) -> None:
         """A breach is a fact about money already lost, not a claim about a
@@ -80,7 +104,7 @@ class TestTriggersActWithoutBeingAsked:
     def test_decay_waits_for_a_sample(self) -> None:
         check = evaluate_health(
             "live",
-            LiveMetrics(trades=4, sharpe=-3.0, validated_sharpe=1.5),
+            _decay(trades=4, annualised=-3.0, validated=1.5),
             HealthThresholds(),
         )
         assert check.healthy is True, "four bad trades is not evidence of decay"
@@ -88,7 +112,7 @@ class TestTriggersActWithoutBeingAsked:
     def test_decay_acts_once_the_sample_arrives(self) -> None:
         check = evaluate_health(
             "live",
-            LiveMetrics(trades=60, sharpe=-3.0, validated_sharpe=1.5),
+            _decay(trades=60, annualised=-3.0, validated=1.5),
             HealthThresholds(),
         )
         assert check.healthy is False
@@ -97,7 +121,7 @@ class TestTriggersActWithoutBeingAsked:
         """A profitable sleeve breaching its drawdown limit still demotes."""
         check = evaluate_health(
             "live",
-            LiveMetrics(trades=100, sharpe=3.0, validated_sharpe=1.5, max_drawdown_pct=0.4),
+            _decay(trades=100, annualised=3.0, validated=1.5, max_drawdown_pct=0.4),
             HealthThresholds(),
         )
         assert check.healthy is False
@@ -491,3 +515,123 @@ class TestTheWorstCaseIsNotSilent:
             HealthThresholds(),
         )
         assert check.healthy is True
+
+
+class TestTheDecayComparisonIsBetweenLikeAndLike:
+    """The trigger used to read a raw per-trade Sharpe against a validated
+    figure that is annualised and bar-based. Those are not the same kind of
+    number, and the error is not small: a per-trade 0.20 at roughly 250 trades
+    a year is an annualised 3.16, so a sleeve comfortably beating a validated
+    2.50 read as 2.30 *below* it — and got demoted for outperforming.
+    """
+
+    def test_a_sleeve_beating_its_validation_is_not_demoted(self) -> None:
+        """The original defect, stated as the outcome rather than the units."""
+        import math
+
+        per_trade, trades_per_year = 0.20, 250.0
+        check = evaluate_health(
+            "live",
+            LiveMetrics(
+                trades=40,
+                sharpe=per_trade,
+                sharpe_annualised=round(per_trade * math.sqrt(trades_per_year), 4),
+                sharpe_annualised_std_error=2.5,
+                trades_per_year=trades_per_year,
+                validated_sharpe=2.5,
+                realized_total=900.0,
+                win_rate=0.6,
+                max_drawdown_pct=0.04,
+            ),
+            HealthThresholds(),
+        )
+        assert check.healthy is True, "annualised 3.16 beats a validated 2.50"
+
+    def test_a_genuinely_decayed_sleeve_still_demotes(self) -> None:
+        """The band must not be so wide that nothing trips it. A sleeve running
+        at an annualised -2.37 against a validated +2.50 is broken by any
+        reading, and a health check that passes it is not one."""
+        check = evaluate_health(
+            "live",
+            _decay(trades=40, annualised=-2.37, validated=2.5, std_error=2.51),
+            HealthThresholds(),
+        )
+        assert check.healthy is False
+        assert "annualised" in check.reasons[0]
+
+    def test_the_band_widens_when_the_sample_is_small(self) -> None:
+        """The same shortfall is evidence over 500 trades and noise over 20.
+        A fixed absolute gap could not express that; a standard error can."""
+        gap_is_1_5 = dict(annualised=0.0, validated=1.5)
+        noisy = evaluate_health(
+            "live", _decay(trades=25, std_error=3.0, **gap_is_1_5), HealthThresholds()
+        )
+        settled = evaluate_health(
+            "live", _decay(trades=500, std_error=0.3, **gap_is_1_5), HealthThresholds()
+        )
+        assert noisy.healthy is True
+        assert settled.healthy is False
+
+    def test_a_trivial_shortfall_does_not_churn_a_working_sleeve(self) -> None:
+        """With enough trades any gap becomes significant. The absolute floor
+        stops the trigger acting on a difference nobody would act on if shown
+        it directly."""
+        check = evaluate_health(
+            "live",
+            _decay(trades=5000, annualised=1.45, validated=1.5, std_error=0.01),
+            HealthThresholds(),
+        )
+        assert check.healthy is True
+
+    def test_an_unscalable_record_stays_quiet_rather_than_guessing(self) -> None:
+        """When the live span is too short to measure a trade frequency, the
+        annualised figure is absent. Falling back to the per-trade ratio would
+        reinstate the original defect; the drawdown and losing-outright
+        triggers still cover the worst case without needing a scaling."""
+        check = evaluate_health(
+            "live",
+            LiveMetrics(
+                trades=40,
+                sharpe=-0.15,
+                sharpe_annualised=None,
+                validated_sharpe=2.5,
+                realized_total=-400.0,
+                win_rate=0.35,
+                max_drawdown_pct=0.04,
+            ),
+            HealthThresholds(),
+        )
+        assert check.healthy is True
+        assert check.reasons == []
+
+
+class TestThresholdsHaveOneSourceOfTruth:
+    def test_an_unset_variable_leaves_the_field_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("LIFECYCLE_SHARPE_DECAY_SIGMAS", raising=False)
+        assert HealthThresholds.from_env().sharpe_decay_sigmas == (
+            HealthThresholds().sharpe_decay_sigmas
+        ), "from_env must not carry its own copy of a default"
+
+    def test_a_set_variable_overrides_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LIFECYCLE_SHARPE_DECAY_SIGMAS", "3")
+        assert HealthThresholds.from_env().sharpe_decay_sigmas == 3.0
+
+    def test_an_unparseable_value_is_refused_not_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Silently falling back would leave a trading system running on a
+        default the operator believes they replaced."""
+        monkeypatch.setenv("LIFECYCLE_MAX_LIVE_DRAWDOWN", "fifteen percent")
+        with pytest.raises(ValueError, match="LIFECYCLE_MAX_LIVE_DRAWDOWN"):
+            HealthThresholds.from_env()
+
+    def test_the_retired_variable_no_longer_does_anything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LIFECYCLE_MAX_SHARPE_DECAY named an absolute gap the check no longer
+        uses. Rebinding it to the sigma band would silently change what an
+        operator's existing setting means."""
+        monkeypatch.setenv("LIFECYCLE_MAX_SHARPE_DECAY", "99")
+        assert HealthThresholds.from_env().sharpe_decay_sigmas == 1.0

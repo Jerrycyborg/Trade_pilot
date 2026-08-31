@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,31 @@ class HealthThresholds:
     """Below this, live underperformance is noise. Demoting on it would churn a
     working strategy out of the portfolio."""
 
-    max_sharpe_decay: float = 2.0
-    """How far live Sharpe may fall below the validated out-of-sample figure
-    before the sleeve is treated as broken rather than unlucky."""
+    sharpe_decay_sigmas: float = 1.0
+    """How many standard errors below the validated figure live performance
+    must fall before the sleeve is treated as broken rather than unlucky.
+
+    This replaces a fixed absolute gap, which was the wrong shape: the same
+    shortfall means something very different over 20 trades and over 500, and
+    a constant cannot express that. Scaling by the estimate's own standard
+    error does, and the sample size is already recorded.
+
+    One sigma, not the conventional two, because the two errors do not cost
+    the same. A false demotion parks a working sleeve in probation and is
+    reversible on the next promotion. A false clean bill leaves a broken one
+    trading real money. At the sample sizes a live sleeve actually reaches,
+    two sigmas is a wide enough band that a sleeve running at an annualised
+    -2.4 against a validated +2.5 still passes, which is not a health check.
+    Evidence thresholds for *entering* live are deliberately strict; the
+    threshold for stepping back from it should not be."""
+
+    min_sharpe_decay: float = 0.5
+    """A floor, in annualised Sharpe, beneath the statistical test.
+
+    With a long enough live record, a trivially small shortfall becomes
+    statistically significant, and demoting on it would churn a working sleeve
+    for a difference nobody would act on if shown it directly. This number is
+    a convention; the sigma band beside it is not."""
 
     max_losing_win_rate: float = 0.2
     """A sleeve losing money on this share of trades or fewer wins is not
@@ -52,19 +74,47 @@ class HealthThresholds:
     that a brief provider outage does not halt trading; short enough that
     trading blind is bounded."""
 
+    #: Which environment variable overrides which field. The defaults live on
+    #: the fields above and nowhere else: a second copy inside from_env is how
+    #: a default gets changed in one place and silently not in the other, which
+    #: is exactly what happened to sharpe_decay_sigmas while this was written.
+    #:
+    #: LIFECYCLE_MAX_SHARPE_DECAY is deliberately absent rather than rebound to
+    #: something new. It named an absolute Sharpe gap and the check no longer
+    #: uses one; a variable that quietly stops meaning what its name says is
+    #: worse than a variable that is gone.
+    _ENV: ClassVar[dict[str, str]] = {
+        "max_live_drawdown_pct": "LIFECYCLE_MAX_LIVE_DRAWDOWN",
+        "min_live_trades_before_decay_check": "LIFECYCLE_MIN_LIVE_TRADES",
+        "sharpe_decay_sigmas": "LIFECYCLE_SHARPE_DECAY_SIGMAS",
+        "min_sharpe_decay": "LIFECYCLE_MIN_SHARPE_DECAY",
+        "max_losing_win_rate": "LIFECYCLE_MAX_LOSING_WIN_RATE",
+        "journal_gap_grace_minutes": "JOURNAL_GAP_GRACE_MINUTES",
+    }
+
     @classmethod
     def from_env(cls) -> "HealthThresholds":
-        return cls(
-            max_live_drawdown_pct=float(os.getenv("LIFECYCLE_MAX_LIVE_DRAWDOWN", "0.15")),
-            min_live_trades_before_decay_check=int(
-                os.getenv("LIFECYCLE_MIN_LIVE_TRADES", "20")
-            ),
-            max_sharpe_decay=float(os.getenv("LIFECYCLE_MAX_SHARPE_DECAY", "2.0")),
-            journal_gap_grace_minutes=float(
-                os.getenv("JOURNAL_GAP_GRACE_MINUTES", "60")
-            ),
-            max_losing_win_rate=float(os.getenv("LIFECYCLE_MAX_LOSING_WIN_RATE", "0.2")),
-        )
+        """Field defaults, overridden only where an environment variable is set.
+
+        An unparseable value is refused rather than silently ignored. A
+        LIFECYCLE_MAX_LIVE_DRAWDOWN of "fifteen percent" must not leave a
+        trading system running on a default the operator believes they
+        replaced.
+        """
+        overrides: dict[str, Any] = {}
+        types = {f.name: f.type for f in fields(cls)}
+        for name, variable in cls._ENV.items():
+            raw = os.getenv(variable)
+            if raw is None or raw.strip() == "":
+                continue
+            caster = int if types[name] == "int" else float
+            try:
+                overrides[name] = caster(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{variable}={raw!r} is not a valid {caster.__name__}"
+                ) from exc
+        return cls(**overrides)
 
 
 @dataclass
@@ -73,9 +123,21 @@ class LiveMetrics:
 
     trades: int = 0
     sharpe: float | None = None
+    """Per-trade. Not comparable with a backtest's annualised figure."""
+
+    sharpe_annualised: float | None = None
+    """The per-trade ratio scaled by this sleeve's observed trade frequency —
+    the only one of the two that can be compared with `validated_sharpe`.
+    None when the live record is too short to measure a frequency from."""
+
+    sharpe_annualised_std_error: float | None = None
+    trades_per_year: float | None = None
+    span_days: float | None = None
+
     max_drawdown_pct: float | None = None
     validated_sharpe: float | None = None
-    """The out-of-sample figure this sleeve was promoted on, for comparison."""
+    """The out-of-sample figure this sleeve was promoted on, for comparison.
+    Annualised and bar-based, which is what forced the scaling above."""
     realized_total: float | None = None
     win_rate: float | None = None
 
@@ -108,13 +170,28 @@ def evaluate_health(
             f"live drawdown {drawdown:.1%} exceeds the {t.max_live_drawdown_pct:.1%} limit"
         )
 
+    # Annualised against annualised. The raw per-trade ratio used to be
+    # compared with the validated figure directly, and the two are not the same
+    # kind of number: a per-trade 0.20 at ~250 trades a year is an annualised
+    # 3.16, so a sleeve comfortably beating a validated 2.50 read as 2.30 below
+    # it and demoted. When the live record is too short to measure a frequency
+    # the trigger stays quiet rather than falling back to that comparison —
+    # the drawdown and losing-outright triggers still cover the worst case, and
+    # they do not need a scaling to be true.
     if metrics.trades >= t.min_live_trades_before_decay_check:
-        live, expected = metrics.sharpe, metrics.validated_sharpe
-        if live is not None and expected is not None and (expected - live) > t.max_sharpe_decay:
-            reasons.append(
-                f"live Sharpe {live:.2f} is {expected - live:.2f} below the validated "
-                f"{expected:.2f} over {metrics.trades} trades"
-            )
+        live, expected = metrics.sharpe_annualised, metrics.validated_sharpe
+        if live is not None and expected is not None:
+            gap = expected - live
+            band = t.min_sharpe_decay
+            error = metrics.sharpe_annualised_std_error
+            if error is not None:
+                band = max(band, t.sharpe_decay_sigmas * error)
+            if gap > band:
+                reasons.append(
+                    f"live Sharpe {live:.2f} annualised is {gap:.2f} below the validated "
+                    f"{expected:.2f} over {metrics.trades} trades "
+                    f"(demotion band {band:.2f})"
+                )
 
     # Losing outright. Not a comparison against a validated figure and not a
     # drawdown percentage — both of those can go quiet on the worst record
@@ -330,6 +407,10 @@ def _live_metrics(
 
     metrics.trades = performance["trades"]
     metrics.sharpe = performance["sharpe"]
+    metrics.sharpe_annualised = performance["sharpe_annualised"]
+    metrics.sharpe_annualised_std_error = performance["sharpe_annualised_std_error"]
+    metrics.trades_per_year = performance["trades_per_year"]
+    metrics.span_days = performance["span_days"]
     metrics.max_drawdown_pct = performance["max_drawdown_pct"]
     metrics.realized_total = performance["realized_total"]
     metrics.win_rate = performance["win_rate"]

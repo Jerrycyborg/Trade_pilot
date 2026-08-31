@@ -195,16 +195,34 @@ def realized_series(round_trips: list[RoundTrip]) -> list[float]:
     return series
 
 
+#: Below this many days of live trading, annualising an observed trade
+#: frequency is extrapolation rather than measurement: three days of intraday
+#: activity says almost nothing about a year's. The un-annualised per-trade
+#: ratio is still reported; only the comparable figure is withheld.
+MIN_SPAN_DAYS_TO_ANNUALISE = 5.0
+
+DAYS_PER_YEAR = 365.25
+
+
 def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
     """Sharpe and drawdown from realised round trips.
 
     Per-trade rather than per-bar, and deliberately so: a live sleeve's health
     is about the trades it took, and a bar-level curve would need a mark-to-
-    market the journal does not hold. The Sharpe here is therefore a per-trade
-    ratio and is **not** comparable to the annualised, bar-based figure a
-    backtest reports — the health check compares it against a validated
-    out-of-sample number, so the two must be read as the same kind of thing or
-    the comparison is meaningless.
+    market the journal does not hold.
+
+    `sharpe` is therefore a **per-trade** ratio and must never be compared with
+    the annualised, bar-based figure a backtest reports. That comparison was
+    being made — the health check read a validated annualised Sharpe against
+    this one — and it is not close to harmless: a per-trade 0.20 at roughly 250
+    trades a year is an annualised 3.16, so a sleeve beating a validated 2.50
+    read as 2.30 *below* it and demoted.
+
+    `sharpe_annualised` is the figure that comparison actually needs, scaled by
+    the trade frequency this sleeve really ran at rather than an assumed one.
+    It is None when the live record is too short to estimate a frequency from,
+    because a wrong scaling is worse than an absent one: it produces a number
+    that looks comparable and is not.
 
     Returns None for a figure it cannot compute rather than a zero.
     """
@@ -213,6 +231,10 @@ def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
         "trades": len(series),
         "realized_total": round(sum(series), 4) if series else 0.0,
         "sharpe": None,
+        "sharpe_annualised": None,
+        "sharpe_annualised_std_error": None,
+        "trades_per_year": None,
+        "span_days": None,
         "max_drawdown_pct": None,
         "win_rate": None,
     }
@@ -245,7 +267,55 @@ def performance_from_trades(round_trips: list[RoundTrip]) -> dict[str, Any]:
     result["max_drawdown_pct"] = round(worst, 4) if peak > 0 else None
     result["max_cumulative_loss"] = round(trough, 4)
     result["win_rate"] = round(sum(1 for v in series if v > 0) / len(series), 4)
+    result.update(_annualised(round_trips, result["sharpe"], len(series)))
     return result
+
+
+def _annualised(
+    round_trips: list[RoundTrip], per_trade_sharpe: float | None, n: int
+) -> dict[str, Any]:
+    """Put a per-trade Sharpe on the same footing as a backtest's.
+
+    The frequency is measured, not assumed: this sleeve's own trades over this
+    sleeve's own elapsed time. A strategy that fires twice a day and one that
+    fires twice a month produce the same per-trade ratio from very different
+    edges, and only the observed frequency separates them.
+
+    The span covers n-1 intervals between n exits, so dividing by n would
+    overstate the rate — mildly at 200 trades and by a third at four.
+
+    The standard error is Lo (2002)'s approximation for an iid sample,
+    SE(SR) = sqrt((1 + SR^2/2)/n), scaled by the same root-frequency. Trade
+    results are not iid, so this understates the true uncertainty; it is used
+    only to set a demotion band, where understating uncertainty makes the
+    trigger *more* willing to fire, and the absolute floor beside it is what
+    stops that being reckless.
+    """
+    blank: dict[str, Any] = {
+        "sharpe_annualised": None,
+        "sharpe_annualised_std_error": None,
+        "trades_per_year": None,
+        "span_days": None,
+    }
+    if n < 2 or per_trade_sharpe is None:
+        return blank
+
+    exits = sorted(t.exit.at for t in round_trips if t.realized is not None)
+    if len(exits) < 2:
+        return blank
+    span_days = (exits[-1] - exits[0]).total_seconds() / 86400.0
+    out: dict[str, Any] = dict(blank)
+    out["span_days"] = round(span_days, 3)
+    if span_days < MIN_SPAN_DAYS_TO_ANNUALISE:
+        return out
+
+    trades_per_year = (n - 1) * DAYS_PER_YEAR / span_days
+    root = trades_per_year**0.5
+    out["trades_per_year"] = round(trades_per_year, 2)
+    out["sharpe_annualised"] = round(per_trade_sharpe * root, 4)
+    std_error = ((1.0 + (per_trade_sharpe**2) / 2.0) / n) ** 0.5
+    out["sharpe_annualised_std_error"] = round(std_error * root, 4)
+    return out
 
 
 def _by_regime(attributions: list[Attribution]) -> dict[str, Any]:
