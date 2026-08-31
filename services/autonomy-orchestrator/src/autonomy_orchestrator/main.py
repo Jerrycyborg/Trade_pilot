@@ -19,6 +19,13 @@ from contracts.execution import (
     participation_capped_qty,
 )
 from contracts.sanitize import sanitize_symbol
+from lifecycle import (
+    DEFAULT_LIVE_STRATEGY,
+    Evidence,
+    LifecycleRegistry,
+    State,
+    summarise,
+)
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from market_data import (
@@ -68,6 +75,7 @@ class OrchestratorState:
     stream_manager: StreamManager | None = None
     market_settings: MarketDataSettings | None = None
     day_trades: DayTradeTracker | None = None
+    lifecycle: LifecycleRegistry | None = None
 
 
 state = OrchestratorState()
@@ -330,6 +338,84 @@ def journal_status(limit: int = 25, symbol: str | None = None) -> dict[str, obje
     return {
         "archive": archive.stats(),
         "recent_decisions": archive.recent_decisions(limit=limit, symbol=symbol),
+    }
+
+
+@app.get("/v1/orchestrator/lifecycle")
+def lifecycle_status() -> dict[str, object]:
+    """The strategy roster: what is live, what is on paper, and why."""
+    return summarise(_lifecycle())
+
+
+@app.post("/v1/orchestrator/lifecycle/register")
+def lifecycle_register(
+    strategy: str, symbol: str, _: None = Depends(verify_internal_key)
+) -> dict[str, object]:
+    """Add a sleeve as a candidate. It cannot trade until it earns each step."""
+    record = _lifecycle().register(strategy, sanitize_symbol(symbol))
+    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+
+
+@app.post("/v1/orchestrator/lifecycle/promote")
+def lifecycle_promote(
+    strategy: str,
+    symbol: str,
+    evidence: Evidence,
+    _: None = Depends(verify_admin_key),
+) -> dict[str, object]:
+    """Move a sleeve up one step, if the evidence supports it.
+
+    Admin-gated because the upper step of this ladder is real money. Every gate
+    fails closed: a missing measurement is a refusal, not a pass.
+    """
+    record, result = _lifecycle().promote(strategy, sanitize_symbol(symbol), evidence)
+    return {
+        "sleeve": record.key if record else None,
+        "state": record.state.value if record else None,
+        "promoted": result.allowed,
+        "passed": result.passed,
+        "failed": result.failed,
+        "reason": result.reason,
+    }
+
+
+@app.post("/v1/orchestrator/lifecycle/demote")
+def lifecycle_demote(
+    strategy: str,
+    symbol: str,
+    to: str = "probation",
+    reason: str = "manual",
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Take a sleeve out of live. Never gated — safety must not need approval."""
+    try:
+        target = State(to)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown state {to!r}. Available: {', '.join(s.value for s in State)}",
+        ) from None
+    record = _lifecycle().demote(strategy, sanitize_symbol(symbol), target, reason)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Sleeve is not registered")
+    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+
+
+@app.post("/v1/orchestrator/lifecycle/health")
+def lifecycle_health(
+    strategy: str,
+    symbol: str,
+    evidence: Evidence,
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Check a live sleeve against its demotion triggers, and act on the answer."""
+    check = _lifecycle().check_health(strategy, sanitize_symbol(symbol), evidence)
+    record = _lifecycle().get(strategy, sanitize_symbol(symbol))
+    return {
+        "sleeve": record.key if record else None,
+        "healthy": check.healthy,
+        "state": record.state.value if record else None,
+        "reasons": check.reasons,
     }
 
 
@@ -620,6 +706,41 @@ async def run_cycle() -> dict[str, object]:
             if risk.tier >= 1:
                 await _notify(signal, risk, policy)
             if decision == "APPROVE" and risk.tier < 3:
+                # The roster decides what may reach the broker. A sleeve that
+                # is validated but still on paper runs the whole pipeline and
+                # records its decision — that recorded history is exactly the
+                # evidence its promotion to live is gated on.
+                strategy_name = _strategy_of(signal)
+                gate = _lifecycle_gate(signal)
+                if gate is not None:
+                    summary["paper_only"] = summary.get("paper_only", 0) + 1
+                    _journal().record_decision(
+                        stage="lifecycle_gate",
+                        outcome="not_traded",
+                        symbol=signal.symbol,
+                        action=_side_of(signal.candidate_action),
+                        reason=gate,
+                        inputs={
+                            "strategy": strategy_name,
+                            "confidence": signal.confidence,
+                            "adjusted_size_pct": risk.adjusted_size_pct,
+                        },
+                        outputs={"would_have_traded": True},
+                        correlation_id=signal.signal_id,
+                    )
+                    await _audit(
+                        AuditEvent(
+                            event_type="signal.paper_only",
+                            symbol=signal.symbol,
+                            signal_id=signal.signal_id,
+                            decision="PAPER",
+                            reasoning=gate,
+                            metadata={"strategy": strategy_name},
+                        )
+                    )
+                    await _mark_signal_acted(signal.signal_id)
+                    continue
+
                 order = await _submit_order(
                     signal, risk, config, portfolio_state, price_bars
                 )
@@ -917,6 +1038,36 @@ async def _submit_order(
     body["qty"] = qty
     body["trading_mode"] = config.get("trading_mode", "demo")
     return body
+
+
+def _strategy_of(signal: SignalCandidate) -> str:
+    """Which rule produced this signal.
+
+    Older producers do not set the field; they are all the momentum rule, which
+    is what the default names. Guessing the wrong strategy here would gate a
+    sleeve against another sleeve's roster entry.
+    """
+    return getattr(signal, "strategy", None) or DEFAULT_LIVE_STRATEGY
+
+
+def _lifecycle_gate(signal: SignalCandidate) -> str | None:
+    """Why this signal may not reach the broker, or None if it may.
+
+    Extracted from the cycle so the decision can be tested on its own. Buried
+    inside a hundred-line loop it could only be verified by re-implementing it
+    in the test, which tests the test.
+    """
+    strategy_name = _strategy_of(signal)
+    registry = _lifecycle()
+    if registry.can_trade(strategy_name, signal.symbol):
+        return None
+    return registry.gate_reason(strategy_name, signal.symbol)
+
+
+def _lifecycle() -> LifecycleRegistry:
+    if state.lifecycle is None:
+        state.lifecycle = LifecycleRegistry()
+    return state.lifecycle
 
 
 def _day_trades() -> DayTradeTracker:

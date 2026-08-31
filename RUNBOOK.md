@@ -399,6 +399,112 @@ warms up faster than `ema_rsi_macd` (no MACD), so a short window can produce a
 portfolio where only one strategy ran. Check the sleeve list matches what you
 asked for before reading any of the numbers.
 
+## Promoting a Strategy to Real Money
+
+```bash
+curl http://localhost:8007/v1/orchestrator/lifecycle
+```
+
+Sleeves climb `candidate -> paper -> live`, one step per call. There is no way
+to skip paper: the gates for live read measurements only paper trading
+produces, so skipping it would make them unreachable.
+
+### Step 1 — register
+
+```bash
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/register?strategy=ema_rsi_macd&symbol=AAPL" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY"
+```
+
+Until this, the sleeve cannot trade at all — `sleeve_not_registered`.
+
+### Step 2 — earn paper
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+```
+
+Take `deflated_sharpe_ratio`, `out_of_sample_trades` and
+`out_of_sample_return_pct` from that output and pass them to `/promote`. If it
+refuses, the response lists every gate that failed. Do not work around a
+refusal by widening the parameter grid until something passes — that is the
+overfitting this was built to catch, one level up.
+
+### Step 3 — earn live
+
+Leave it on paper. It runs in the live loop and records every decision it would
+have taken; those recordings are the evidence. After the paper period:
+
+```bash
+# the measured cost, not the assumed one
+curl http://localhost:8002/v1/execution/quality
+
+# correlation against what is already live
+uv run python scripts/run_backtest.py --symbols AAPL,<live symbols> --portfolio
+```
+
+Then promote with `paper_started_at`, `paper_decisions`,
+`measured_shortfall_bps` and `max_correlation_with_live`. Promotion is
+admin-gated; demotion is not.
+
+### "sleeve_paper" in the logs, no orders placed
+
+Working as intended. The sleeve is validated but has not earned live. Check
+`/v1/orchestrator/lifecycle` for its state and `since`, and the journal for
+what it would have traded:
+
+```bash
+curl "http://localhost:8007/v1/orchestrator/journal?limit=50" | grep lifecycle_gate
+```
+
+### "sleeve_not_registered" for something you expected to trade
+
+Either it was never registered, or the roster file was lost. Check:
+
+```bash
+cat ./strategy-lifecycle.json
+```
+
+If the file is missing or corrupt the registry loads **empty** and nothing
+trades — that is deliberate, because the alternative is a corrupt file silently
+re-enabling a retired sleeve. Re-register and re-promote; the gates will make
+you re-supply the evidence, which is the point.
+
+### A sleeve was demoted to probation
+
+The reason is in the state and the journal:
+
+```bash
+curl http://localhost:8007/v1/orchestrator/lifecycle
+```
+
+- **Drawdown breach** — a fact, not a judgement. Do not promote it back until
+  the drawdown is inside the limit; the probation gate enforces that anyway.
+- **Sharpe decay** — the live record is materially below what walk-forward
+  validated, over enough trades to mean something. Re-run walk-forward on
+  recent data before doing anything else: if it no longer validates, the edge
+  is gone rather than the sleeve being unlucky.
+
+It returns to **paper**, never straight to live, and has to re-earn the live
+gates. Three probations retire it permanently.
+
+### Emergency: take everything off live
+
+Demotion is never gated, so this always works:
+
+```bash
+for sleeve in $(curl -s http://localhost:8007/v1/orchestrator/lifecycle \
+  | python -c "import json,sys; print(' '.join(json.load(sys.stdin)['trading']))"); do
+  symbol=${sleeve%%:*}; strategy=${sleeve#*:}
+  curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/demote?strategy=$strategy&symbol=$symbol&to=probation&reason=emergency" \
+    -H "X-Internal-Key: $INTERNAL_API_KEY"
+done
+```
+
+This blocks new entries only. Exits keep working, which is the intent — see the
+kill switch section for halting the loop entirely, and note that neither closes
+open positions for you.
+
 ## Position Break — "New entries paused"
 
 The ledger and the broker disagree about what is held. Exits still work; only

@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "contracts",
   "journal",
+  "lifecycle",
   "market_data",
   "brokers",
   "audit-logger",
@@ -34,6 +35,7 @@ dev = [
 members = [
   "libs/contracts",
   "libs/journal",
+  "libs/lifecycle",
   "libs/market_data",
   "libs/brokers",
   "services/audit-logger",
@@ -52,6 +54,7 @@ members = [
 [tool.uv.sources]
 contracts = { workspace = true }
 journal = { workspace = true }
+lifecycle = { workspace = true }
 market_data = { workspace = true }
 brokers = { workspace = true }
 audit-logger = { workspace = true }

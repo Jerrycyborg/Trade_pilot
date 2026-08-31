@@ -547,6 +547,151 @@ Stated plainly, because each of these flatters the number:
 - **Costs are still assumed.** Six sleeves trade roughly six times as often.
   Feed the measured `mean_shortfall_bps` in before believing the return.
 
+## The Strategy Lifecycle
+
+The archive records what was seen, execution quality records what trading cost,
+walk-forward records whether an edge survived validation, and the portfolio
+records whether strategies diversify. None of that changed what the system
+would actually trade — a human still decided, from opinion, and nothing removed
+a strategy once it stopped working. This closes that loop.
+
+Every **(strategy, symbol) sleeve** holds a state:
+
+```
+    candidate ──▶ paper ──▶ live
+                    ▲          │
+                    └── probation ◀─┘
+                             │
+                          retired
+```
+
+| State | May trade? | Meaning |
+|---|---|---|
+| `candidate` | No | Registered, no evidence yet |
+| `paper` | No | Validated on history. Runs in the live loop and records decisions, places no orders |
+| `live` | **Yes** | Permitted to place real orders |
+| `probation` | No | Was live; decayed or breached a limit. Entries blocked, exits always allowed |
+| `retired` | No | Off. Coming back requires re-registration, deliberately |
+
+**A sleeve nobody registered cannot trade.** That is the point: a strategy
+nobody validated does not get to trade because it happened to emit a signal.
+
+### The three principles
+
+Worth stating, because they are what make this a control rather than a
+dashboard that happens to say "live".
+
+**Refuse by default.** A missing measurement is a no, not a neutral. Every gate
+fails closed. Promoting on an absent measurement is how a system ends up
+trading something nobody checked — and if the roster file is unreadable, the
+registry loads empty and *nothing* may trade, rather than defaulting to
+permissive.
+
+**Promotion is slow, demotion is fast.** Promotion needs every gate to pass;
+demotion needs any one trigger to fire, and demotion is never gated at all —
+safety must not require approval. The asymmetry is deliberate: being slow to
+promote costs opportunity, being slow to demote costs money.
+
+**A small sample cannot promote, but a hard breach can always demote.** You
+cannot conclude decay from five trades, so the Sharpe-decay check waits for
+`LIFECYCLE_MIN_LIVE_TRADES`. A drawdown breach is not a statistical claim — it
+is a fact about money already lost — and demotes immediately at any sample size.
+
+### The gates
+
+Each one reads something an earlier phase produced. That is the loop closing:
+the measurements are no longer just reported, they decide.
+
+**candidate → paper** (backtest evidence only, no money involved):
+
+| Gate | Source |
+|---|---|
+| Deflated Sharpe ratio ≥ 0.95 | `run_backtest.py --walk-forward` |
+| ≥ 30 out-of-sample trades | same |
+| Out-of-sample return positive | same |
+
+**paper → live** (every gate reads something only paper trading produces):
+
+| Gate | Source |
+|---|---|
+| ≥ 20 days of paper decisions | the decision journal |
+| ≥ 20 recorded decisions | same |
+| Execution cost **measured**, not assumed | `/v1/execution/quality` |
+| Correlation with live sleeves < 0.7 | `/backtest/portfolio` |
+
+**live → probation** (any one fires):
+
+| Trigger | Waits for a sample? |
+|---|---|
+| Live drawdown > 15% | No — a breach is a fact |
+| Live Sharpe more than 2.0 below the validated figure | Yes, ≥ 20 trades |
+
+Triggers are not weighed against each other. A profitable sleeve breaching its
+drawdown limit still demotes — that is a trade nobody would approve if asked
+directly.
+
+**probation → paper**, never straight back to live. A sleeve that broke has to
+re-earn the live gates. Bouncing in and out of live on noise is how a bad week
+becomes a bad month. Three probations retires it.
+
+### Using it
+
+```bash
+curl http://localhost:8007/v1/orchestrator/lifecycle
+
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/register?strategy=ema_rsi_macd&symbol=AAPL" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY"
+
+# Promotion is admin-gated: the top of this ladder is real money.
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/promote?strategy=ema_rsi_macd&symbol=AAPL" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY" -H "X-Admin-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"deflated_sharpe_ratio":0.97,"out_of_sample_trades":45,"out_of_sample_return_pct":0.08}'
+
+# Demotion is not gated.
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/demote?strategy=ema_rsi_macd&symbol=AAPL&to=probation&reason=manual" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY"
+```
+
+A refused promotion names every gate that failed, so there is no need to read
+code to find out what to fix:
+
+```json
+{"promoted": false,
+ "failed": ["no walk-forward result on file — run --walk-forward first",
+            "out-of-sample trade count unknown"]}
+```
+
+### Both order paths are gated
+
+`autonomy-orchestrator` and `strategy-service`'s worker can each place orders —
+the worker posts to execution-service directly. So the roster lives in
+`libs/lifecycle` and both read the same state file. A safety control that one
+code path can walk around is worse than no control, because it creates
+confidence that is not warranted.
+
+A gated signal is **recorded, not dropped**: it goes to the journal under
+`lifecycle_gate` with `would_have_traded: true`. That recorded history is
+exactly the evidence the sleeve's promotion to live is gated on, so a paper
+sleeve that silently discarded its signals could never be promoted.
+
+### What this does not do
+
+Being explicit, because "autonomous" oversells it:
+
+- **Evidence is supplied, not harvested.** Nothing runs walk-forward on a
+  schedule and feeds the result in. You run it and pass the numbers to
+  `/promote`. The gates are automatic; gathering what they read is not.
+- **Health checks are called, not scheduled.** `/lifecycle/health` evaluates
+  and acts on the triggers, but something has to call it with current live
+  figures. Until you wire that to a cron or the orchestrator's cycle, decay
+  detection is manual.
+- **The thresholds are conventions, not derivations.** 0.95, 30 trades, 20
+  days, 0.7 correlation — each is defensible and none is a law. They are
+  environment variables so you can argue with them.
+- **It cannot make a bad strategy good.** It only stops one reaching real money
+  before it has shown anything, and takes it away when it stops working.
+
 ## Pattern Day Trader (PDT) Protection
 
 Intraday trading in the US runs into a rule that automated systems breach

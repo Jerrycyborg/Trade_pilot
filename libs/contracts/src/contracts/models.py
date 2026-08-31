@@ -8,7 +8,6 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ---------------------------------------------------------------------------
 # Risk classification
 # ---------------------------------------------------------------------------
@@ -204,6 +203,11 @@ class SignalCandidate(BaseModel):
     model_version: str
     # Milestone 2 additions
     risk_score: str = "MEDIUM"
+    strategy: str = "ema_rsi_macd"
+    """Which rule produced this signal. The strategy lifecycle keys its roster
+    on (strategy, symbol), so a signal that does not name its rule would be
+    gated against another rule's entry. Defaults to the momentum rule, which is
+    what every producer predating this field was running."""
     ta_summary: Optional[TechnicalSummaryContract] = None
     research_summary: Optional[str] = None
     acted_on: bool = False

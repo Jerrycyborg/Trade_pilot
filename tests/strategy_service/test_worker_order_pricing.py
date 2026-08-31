@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from contracts import CandidateAction, ExecutionOrderRequest, PortfolioContext, SignalCandidate
+from lifecycle import DEFAULT_LIVE_STRATEGY, Evidence, LifecycleRegistry, State
 from market_data.models import OHLCVBar
 from strategy_service.config import settings as worker_settings
 from strategy_service.worker import TradeWorker, WorkerRunResult
@@ -41,10 +42,38 @@ def _signal(action: CandidateAction = CandidateAction.BUY) -> SignalCandidate:
     )
 
 
+def _make_live(strategy: str = DEFAULT_LIVE_STRATEGY, symbol: str = "AAPL") -> None:
+    """Put a sleeve on the roster as live, so orders are permitted."""
+    registry = LifecycleRegistry()
+    registry.register(strategy, symbol)
+    registry.promote(
+        strategy,
+        symbol,
+        Evidence(
+            deflated_sharpe_ratio=0.97,
+            out_of_sample_sharpe=1.4,
+            out_of_sample_return_pct=0.08,
+            out_of_sample_trades=45,
+        ),
+    )
+    registry.promote(
+        strategy,
+        symbol,
+        Evidence(
+            paper_started_at=datetime.now(timezone.utc) - timedelta(days=30),
+            paper_decisions=40,
+            measured_shortfall_bps=2.5,
+            max_correlation_with_live=0.2,
+        ),
+    )
+    assert registry.get(strategy, symbol).state is State.LIVE
+
+
 @pytest.fixture
 def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
     """Drive _process_symbol with every collaborator stubbed, capturing the order."""
     stub_prices.set("AAPL", 200.0)
+    _make_live()
     captured: list[ExecutionOrderRequest] = []
 
     async def run(
@@ -165,3 +194,39 @@ async def test_a_symbol_too_thin_to_trade_submits_nothing(
 ) -> None:
     monkeypatch.setenv("MAX_ADV_PARTICIPATION", "0.01")
     assert await worker_run(volume=50.0) is None
+
+
+# ---------------------------------------------------------------------------
+# The roster gates this path too
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_an_unregistered_sleeve_places_no_order(worker_run, monkeypatch) -> None:
+    """The worker posts to execution-service directly, so it has to enforce the
+    roster itself — otherwise it walks around the orchestrator's gate."""
+    from strategy_service.worker import reset_lifecycle
+
+    monkeypatch.setenv("LIFECYCLE_STATE_PATH", "/nonexistent/roster.json")
+    reset_lifecycle()
+    assert await worker_run() is None
+
+
+@pytest.mark.asyncio
+async def test_a_paper_sleeve_places_no_order(worker_run, monkeypatch, tmp_path) -> None:
+    from strategy_service.worker import reset_lifecycle
+
+    monkeypatch.setenv("LIFECYCLE_STATE_PATH", str(tmp_path / "paper.json"))
+    reset_lifecycle()
+    registry = LifecycleRegistry()
+    registry.register(DEFAULT_LIVE_STRATEGY, "AAPL")
+    registry.promote(
+        DEFAULT_LIVE_STRATEGY,
+        "AAPL",
+        Evidence(
+            deflated_sharpe_ratio=0.97,
+            out_of_sample_return_pct=0.08,
+            out_of_sample_trades=45,
+        ),
+    )
+    assert registry.get(DEFAULT_LIVE_STRATEGY, "AAPL").state is State.PAPER
+    reset_lifecycle()
+    assert await worker_run() is None
