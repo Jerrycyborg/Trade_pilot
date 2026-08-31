@@ -129,18 +129,26 @@ mock). Exact commands and results:
 
 | Command | Result |
 |---|---|
-| `uv run pytest -q` | 694 passed, 7 skipped |
-| `uv run pytest tests/hardening -q` | 34 passed |
+| `uv run pytest -q` | 737 passed, 7 skipped |
+| `uv run pytest tests/hardening -q` | 160 passed |
 | `uv run pytest tests/hardening/test_shared_lifecycle_state.py -q` | 17 passed |
-| `uv run pytest ... -k "Restart or survives" -q` | 5 passed, 12 deselected |
-| `uv run pytest tests/hardening/test_execution_routing.py tests/hardening/test_promotion_evidence.py -q` | 32 passed |
+| `uv run pytest tests/hardening/test_execution_routing.py tests/hardening/test_promotion_evidence.py -q` | 36 passed |
 | `uv run ruff check .` | All checks passed |
-| `uv sync --frozen --all-packages` | Audited 74 packages |
+| `uv sync --frozen --all-packages` | Audited 75 packages |
 | `tools/migrate.py up / up / status / down / up` | applied 0001+0002, no-op, listed, reverted 0002, applied 0002 |
-| `uv run pytest tests/hardening -q` with `TEST_LIFECYCLE_POSTGRES_URL` unset | 17 passed, 17 skipped |
+| `uv run pytest tests/hardening -q` with `TEST_LIFECYCLE_POSTGRES_URL` unset | 71 passed, 89 skipped |
 
-The last row matters: the Postgres tests skip with a stated reason rather than
-silently degrading to SQLite, which would prove nothing about concurrency.
+Re-run at the head of the branch, not copied forward from when the section was
+first written. The last row matters: the Postgres tests skip with a stated
+reason rather than silently degrading to SQLite, which would prove nothing
+about concurrency.
+
+Five defects in this work were found by running it rather than by reading it,
+and each is recorded where it belongs rather than summarised away: a blocked
+order that could not be persisted on PostgreSQL, a router that latched its
+simulated-only fallback at import, a sweep that reported a halt that had not
+happened, an ADX sentinel that let a trend filter pass on absent data, and a
+decay trigger comparing a per-trade Sharpe with an annualised one.
 
 ### Acceptance criteria
 
