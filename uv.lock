@@ -31,6 +31,7 @@ members = [
     "specialists",
     "strategy-service",
     "trading-stack",
+    "veto",
 ]
 
 [[package]]
@@ -1659,6 +1660,7 @@ dependencies = [
     { name = "sentiment-aggregator" },
     { name = "specialists" },
     { name = "strategy-service" },
+    { name = "veto" },
 ]
 
 [package.dev-dependencies]
@@ -1689,6 +1691,7 @@ requires-dist = [
     { name = "sentiment-aggregator", editable = "services/sentiment-aggregator" },
     { name = "specialists", editable = "libs/specialists" },
     { name = "strategy-service", editable = "services/strategy-service" },
+    { name = "veto", editable = "libs/veto" },
 ]
 
 [package.metadata.requires-dev]
@@ -1762,6 +1765,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/32/ce/eeb58ae4ac36fe09e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/83/e4/d04a086285c20886c0daad0e026f250869201013d18f81d9ff5eada73a88/uvicorn-0.41.0-py3-none-any.whl", hash = "sha256:29e35b1d2c36a04b9e180d4007ede3bcb32a85fbdfd6c6aeb3f26839de088187", size = 68783, upload-time = "2026-02-16T23:07:22.357Z" },
 ]
+
+[[package]]
+name = "veto"
+version = "0.1.0"
+source = { editable = "libs/veto" }
+dependencies = [
+    { name = "journal" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "journal", editable = "libs/journal" }]
 
 [[package]]
 name = "websockets"

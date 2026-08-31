@@ -914,6 +914,42 @@ recovered from the archive **before** a trade rather than after one.
 > unstructured text, where a model would do work no threshold can. That
 > question becomes live when their archives exist.
 
+### The risk veto refuses; it never approves
+
+L2 of the same ADR (`libs/veto`), and it runs in the command above — first, and
+without ever seeing a specialist claim:
+
+```text
+  Vetoed — the risk veto refuses these subjects:
+    THIN     insufficient_history: 12 archived bars for THIN; nothing
+             downstream can rest on fewer than 60
+    OLD      stale_series: the freshest bar for OLD is 4320 minutes old;
+             this is reasoning about a memory
+```
+
+Three properties are arranged rather than promised:
+
+- **Independent.** `review()` takes a journal and a subject. There is no
+  parameter for an argument, so it cannot be handed one.
+- **Rejection-only.** No `approved`, `ok` or `passed` field, and
+  `VetoDecision.__bool__` *raises*. The way this authority gets lost is a
+  caller writing `if veto_ok(x):`, after which `not rejected` and `approved`
+  are the same bit. Here a decision cannot be used in a condition at all.
+- **Final.** A frozen dataclass with no override, and no `--force` flag on the
+  command. A veto that can be talked out of is not a veto.
+
+Its scope is only whether a subject can be *reasoned about* — enough history,
+a current series, not hopelessly gapped, an instrument whose orders are not
+being rejected. It never judges merit: a veto with merit criteria is an
+approver with a negative sign. Checks that could not run are listed under
+`unchecked`, because a veto that skipped half of them and said nothing looks
+exactly like one that ran them all and found nothing.
+
+> Running it found a bug in its own staleness rule. `completeness` reports
+> `stale_minutes=None` when the window holds no bars — the exact case the rule
+> exists for — so a symbol dead for three days passed cleanly while a
+> merely-late one was caught. Staleness now comes from the freshest bar held.
+
 ## Pattern Day Trader (PDT) Protection
 
 Intraday trading in the US runs into a rule that automated systems breach

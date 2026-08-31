@@ -1,8 +1,10 @@
 # ADR 0001 — A constrained offline improvement loop
 
-**Status:** Partially implemented. L0 (attribution) and L1 (specialist
-artifacts) are built; both are read-only and propose nothing. L2 onwards are
-not started. Each remaining phase is gated on review of the previous one.
+**Status:** Partially implemented. L0 (attribution), L1 (specialist artifacts)
+and L2 (the risk veto) are built. All three are read-only: nothing among them
+proposes a change, and the veto can only refuse. L3 (bounded challengers) is
+the first phase that would propose anything and is not started. Each remaining
+phase is gated on review of the previous one.
 
 **Date:** 2026-08-31
 
@@ -198,8 +200,38 @@ Each phase gated on the previous one being reviewed.
   L0's regime slices produced from realised losses, recovered from the archive
   *before* a trade rather than after it, which is the first evidence that these
   arguments are worth anything.
-- **L2 — the risk veto.** Independent rejection, exercised against L1 output.
-  Built before anything can propose, deliberately.
+- **L2 — the risk veto. Implemented** (`libs/veto`, composed into
+  `scripts/specialist_report.py`). Independent rejection, exercised against L1
+  output, built before anything can propose.
+
+  Three properties are arranged rather than promised. **Independence** is a
+  signature: `review()` takes a journal and a subject and has no parameter for
+  a specialist argument, so it cannot be handed one. **Rejection-only** is a
+  type: there is no `approved`, `ok` or `passed` field, and
+  `VetoDecision.__bool__` raises, because the way this authority normally gets
+  lost is a caller writing `if veto_ok(x):` — after which `not rejected` and
+  `approved` are the same bit and a reader believes a green light means the
+  subject was endorsed. **Finality** is a frozen dataclass with no override,
+  and the CLI has no flag to skip the veto: a veto with a `--force` is not one.
+
+  Its scope is deliberately narrow — whether the subject can be *reasoned
+  about* at all: enough archived history, a series that is current, not so
+  gapped that continuity claims are meaningless, and an instrument whose orders
+  are not being persistently rejected. Nothing here judges merit. A veto with
+  merit criteria is an approver with a negative sign, which is the thing
+  separating it was meant to prevent, and `VetoPolicy` is asserted to carry no
+  field expressing one.
+
+  Rules that could not run are reported in `unchecked`. A veto that skipped
+  half its checks and said nothing is indistinguishable from one that ran them
+  all and found nothing, and only one of those is worth having.
+
+  Running it found a defect in its own staleness rule. `Journal.completeness`
+  reports `stale_minutes=None` when the window contains no bars at all — which
+  is exactly the case the rule exists for. A symbol whose series stopped three
+  days ago has an empty 48-hour window, so the deadest symbol in the archive
+  drew no objection while a merely-late one was caught. Staleness now comes
+  from the freshest bar actually held rather than from the windowed view.
 - **L3 — bounded challengers.** Parameter and weight proposals within declared
   ranges, evaluated by purged walk-forward and deflated Sharpe.
 - **L4 — champion/challenger in paper.** Both running, both recorded,

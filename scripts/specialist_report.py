@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Specialist assessments from the point-in-time archive. L1 of the roadmap.
+"""Specialist assessments from the point-in-time archive. L1 and L2 of the roadmap.
 
-Per docs/adr/0001 this phase produces **arguments, not proposals**. There is no
-recommendation in the output and nothing downstream reads it to decide
-anything: the risk veto is L2 and is built before anything can propose,
-deliberately.
+Per docs/adr/0001 these phases produce **arguments, not proposals**. There is
+no recommendation in the output and nothing downstream reads it to decide
+anything.
+
+The risk veto (L2) runs here too, and runs *first and independently*: it is
+given the journal and a symbol, never the specialists' conclusions, so it
+cannot be influenced by the arguments it exists to check separately. Its
+refusal is reported above them and is not overridable from this command — a
+veto with a `--force` flag is not a veto.
 
     uv run python scripts/specialist_report.py --symbols AAPL,MSFT
     uv run python scripts/specialist_report.py --symbols AAPL --as-of 2026-08-20T14:00:00Z
@@ -25,12 +30,13 @@ from datetime import datetime, timezone
 
 from journal import get_journal
 from specialists import build_report
+from veto import review as veto_review
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 STANCE_COLOUR = {"bull": GREEN, "bear": RED, "neutral": DIM}
 
 
-def _render(report: dict) -> None:
+def _render(report: dict, vetoes: dict) -> None:
     roles = report["roles"]
     print(f"\n{'=' * 70}")
     print("  SPECIALIST ASSESSMENTS")
@@ -48,6 +54,23 @@ def _render(report: dict) -> None:
                 f"historical\n  claim it made is unfalsifiable until that is fixed.{RESET}"
             )
 
+    refused = {s: d for s, d in vetoes.items() if d.rejected}
+    if refused:
+        print(f"\n  {RED}Vetoed — the risk veto refuses these subjects:{RESET}")
+        for symbol, decision in refused.items():
+            for objection in decision.objections:
+                print(f"    {symbol:<8} {objection.rule}: {objection.detail}")
+        print(
+            f"  {DIM}The veto formed these independently, without seeing any "
+            f"specialist\n  claim. Its refusal is final within the loop.{RESET}"
+        )
+
+    unchecked = sorted({u for d in vetoes.values() for u in d.unchecked})
+    if unchecked:
+        print(f"\n  {YELLOW}The veto could not run every check:{RESET}")
+        for item in unchecked:
+            print(f"    {item}")
+
     if roles["blocked"]:
         print(f"\n  {YELLOW}Roles with no point-in-time archive:{RESET}")
         for role, info in roles["blocked"].items():
@@ -57,9 +80,23 @@ def _render(report: dict) -> None:
     print(f"\n  {DIM}{roles['verdict']}{RESET}")
 
     for argument in report["arguments"]:
+        symbol = argument["symbol"]
+        decision = vetoes.get(symbol)
+        banner = (
+            f"  {symbol}  {RED}[VETOED]{RESET}"
+            if decision is not None and decision.rejected
+            else f"  {symbol}"
+        )
         print(f"\n{'-' * 70}")
-        print(f"  {argument['symbol']}")
+        print(banner)
         print(f"{'-' * 70}")
+        if decision is not None and decision.rejected:
+            # The arguments are still shown: L1 and L2 produce no action, so
+            # hiding the analysis would only make the refusal harder to check.
+            print(
+                f"  {DIM}Shown for review only — the veto has refused this "
+                f"subject.{RESET}"
+            )
         if not argument["roles_reporting"]:
             print(f"  {DIM}no role could say anything about this symbol{RESET}")
             continue
@@ -110,17 +147,29 @@ def main(argv: list[str] | None = None) -> int:
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=timezone.utc)
 
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     report = build_report(
         get_journal(),
-        [s.strip().upper() for s in args.symbols.split(",") if s.strip()],
+        symbols,
         as_of=as_of,
         check_reproducibility=not args.no_reproducibility_check,
     )
 
+    # The veto runs on the journal and the symbol alone. It is never handed
+    # `report`, so it cannot be influenced by the conclusions it exists to
+    # check independently — and there is no flag to skip it.
+    vetoes = {s: veto_review(get_journal(), s, as_of=as_of) for s in symbols}
+
     if args.json:
-        print(json.dumps(report, indent=2, default=str))
+        print(
+            json.dumps(
+                {**report, "veto": {s: d.to_dict() for s, d in vetoes.items()}},
+                indent=2,
+                default=str,
+            )
+        )
     else:
-        _render(report)
+        _render(report, vetoes)
     return 0
 
 
