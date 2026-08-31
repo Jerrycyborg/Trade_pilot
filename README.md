@@ -716,16 +716,23 @@ sleeve that silently discarded its signals could never be promoted.
 
 Being explicit, because "autonomous" oversells it:
 
-- **Evidence is supplied, not harvested.** Nothing runs walk-forward on a
-  schedule and feeds the result in. You run it and pass the numbers to
-  `/promote`. The gates are automatic; gathering what they read is not.
-- **Health checks are called, not scheduled.** `/lifecycle/health` evaluates
-  and acts on the triggers, but something has to call it with current live
-  figures. Until you wire that to a cron or the orchestrator's cycle, decay
-  detection is manual.
-- **The thresholds are conventions, not derivations.** 0.95, 30 trades, 20
-  days, 0.7 correlation — each is defensible and none is a law. They are
-  environment variables so you can argue with them.
+- **Evidence is harvested for walk-forward only.** `run_backtest.py
+  --walk-forward` records its own validation artifact and prints the promote
+  call to copy, so a promotion cites a row the server reads rather than numbers
+  the caller typed. Nothing runs it on a schedule — you still choose when to
+  validate.
+- **The drawdown check needs a denominator you declare.** A drawdown percentage
+  is a fraction of the money at risk, and the journal records fills rather than
+  account sizes. Set `LIFECYCLE_CAPITAL_BASE_USD`, or
+  `LIFECYCLE_MAX_LIVE_DRAWDOWN_USD` for an absolute limit. With neither, that
+  trigger does not run and the health sweep says so in its warnings rather than
+  reporting a clean bill it did not earn.
+- **Most thresholds are conventions, not derivations.** 0.95, 30 trades, 20
+  days, 0.7 correlation, a 15% drawdown, a 60-minute journal-gap grace — each
+  is defensible and none is a law. They are environment variables so you can
+  argue with them. The one exception is Sharpe decay, which is measured in
+  standard errors of the estimate rather than as a fixed gap, because the same
+  shortfall is evidence over 500 trades and noise over 20.
 - **It cannot make a bad strategy good.** It only stops one reaching real money
   before it has shown anything, and takes it away when it stops working.
 
