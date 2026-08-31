@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "services" / "strategy-service" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "policy-service" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "execution-service" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "portfolio-service" / "src"))
+sys.path.insert(0, str(ROOT / "services" / "research-service" / "src"))
 
 
 # ---------------------------------------------------------------------------

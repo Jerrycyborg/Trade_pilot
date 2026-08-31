@@ -7,7 +7,7 @@ the risk veto, not an executor.
 
 The headline number is the share of specified roles that could say anything at
 all, because that is the finding: five roles are specified and the archive
-supports three.
+supports four.
 """
 
 from __future__ import annotations

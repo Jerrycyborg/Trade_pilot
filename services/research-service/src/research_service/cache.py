@@ -33,7 +33,33 @@ class ResearchCache:
         return _to_report(record, cached=True)
 
     def set(self, report: ResearchReport, session: Session) -> None:
-        """Upsert a research report (delete old, insert new)."""
+        """Upsert a research report (delete old, insert new).
+
+        This table is a serving cache: the delete-and-insert is its point, and
+        also exactly why no as-of read can be built from it. Every freshly
+        generated report is therefore ALSO appended to the journal's research
+        archive — the sequence of answers this cache cannot hold, and the only
+        honest input for the fundamentals specialist. Best-effort: an
+        unwritable archive must not block serving the report.
+        """
+        try:
+            from journal import get_journal
+
+            get_journal().record_research(
+                report.symbol,
+                sentiment=report.sentiment,
+                headline_summary=report.headline_summary,
+                risk_factors=report.risk_factors,
+                confidence_modifier=report.confidence_modifier,
+                model_version=settings.claude_model,
+                generated_at=report.generated_at,
+            )
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Research archive write failed for %s: %s", report.symbol, exc
+            )
         # Delete any existing records for this symbol
         session.query(ResearchReportRecord).filter(
             ResearchReportRecord.symbol == report.symbol.upper()

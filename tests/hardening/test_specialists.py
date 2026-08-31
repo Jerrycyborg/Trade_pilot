@@ -294,11 +294,11 @@ class TestTheRosterIsHonestAboutWhatItCannotDo:
         ]
 
     def test_the_unarchived_roles_name_why_and_what_is_needed(self) -> None:
-        """Sentiment left this list when the aggregator started journalling
-        every computed score; news and fundamentals still have no
+        """Sentiment and fundamentals left this list when their sources
+        started journalling into append-only archives; news still has no
         point-in-time store to read."""
         blocked = [s for s in default_roster() if isinstance(s, UnarchivedRole)]
-        assert {s.role for s in blocked} == {"news", "fundamentals"}
+        assert {s.role for s in blocked} == {"news"}
         for role in blocked:
             assert role.needed
 
@@ -320,8 +320,8 @@ class TestTheRosterIsHonestAboutWhatItCannotDo:
         report = build_report(journal, [SYMBOL])
 
         assert report["roles"]["specified"] == 5
-        assert report["roles"]["with_an_archive"] == 3
-        assert set(report["roles"]["blocked"]) == {"news", "fundamentals"}
+        assert report["roles"]["with_an_archive"] == 4
+        assert set(report["roles"]["blocked"]) == {"news"}
         assert report["reproducibility"]["all_reproducible"] is True
 
 
@@ -424,5 +424,61 @@ class TestTheSentimentRoleReadsTheArchive:
 
     def test_the_roster_now_supports_three_roles(self, journal) -> None:
         report = build_report(journal, [SYMBOL], check_reproducibility=False)
-        assert report["roles"]["with_an_archive"] == 3
-        assert set(report["roles"]["blocked"]) == {"news", "fundamentals"}
+        assert report["roles"]["with_an_archive"] == 4
+        assert set(report["roles"]["blocked"]) == {"news"}
+
+
+class TestTheFundamentalsRoleReadsTheArchive:
+    """Fundamentals was blocked on a delete-and-insert TTL cache. The role
+    reads only the journal's append-only research archive, states the stance
+    the archived report itself took, and treats an empty archive as
+    unavailability."""
+
+    def _record(self, journal, sentiment, risks=(), symbol=SYMBOL):
+        journal.record_research(
+            symbol, sentiment=sentiment, headline_summary="archived view",
+            risk_factors=list(risks), confidence_modifier=0.1, model_version="test",
+        )
+
+    def test_a_bullish_report_makes_a_bull_claim(self, journal) -> None:
+        from specialists import FundamentalsSpecialist
+
+        self._record(journal, "bullish", risks=["valuation"])
+        assessment = FundamentalsSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert assessment.claims[0].stance == "bull"
+        assert "bullish" in assessment.claims[0].statement
+        # The named risks surface as caution, not as a side.
+        assert assessment.claims[1].stance == "neutral"
+
+    def test_the_latest_archived_view_wins(self, journal) -> None:
+        from specialists import FundamentalsSpecialist
+
+        self._record(journal, "bullish")
+        self._record(journal, "bearish")
+        assessment = FundamentalsSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert assessment.claims[0].stance == "bear"
+
+    def test_no_archived_report_is_unavailability(self, journal) -> None:
+        from specialists import FundamentalsSpecialist
+
+        assessment = FundamentalsSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert assessment.unavailable
+        assert not assessment.claims
+
+    def test_a_report_archived_after_the_moment_does_not_exist_for_it(
+        self, journal
+    ) -> None:
+        from specialists import FundamentalsSpecialist
+
+        moment = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self._record(journal, "bullish")
+        assessment = FundamentalsSpecialist().assess(
+            PointInTimeArchive(journal, moment), SYMBOL
+        )
+        assert assessment.unavailable

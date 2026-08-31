@@ -1,17 +1,14 @@
 """The typed roles from ADR 0001, and which of them the archive can support.
 
-Five roles are specified. Three can be built today — market, technical, and
-sentiment (unblocked when the aggregator started journalling every computed
-score into an append-only archive). The remaining two are declared here as
-unavailable, with the specific reason each is blocked, because that is L1's
-real finding and deleting them from the table would hide it:
+Five roles are specified. Four can be built today — market and technical from
+the bar archive, sentiment and fundamentals unblocked when their sources
+started journalling every computed score and every generated report into
+append-only archives. The remaining one is declared here as unavailable, with
+the specific reason it is blocked, because that is L1's real finding and
+deleting it from the table would hide it:
 
 - **News** has no headline archive. Nothing stores headlines with an
   observed-at time, so there is no way to ask what was known at a moment.
-- **Fundamentals** has a research-report table, but it is a TTL cache keyed by
-  symbol: a new report overwrites the old one and expiry deletes it. It records
-  the current answer, not the sequence of answers, which is the opposite of a
-  point-in-time archive.
 
 Each of those could be made to produce output today by reading the live source
 instead. That would be worse than producing nothing: an assessment "as of" last
@@ -354,6 +351,82 @@ class SentimentSpecialist(_Base):
         )
 
 
+class FundamentalsSpecialist(_Base):
+    """The latest archived research view of a symbol, as of a moment.
+
+    Was an UnarchivedRole until freshly generated research reports started
+    landing in the journal's append-only archive alongside the service's
+    delete-and-insert TTL cache. One report is enough to claim from — a
+    report is a whole document, not a tick — but its stance is read verbatim
+    from the archived record: this role summarises what was believed then,
+    it does not re-research.
+    """
+
+    role = "fundamentals"
+    input_scope = ("research_observations",)
+
+    def assess(self, archive: PointInTimeArchive, symbol: str) -> Assessment:
+        rows = archive.research(symbol)
+        if not rows:
+            return self._blank(
+                archive,
+                symbol,
+                "no archived research report inside the lookback window",
+            )
+
+        latest = rows[-1]
+        sentiment = str(latest.get("sentiment", "neutral")).lower()
+        stance = {"bullish": "bull", "bearish": "bear"}.get(sentiment, "neutral")
+        risk_count = len(latest.get("risk_factors") or [])
+        evidence = (
+            EvidenceRef(
+                source="research_observations",
+                detail=(
+                    f"research_as_of({symbol}) -> {len(rows)} report(s); latest "
+                    f"generated {latest.get('generated_at')}"
+                ),
+                value={
+                    "sentiment": sentiment,
+                    "confidence_modifier": latest.get("confidence_modifier"),
+                    "risk_factors": risk_count,
+                },
+            ),
+        )
+        claims = [
+            Claim(
+                statement=(
+                    f"the research view archived at this moment called {symbol} "
+                    f"{sentiment}"
+                ),
+                stance=stance,
+                measure=float(latest.get("confidence_modifier") or 0.0),
+                threshold=None,
+                evidence=evidence,
+            )
+        ]
+        if risk_count:
+            claims.append(
+                Claim(
+                    statement=(
+                        f"that view named {risk_count} risk factor(s) — caution, "
+                        f"not a side"
+                    ),
+                    stance="neutral",
+                    measure=float(risk_count),
+                    threshold=None,
+                    evidence=evidence,
+                )
+            )
+        return Assessment(
+            role=self.role,
+            symbol=symbol,
+            as_of=archive.as_of,
+            produced_by=self.produced_by,
+            claims=claims,
+            queries=[q.to_dict() for q in archive.queries],
+        )
+
+
 class UnarchivedRole(_Base):
     """A role ADR 0001 specifies that has no point-in-time archive to read.
 
@@ -388,11 +461,5 @@ def default_roster() -> list[Specialist]:
             needed="a headline store with observed_at, written on fetch",
         ),
         SentimentSpecialist(),
-        UnarchivedRole(
-            "fundamentals",
-            "research reports are a TTL cache keyed by symbol: a new report "
-            "overwrites the previous one and expiry deletes it, so the table "
-            "holds the current answer rather than the sequence of answers",
-            needed="append research reports as observations instead of upserting",
-        ),
+        FundamentalsSpecialist(),
     ]

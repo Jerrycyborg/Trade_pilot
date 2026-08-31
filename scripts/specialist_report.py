@@ -17,7 +17,7 @@ veto with a `--force` flag is not a veto.
 
 Read the roles line first. Five roles are specified in the ADR; the number that
 have a point-in-time archive to read is the finding this phase exists to
-produce, and it is currently three.
+produce, and it is currently four.
 """
 
 from __future__ import annotations

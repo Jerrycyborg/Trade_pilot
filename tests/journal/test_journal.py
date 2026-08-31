@@ -417,3 +417,27 @@ class TestSentimentArchive:
 
         archive.record_sentiment("NVDA", score=0.4)
         assert archive.sentiment_as_of("AAPL", datetime.now(timezone.utc)) == []
+
+
+class TestResearchArchive:
+    """Append-only research: the service's own table is a delete-and-insert
+    TTL cache, so this is the only place the sequence of answers survives."""
+
+    def test_reports_are_returned_oldest_first(self, archive: Journal) -> None:
+        from datetime import datetime, timezone
+
+        archive.record_research("NVDA", sentiment="bullish", risk_factors=["a"])
+        archive.record_research("NVDA", sentiment="bearish")
+        rows = archive.research_as_of("NVDA", datetime.now(timezone.utc))
+        assert [r["sentiment"] for r in rows] == ["bullish", "bearish"]
+        assert rows[0]["risk_factors"] == ["a"]
+        assert rows[0]["observed_at"].tzinfo is not None
+
+    def test_a_later_report_is_absent_from_an_earlier_moment(
+        self, archive: Journal
+    ) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        archive.record_research("NVDA", sentiment="bullish")
+        assert archive.research_as_of("NVDA", cutoff) == []

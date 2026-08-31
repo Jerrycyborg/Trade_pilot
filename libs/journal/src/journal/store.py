@@ -35,6 +35,7 @@ from .models import (
     Decision,
     ExecutionQuality,
     PriceObservation,
+    ResearchObservation,
     SentimentObservation,
 )
 
@@ -453,6 +454,78 @@ class Journal:
                 ]
         except Exception as exc:
             logger.warning("Sentiment read failed: %s", exc)
+            return []
+
+    def record_research(
+        self,
+        symbol: str,
+        sentiment: str,
+        headline_summary: str = "",
+        risk_factors: list[str] | None = None,
+        confidence_modifier: float = 0.0,
+        model_version: str = "",
+        generated_at: datetime | None = None,
+    ) -> None:
+        """Archive one freshly generated research report, append-only.
+
+        The research service's own table is a delete-and-insert TTL cache;
+        this is the sequence of answers it cannot hold.
+        """
+        if not self.enabled:
+            return
+        self._insert(
+            ResearchObservation,
+            {
+                "symbol": symbol.upper(),
+                "sentiment": str(sentiment)[:16],
+                "headline_summary": str(headline_summary)[:4000],
+                "risk_factors": json.dumps(list(risk_factors or []))[:4000],
+                "confidence_modifier": float(confidence_modifier),
+                "model_version": str(model_version)[:64],
+                "generated_at": _utc(generated_at),
+                "observed_at": datetime.now(timezone.utc),
+            },
+        )
+
+    def research_as_of(
+        self,
+        symbol: str,
+        as_of: datetime,
+        window_days: float = 14.0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Research reports knowable at `as_of`, oldest first, windowed."""
+        if not self.enabled:
+            return []
+        cutoff = _utc(as_of)
+        window_start = cutoff - timedelta(days=window_days)
+        try:
+            with self._session_factory() as session:  # type: ignore[misc]
+                rows = session.scalars(
+                    select(ResearchObservation)
+                    .where(
+                        ResearchObservation.symbol == symbol.upper(),
+                        ResearchObservation.observed_at <= cutoff,
+                        ResearchObservation.observed_at >= window_start,
+                    )
+                    .order_by(ResearchObservation.observed_at)
+                    .limit(limit)
+                ).all()
+                return [
+                    {
+                        "symbol": r.symbol,
+                        "sentiment": r.sentiment,
+                        "headline_summary": r.headline_summary,
+                        "risk_factors": json.loads(r.risk_factors or "[]"),
+                        "confidence_modifier": r.confidence_modifier,
+                        "model_version": r.model_version,
+                        "generated_at": _read_utc(r.generated_at),
+                        "observed_at": _read_utc(r.observed_at),
+                    }
+                    for r in rows
+                ]
+        except Exception as exc:
+            logger.warning("Research read failed: %s", exc)
             return []
 
     def record_decision(

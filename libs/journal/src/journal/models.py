@@ -146,6 +146,37 @@ class SentimentObservation(Base):
     """When this system computed it. The as-of cutoff reads against this."""
 
 
+class ResearchObservation(Base):
+    """One generated research report, as the system held it when generated.
+
+    The research service's own table is a TTL cache keyed by symbol — a new
+    report deletes the old rows and expiry deletes the rest, so it records the
+    current answer, never the sequence of answers. Every freshly generated
+    report also lands here, append-only, so an as-of read can recover what was
+    believed about a symbol at any past moment.
+    """
+
+    __tablename__ = "research_observations"
+    __table_args__ = (Index("ix_research_symbol_observed", "symbol", "observed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    sentiment: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    """bullish | bearish | neutral, as the report called it."""
+
+    headline_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    risk_factors: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    """JSON-encoded list of strings."""
+
+    confidence_modifier: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    """When the report was produced, by its own account."""
+
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    """When this system archived it. The as-of cutoff reads against this."""
+
+
 class ExecutionQuality(Base):
     """What one order actually cost, versus what the decision assumed.
 

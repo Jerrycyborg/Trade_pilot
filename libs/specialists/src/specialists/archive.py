@@ -99,6 +99,19 @@ class PointInTimeArchive:
             "sentiment_observations",
         )
 
+    def research(self, symbol: str) -> list[dict[str, Any]]:
+        """Research reports observed by `as_of`, oldest first.
+
+        Served from the append-only research archive, never from the research
+        service's delete-and-insert TTL cache, which holds only the current
+        answer.
+        """
+        return self._safe(
+            lambda: self._journal.research_as_of(symbol, self._as_of),
+            f"research_as_of({symbol})",
+            "research_observations",
+        )
+
     def decisions(
         self, symbol: str | None = None, stage: str | None = None
     ) -> list[dict[str, Any]]:
