@@ -1,9 +1,15 @@
-"""Stop-loss monitor: polls open positions and triggers exits when price <= stop_price."""
+"""Stop-loss monitor: polls live prices and triggers exits when price <= stop_price.
+
+Resolution matters here. Checking a daily bar's close means a stop can only fire
+once a day; an intraday stop has to read the current price. The monitor therefore
+takes a price source (``get_price(symbol) -> float | None``) rather than a bar
+fetcher.
+"""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Protocol
 
 import httpx
@@ -12,10 +18,10 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-class OHLCVFetcherProtocol(Protocol):
-    """Minimal fetcher protocol: fetch(symbol, period_days) -> list of bars."""
+class PriceSourceProtocol(Protocol):
+    """Minimal price protocol: get_price(symbol) -> current price or None."""
 
-    def fetch(self, symbol: str, period_days: int = 1) -> list:
+    def get_price(self, symbol: str) -> float | None:
         ...
 
 
@@ -27,6 +33,9 @@ class StopLossRecord(BaseModel):
     stop_price: float  # entry_price - atr * multiplier
     position_id: str
     qty: float = 0.0
+    side: str = "BUY"
+    """Direction the position was opened in. P&L on a short inverts, so booking
+    it long-only turns a losing short into a recorded profit."""
     created_at: datetime
 
 
@@ -54,35 +63,63 @@ class StopLossMonitor:
     def remove(self, symbol: str) -> None:
         self._stops.pop(symbol.upper(), None)
 
-    async def check_all(self, fetcher: OHLCVFetcherProtocol) -> list[str]:
+    def records(self) -> dict[str, StopLossRecord]:
+        """Snapshot of tracked stops. check_all() removes them as they fire, so
+        callers that need a fired record must take this first."""
+        return dict(self._stops)
+
+    async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
         """
-        For each tracked position fetch latest close.
-        If close <= stop_price, call broker sell endpoint and return triggered symbols.
+        Read the current price for each tracked position. If it is at or below
+        the stop, close the position at the broker and return the symbol.
         """
         triggered: list[str] = []
         for symbol, record in list(self._stops.items()):
             try:
-                bars = fetcher.fetch(symbol, period_days=1)
-                if not bars:
-                    logger.warning("StopLossMonitor: no bars for %s", symbol)
+                price = price_source.get_price(symbol)
+                if price is None:
+                    # A stop we cannot evaluate is a risk we cannot see.
+                    logger.warning("StopLossMonitor: no price for %s — stop not evaluated", symbol)
                     continue
-                latest_close = float(bars[-1].close)
-                if latest_close <= record.stop_price:
+                # A short's stop sits above its entry and fires on a rise.
+                # Testing only `price <= stop` leaves every short stop inert.
+                is_short = record.side.upper() == "SELL"
+                breached = (
+                    float(price) >= record.stop_price
+                    if is_short
+                    else float(price) <= record.stop_price
+                )
+                if breached:
                     logger.warning(
-                        "StopLossMonitor: stop triggered for %s (close=%.4f <= stop=%.4f)",
+                        "StopLossMonitor: stop triggered for %s %s (price=%.4f, stop=%.4f)",
+                        record.side,
                         symbol,
-                        latest_close,
+                        price,
                         record.stop_price,
                     )
-                    await self._trigger_exit(record)
-                    triggered.append(symbol)
-                    self.remove(symbol)
+                    if await self._trigger_exit(record):
+                        triggered.append(symbol)
+                        self.remove(symbol)
+                    else:
+                        # The close failed. Reporting it as triggered would book
+                        # a day trade and a realised loss for a position that is
+                        # still open, and dropping the stop would leave that
+                        # position with nothing watching it. Keep it tracked and
+                        # retry on the next check.
+                        logger.error(
+                            "StopLossMonitor: exit for %s failed — position still "
+                            "open, stop retained", symbol,
+                        )
             except Exception as exc:
                 logger.error("StopLossMonitor: error checking %s: %s", symbol, exc)
         return triggered
 
-    async def _trigger_exit(self, record: StopLossRecord) -> None:
-        """POST close request. `qty=0.0` means the broker should close the full position."""
+    async def _trigger_exit(self, record: StopLossRecord) -> bool:
+        """POST close request. `qty=0.0` means the broker should close the full position.
+
+        Returns whether the broker confirmed the close. Callers must not book a
+        realised loss or a day trade on a close that did not happen.
+        """
         import os
         from uuid import uuid4
 
@@ -102,5 +139,9 @@ class StopLossMonitor:
                 )
                 response.raise_for_status()
                 logger.info("StopLossMonitor: exit order placed for %s", record.symbol)
+                return True
         except Exception as exc:
-            logger.error("StopLossMonitor: failed to trigger exit for %s: %s", record.symbol, exc)
+            logger.error(
+                "StopLossMonitor: failed to trigger exit for %s: %s", record.symbol, exc
+            )
+            return False

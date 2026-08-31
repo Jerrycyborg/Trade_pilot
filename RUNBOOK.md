@@ -88,6 +88,120 @@ curl -X POST http://localhost:8010/v1/approvals/{approval_id}/reject \
 
 Tier 2 approvals auto-expire after 15 minutes (configurable in policy-baseline.yaml).
 
+## Intraday Troubleshooting
+
+### Check what resolution the loop is actually running at
+
+```bash
+curl http://localhost:8007/v1/orchestrator/realtime
+```
+
+`"intraday": false` means the loop is on daily bars regardless of what you
+intended — check `MARKET_DATA_TIMEFRAME` in `.env` and restart the orchestrator.
+
+### "degrading to DAILY bars" in the orchestrator log
+
+Intraday data could not be fetched from any provider, so indicators and stops
+silently changed meaning. The strategy is no longer intraday. Causes, in order
+of likelihood:
+
+1. No network route to the provider — run `uv run python scripts/verify_intraday.py`
+2. `INTRADAY_MINUTES` set to a resolution Yahoo does not serve (it offers
+   1, 2, 5, 15, 30, 60, 90; anything else snaps down to the nearest)
+3. `INTRADAY_LOOKBACK_DAYS` beyond the provider's window — Yahoo caps 1-minute
+   history at 7 days and most other intraday resolutions at 60
+4. Alpaca rate limit or expired keys
+
+### No trades are being placed
+
+Check the audit log for the rejection reason first:
+
+```bash
+curl "http://localhost:8006/v1/audit/logs?event_type=signal.rejected&limit=20"
+```
+
+- `stale_data` — the price was older than `POLICY_MAX_DATA_AGE_SECONDS`
+  (default 30s), or none could be resolved at all. The system is failing closed
+  by design. **On the Yahoo provider this is expected and permanent**: its feed
+  is ~15 minutes delayed, so nothing it returns can satisfy a 30-second limit.
+  Either move to Alpaca, or raise `POLICY_MAX_DATA_AGE_SECONDS` deliberately,
+  accepting that you are trading on delayed prices. Check
+  `/v1/orchestrator/realtime` for the age of each cached price.
+- `market_closed` / `outside_trading_hours` — expected outside the session.
+  Note the Yahoo path uses a weekday heuristic that does not know about market
+  holidays; Alpaca's clock does.
+- `max_size_exceeded` — `max_position_size_pct` in `config/policy-baseline.yaml`.
+
+### Stops are firing late
+
+The stop-loss and take-profit monitors poll. Under intraday they default to
+every 60 seconds; a stop can overshoot by at most one interval. Tighten with
+`STOP_LOSS_CHECK_INTERVAL_MINUTES` (fractions are accepted — `0.5` is 30s).
+With Alpaca, set `STREAMING_ENABLED=true` so each check reads a cached
+streamed price rather than making an HTTP call.
+
+### Paper broker state
+
+Paper positions live in `PAPER_STATE_PATH` (default
+`./paper-broker-state.json`) and survive restarts. To start a fresh run:
+
+```bash
+rm -f paper-broker-state.json
+```
+
+Inspect current paper P&L:
+
+```bash
+curl http://localhost:8002/v1/account
+```
+
+## Day-Trade Budget (PDT)
+
+Check remaining budget:
+```bash
+curl http://localhost:8007/v1/orchestrator/day-trades
+```
+
+### "New entries paused — pdt_day_trade_limit"
+
+Expected, not a fault: three day trades have been taken inside the rolling
+five-business-day window and account equity is under the threshold. Exits still
+work; only new entries are blocked. The budget frees up as sessions roll off.
+
+To trade through it, one of:
+- Fund the account above `PDT_EQUITY_THRESHOLD_USD` (25,000 by default)
+- Set `PDT_ENABLED=false` **only if the rule does not apply to your broker or
+  jurisdiction** — confirm with the broker first
+- Wait for the window to roll
+
+### Budget looks wrong after a restart
+
+State lives in `PDT_STATE_PATH` (default `./day-trade-state.json`). If it was
+deleted the count restarts at zero while the broker still remembers, which can
+put the account over the real limit. Reconcile against the broker's own day
+trade counter before resuming.
+
+### Holiday weeks
+
+The window is weekday-based and does not know market holidays, so a day trade
+can expire one session early in a holiday week. Set `PDT_MAX_DAY_TRADES=2` for
+margin if that matters.
+
+## Checking Whether the Strategy Makes Money
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT,NVDA
+uv run python scripts/run_backtest.py --symbols AAPL --sweep   # cost sensitivity
+```
+
+Read the **cost drag** line first. If gross is positive and net is negative, the
+strategy has a signal but not an edge — costs consume it, and running it faster
+only loses money quicker.
+
+"No trades taken" is not a pass: it means the entry conditions never all held,
+so there is nothing to evaluate. Lengthen `--days` or check the warm-up (EMA-50
+needs 51 bars before any signal is possible).
+
 ## Emergency Procedures
 
 ### Service crash

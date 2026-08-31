@@ -1,6 +1,6 @@
 UV ?= uv
 
-.PHONY: setup lint test \
+.PHONY: setup lint test verify-intraday \
 	run-research run-strategy run-policy run-execution run-portfolio run-dashboard \
 	run-audit run-orchestrator run-sentiment run-notification run-approval \
 	aahp-validate aahp-checksums
@@ -13,6 +13,9 @@ lint:
 
 test:
 	$(UV) run --group dev pytest
+
+verify-intraday:
+	$(UV) run python scripts/verify_intraday.py
 
 run-research:
 	$(UV) run uvicorn research_service.main:app --host 0.0.0.0 --port 8005

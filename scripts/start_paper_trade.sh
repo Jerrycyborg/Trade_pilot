@@ -29,7 +29,23 @@ start_service() {
   echo "  [$name] started on :$port (pid $!)"
 }
 
+MODE="${MARKET_DATA_TIMEFRAME:-daily}"
 echo "=== Trade_pilot Paper Trade — Starting services ==="
+echo "  Timeframe: $MODE${MARKET_DATA_TIMEFRAME:+ (${INTRADAY_MINUTES:-15}-minute bars)}"
+echo "  Provider:  ${MARKET_DATA_PROVIDER:-auto}  |  Streaming: ${STREAMING_ENABLED:-false}"
+
+# Intraday depends on reachable market data; check before trading rather than
+# discovering it in the audit log as a run of stale_data rejections.
+if [ "$MODE" = "intraday" ] && [ "${SKIP_PREFLIGHT:-false}" != "true" ]; then
+  echo ""
+  echo "=== Intraday preflight ==="
+  if ! "$UV" run python scripts/verify_intraday.py; then
+    echo ""
+    echo "Preflight failed — not starting. Fix the above, or set SKIP_PREFLIGHT=true to override."
+    exit 1
+  fi
+fi
+echo ""
 start_service "audit-logger"         "audit_logger.main:app"               8006
 start_service "policy-service"       "policy_service.main:app"             8001
 start_service "execution-service"    "execution_service.main:app"          8002
@@ -64,3 +80,6 @@ echo "Logs: $LOGDIR"
 echo "Stop: ./scripts/stop_paper_trade.sh"
 echo ""
 echo "Paper trade mode: DEMO=true | Weekly cap: \$${WALLET_SIZE_USD:-50} | Loss limit: \$${MONTHLY_LOSS_LIMIT_USD:-10}"
+echo ""
+echo "Check the loop's actual resolution:"
+echo "  curl http://localhost:8007/v1/orchestrator/realtime"

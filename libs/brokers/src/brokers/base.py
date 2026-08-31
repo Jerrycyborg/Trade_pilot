@@ -33,4 +33,5 @@ class BaseBroker(Protocol):
         position_id: str,
         instrument_id: int,
         units: float | None = None,
+        symbol: str | None = None,
     ) -> bool: ...

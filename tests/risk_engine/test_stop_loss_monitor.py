@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor, StopLossRecord
 
 
@@ -21,12 +19,18 @@ def _record(symbol: str = "AAPL", stop_price: float = 95.0, entry_price: float =
     )
 
 
-def _make_fetcher(close_price: float):
-    bar = MagicMock()
-    bar.close = close_price
-    fetcher = MagicMock()
-    fetcher.fetch.return_value = [bar]
-    return fetcher
+class _Prices:
+    """Minimal price source: what the monitor now consumes instead of bars."""
+
+    def __init__(self, price: float | None) -> None:
+        self._price = price
+
+    def get_price(self, symbol: str) -> float | None:
+        return self._price
+
+
+def _make_prices(price: float | None):
+    return _Prices(price)
 
 
 def test_register_stores_record() -> None:
@@ -50,14 +54,16 @@ async def test_register_and_trigger() -> None:
     """Price below stop triggers _trigger_exit."""
     monitor = StopLossMonitor("http://localhost:8002", "key")
     monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
-    fetcher = _make_fetcher(close_price=94.0)  # below stop
+    prices = _make_prices(94.0)  # below stop
 
-    with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock) as mock_exit:
-        triggered = await monitor.check_all(fetcher)
+    with patch.object(
+        monitor, "_trigger_exit", new=AsyncMock(return_value=True)
+    ) as mock_exit:
+        triggered = await monitor.check_all(prices)
 
     assert "AAPL" in triggered
     mock_exit.assert_called_once()
-    # Position should be removed after trigger
+    # Position should be removed after a confirmed close
     assert monitor.get("AAPL") is None
 
 
@@ -66,10 +72,10 @@ async def test_no_trigger_above_stop() -> None:
     """Price above stop -> nothing triggered."""
     monitor = StopLossMonitor("http://localhost:8002", "key")
     monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
-    fetcher = _make_fetcher(close_price=98.0)  # above stop
+    prices = _make_prices(98.0)  # above stop
 
     with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock) as mock_exit:
-        triggered = await monitor.check_all(fetcher)
+        triggered = await monitor.check_all(prices)
 
     assert triggered == []
     mock_exit.assert_not_called()
@@ -81,9 +87,52 @@ async def test_at_stop_price_triggers() -> None:
     """Price exactly at stop price should trigger."""
     monitor = StopLossMonitor("http://localhost:8002", "key")
     monitor.register(_record("AAPL", stop_price=95.0))
-    fetcher = _make_fetcher(close_price=95.0)  # exactly at stop
+    prices = _make_prices(95.0)  # exactly at stop
 
-    with patch.object(monitor, "_trigger_exit", new_callable=AsyncMock):
-        triggered = await monitor.check_all(fetcher)
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)):
+        triggered = await monitor.check_all(prices)
 
     assert "AAPL" in triggered
+
+
+@pytest.mark.asyncio
+async def test_failed_close_keeps_the_stop_tracked() -> None:
+    """A close the broker refused must not be reported as an exit, and the stop
+    must survive so the open position is still being watched."""
+    monitor = StopLossMonitor("http://localhost:8002", "key")
+    monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
+    prices = _make_prices(90.0)
+
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=False)):
+        triggered = await monitor.check_all(prices)
+
+    assert triggered == []
+    assert monitor.get("AAPL") is not None
+
+
+@pytest.mark.asyncio
+async def test_short_stop_fires_on_a_rise_not_a_fall() -> None:
+    """A short's stop sits above its entry. Testing only `price <= stop` left
+    every short position with a stop that could never fire."""
+    monitor = StopLossMonitor("http://localhost:8002", "key")
+    monitor.register(
+        StopLossRecord(
+            symbol="AAPL", entry_price=100.0, stop_price=103.0,
+            position_id="p", qty=10.0, side="SELL",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)):
+        assert await monitor.check_all(_make_prices(101.0)) == []      # still inside
+        assert await monitor.check_all(_make_prices(104.0)) == ["AAPL"]  # breached
+
+
+@pytest.mark.asyncio
+async def test_long_stop_is_unaffected_by_the_direction_change() -> None:
+    monitor = StopLossMonitor("http://localhost:8002", "key")
+    monitor.register(_record("AAPL", stop_price=95.0, entry_price=100.0))
+
+    with patch.object(monitor, "_trigger_exit", new=AsyncMock(return_value=True)):
+        assert await monitor.check_all(_make_prices(98.0)) == []
+        assert await monitor.check_all(_make_prices(94.0)) == ["AAPL"]

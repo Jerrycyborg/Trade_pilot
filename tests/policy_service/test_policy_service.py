@@ -8,6 +8,10 @@ def _main(tmp_path: Path):
 
     os.environ.setdefault("POLICY_DISABLE_TRADING_HOURS", "true")
     os.environ.setdefault("POLICY_WEEKLY_CAP_USD", "999999")
+    # Pin the size limit rather than inheriting config/policy-baseline.yaml: that
+    # file is live operational config and an operator raising the cap there must
+    # not silently change what these tests assert.
+    os.environ.setdefault("POLICY_MAX_SIZE_PCT", "2")
     db_file = tmp_path / "policy.db"
     import policy_service.config as config
     import policy_service.database as database

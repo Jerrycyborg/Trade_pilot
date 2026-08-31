@@ -16,12 +16,19 @@ from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from market_data import MarketDataSettings, get_fetcher
+from market_data import (
+    LivePriceCache,
+    MarketDataSettings,
+    RealtimePriceSource,
+    StreamManager,
+    fetch_bars,
+)
+from market_data.fetcher import OHLCVFetcherProtocol  # noqa: F401 - kept for type hints
 from market_data.indicators import compute_atr
-from market_data.fetcher import OHLCVFetcherProtocol
 from pydantic import BaseModel
 
 from .config import settings
+from .day_trade_tracker import DayTradeTracker
 from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
@@ -50,6 +57,10 @@ class OrchestratorState:
     monthly_realized_profit_usd: float = 0.0
     monthly_reset_month: int = 0
     monthly_reset_year: int = 0
+    price_source: RealtimePriceSource | None = None
+    stream_manager: StreamManager | None = None
+    market_settings: MarketDataSettings | None = None
+    day_trades: DayTradeTracker | None = None
 
 
 state = OrchestratorState()
@@ -62,6 +73,27 @@ class KillSwitchRequest(BaseModel):
 class LiveModeRequest(BaseModel):
     enable: bool
     confirmation: str = ""
+
+
+def _cycle_interval_seconds() -> int:
+    """Trading cycle cadence. ORCHESTRATOR_INTERVAL_SECONDS wins when set."""
+    explicit_seconds = os.getenv("ORCHESTRATOR_INTERVAL_SECONDS")
+    if explicit_seconds:
+        return max(10, int(explicit_seconds))
+    return max(10, settings.orchestrator_interval_minutes * 60)
+
+
+def _risk_check_interval_seconds(env_var: str) -> int:
+    """How often to re-check stops/targets.
+
+    An exit check is only as timely as its interval: a 5-minute poll on a
+    15-minute intraday strategy means a stop can overshoot by 5 minutes of
+    price movement. Intraday runs therefore default to 60 seconds.
+    """
+    explicit = os.getenv(env_var)
+    if explicit:
+        return max(10, int(float(explicit) * 60))
+    return 60 if _market_settings().is_intraday else 300
 
 
 def _start_scheduler() -> None:
@@ -81,24 +113,27 @@ def _start_scheduler() -> None:
     scheduler.add_job(
         run_job,
         trigger="interval",
-        minutes=settings.orchestrator_interval_minutes,
+        seconds=_cycle_interval_seconds(),
         id="autonomy_orchestrator",
         max_instances=1,
+        coalesce=True,
     )
 
     scheduler.add_job(
         lambda: asyncio.create_task(_run_stop_loss_check()),
         "interval",
-        minutes=int(os.getenv("STOP_LOSS_CHECK_INTERVAL_MINUTES", "5")),
+        seconds=_risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES"),
         id="stop_loss_check",
         replace_existing=True,
+        coalesce=True,
     )
     scheduler.add_job(
         lambda: asyncio.create_task(_run_take_profit_check()),
         "interval",
-        minutes=int(os.getenv("TAKE_PROFIT_CHECK_INTERVAL_MINUTES", "5")),
+        seconds=_risk_check_interval_seconds("TAKE_PROFIT_CHECK_INTERVAL_MINUTES"),
         id="take_profit_check",
         replace_existing=True,
+        coalesce=True,
     )
     try:
         asyncio.get_running_loop()
@@ -140,6 +175,37 @@ async def _startup_health_check() -> None:
             )
 
 
+def _stream_symbols() -> list[str]:
+    """Symbols to stream: the policy allowlist, narrowed by STREAM_SYMBOLS if set."""
+    explicit = os.getenv("STREAM_SYMBOLS", "").strip()
+    if explicit:
+        return [s.strip().upper() for s in explicit.split(",") if s.strip()]
+    try:
+        config = load_policy_config(settings.policy_config_path)
+        allowlist = [str(s).upper() for s in config.get("symbol_allowlist", [])]
+    except Exception as exc:
+        logger.warning("Could not read allowlist for streaming: %s", exc)
+        return []
+    # Alpaca's free IEX feed caps concurrent subscriptions; stream the head of the
+    # list and let everything else resolve by polling.
+    limit = int(os.getenv("STREAM_SYMBOL_LIMIT", "30"))
+    return allowlist[:limit]
+
+
+async def _start_price_stream() -> None:
+    market_settings = _market_settings()
+    cache: LivePriceCache = _price_source().cache
+    state.stream_manager = StreamManager(
+        settings=market_settings,
+        symbols=_stream_symbols(),
+        cache=cache,
+    )
+    try:
+        await state.stream_manager.start()
+    except Exception as exc:
+        logger.error("Price stream failed to start: %s — falling back to polling", exc)
+
+
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
     state.stop_loss_monitor = StopLossMonitor(
@@ -153,7 +219,16 @@ async def lifespan(app_: FastAPI):
     now = datetime.now(timezone.utc)
     state.monthly_reset_month = now.month
     state.monthly_reset_year = now.year
+    market_settings = _market_settings()
+    logger.info(
+        "Orchestrator starting: timeframe=%s intraday_minutes=%s cycle=%ss streaming=%s",
+        market_settings.timeframe,
+        market_settings.intraday_minutes,
+        _cycle_interval_seconds(),
+        market_settings.can_stream,
+    )
     await _startup_health_check()
+    await _start_price_stream()
     _start_scheduler()
     try:
         yield
@@ -161,6 +236,9 @@ async def lifespan(app_: FastAPI):
         if state.scheduler is not None:
             state.scheduler.shutdown(wait=False)
             state.scheduler = None
+        if state.stream_manager is not None:
+            await state.stream_manager.stop()
+            state.stream_manager = None
 
 
 app = FastAPI(title="autonomy-orchestrator", version="0.1.0", lifespan=lifespan)
@@ -178,6 +256,49 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "autonomy-orchestrator"}
 
 
+@app.get("/v1/orchestrator/realtime")
+def realtime_status() -> dict[str, object]:
+    """Intraday/streaming state — what resolution the loop is actually running at."""
+    market_settings = _market_settings()
+    stream_status: dict[str, object] = (
+        state.stream_manager.status()
+        if state.stream_manager is not None
+        else {"enabled": market_settings.can_stream, "running": False}
+    )
+    source = _price_source()
+    return {
+        "timeframe": market_settings.timeframe,
+        "pattern_day_trader": _day_trades().status(),
+        "intraday": market_settings.is_intraday,
+        "intraday_minutes": market_settings.intraday_minutes,
+        "provider": "alpaca" if market_settings.has_alpaca_credentials else "yahoo",
+        "cycle_interval_seconds": _cycle_interval_seconds(),
+        "stop_loss_check_seconds": _risk_check_interval_seconds(
+            "STOP_LOSS_CHECK_INTERVAL_MINUTES"
+        ),
+        "take_profit_check_seconds": _risk_check_interval_seconds(
+            "TAKE_PROFIT_CHECK_INTERVAL_MINUTES"
+        ),
+        "max_price_age_seconds": market_settings.max_price_age_seconds,
+        "stream": stream_status,
+        "cached_prices": {
+            symbol: {
+                "price": snapshot.price,
+                "age_seconds": round(snapshot.age_seconds(), 1),
+                "source": snapshot.source,
+            }
+            for symbol in source.cache.symbols()
+            if (snapshot := source.cache.peek(symbol)) is not None
+        },
+    }
+
+
+@app.get("/v1/orchestrator/day-trades")
+def day_trade_status() -> dict[str, object]:
+    """Day-trade budget under the US pattern-day-trader rule."""
+    return _day_trades().status()
+
+
 @app.get("/v1/orchestrator/status")
 def status() -> dict[str, object]:
     config = load_policy_config(settings.policy_config_path)
@@ -193,21 +314,40 @@ def status() -> dict[str, object]:
 
 @app.get("/v1/orchestrator/client-config")
 async def client_config(request: Request) -> dict[str, str]:
-    """Return dashboard client keys. Only served to requests from localhost or LAN."""
+    """Dashboard client configuration.
+
+    This used to return INTERNAL_API_KEY and ADMIN_API_KEY to any caller whose
+    source address looked local. Behind a reverse proxy — nginx, or
+    scripts/serve_dashboard.py — every request appears to come from localhost,
+    so anyone who could reach the dashboard could read the admin key and toggle
+    the kill switch or live mode.
+
+    Keys are now injected by the proxy on the server side and are not returned
+    here. Set EXPOSE_CLIENT_KEYS=true only if you run an older proxy that
+    cannot inject them, and understand that it hands the admin key to every
+    visitor of the dashboard.
+    """
     import os
+
+    if os.getenv("EXPOSE_CLIENT_KEYS", "false").lower() != "true":
+        return {"keysInjectedByProxy": "true"}
+
     client_host = getattr(request.client, "host", "")
-    # Allow localhost and RFC-1918 private ranges only
     allowed = (
-        client_host in ("127.0.0.1", "::1", "localhost") or
-        client_host.startswith("192.168.") or
-        client_host.startswith("10.") or
-        client_host.startswith("172.")
+        client_host in ("127.0.0.1", "::1", "localhost")
+        or client_host.startswith("192.168.")
+        or client_host.startswith("10.")
+        or client_host.startswith("172.")
     )
     if not allowed:
         raise HTTPException(status_code=403, detail="not allowed")
+    logger.warning(
+        "EXPOSE_CLIENT_KEYS=true — serving API keys to %s. Anyone who can reach "
+        "the dashboard can read the admin key.", client_host,
+    )
     return {
         "internalKey": os.getenv("INTERNAL_API_KEY", ""),
-        "adminKey":    os.getenv("ADMIN_API_KEY", ""),
+        "adminKey": os.getenv("ADMIN_API_KEY", ""),
     }
 
 
@@ -331,10 +471,43 @@ async def run_cycle() -> dict[str, object]:
             return summary
         signals = [signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"]
         portfolio_state = await _portfolio_state()
-        fetcher = _build_market_data_fetcher()
+
+        # Pattern-day-trader budget. The equity lookup is a network call so it
+        # is done once, but the decision is re-taken per signal: every accepted
+        # entry increments open_today, which the budget is gated on.
+        account_equity = await _account_equity()
+        pdt = _day_trades().check_entry(account_equity)
+        summary["pdt"] = {
+            "allowed": pdt.allowed,
+            "reason": pdt.reason,
+            "day_trades_used": pdt.day_trades_used,
+            "day_trades_remaining": pdt.day_trades_remaining,
+        }
+        if not pdt.allowed:
+            logger.warning("New entries blocked: %s", pdt.reason)
+            await _notify_smart(
+                "pdt_limit_reached",
+                f"\u26d4 New entries paused — {pdt.reason}. Exits are unaffected.",
+                tier=2,
+            )
+
         for signal in signals:
             summary["signals"] += 1
-            price_bars = _fetch_price_bars(fetcher, signal.symbol)
+            pdt = _day_trades().check_entry(account_equity)
+            if not pdt.allowed:
+                summary["rejected"] += 1
+                await _audit(
+                    AuditEvent(
+                        event_type="signal.rejected",
+                        symbol=signal.symbol,
+                        signal_id=signal.signal_id,
+                        decision="REJECT",
+                        reasoning=pdt.reason,
+                        metadata={"guard": "pattern_day_trader"},
+                    )
+                )
+                continue
+            price_bars = _fetch_price_bars(signal.symbol)
             risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
             if not risk.approved:
                 summary["rejected"] += 1
@@ -355,7 +528,26 @@ async def run_cycle() -> dict[str, object]:
                 await _notify(signal, risk, policy)
             if decision == "APPROVE" and risk.tier < 3:
                 order = await _submit_order(signal, risk, config, portfolio_state)
-                _register_stop_loss(signal.symbol, order, price_bars)
+                if not _order_accepted(order):
+                    # execution-service answers 200 with status REJECTED (no cash,
+                    # qty limit). Recording an open here would burn a day-trade
+                    # reservation on a position that does not exist.
+                    summary["rejected"] += 1
+                    await _audit(
+                        AuditEvent(
+                            event_type="signal.rejected",
+                            symbol=signal.symbol,
+                            signal_id=signal.signal_id,
+                            decision="REJECT",
+                            reasoning=str(order.get("rejection_reason") or "broker_rejected"),
+                            metadata={"order": order},
+                        )
+                    )
+                    continue
+                _day_trades().record_open(signal.symbol)
+                _register_stop_loss(
+                    signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
+                )
                 _register_take_profit(signal, order)
                 weekly_spend += float(order.get("amount_usd", 0.0))
                 state.weekly_notional_used = weekly_spend
@@ -530,8 +722,21 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
 async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
     buying_power = float(portfolio_state.get("buying_power", 100_000.0))
     amount_usd = round(buying_power * risk.adjusted_size_pct, 2)
-    qty = max(1, int(amount_usd / 100.0))
     current_price = await _get_quote_price(signal.symbol)
+    # Sizing must divide by the real price. The hardcoded 100.0 that used to be
+    # here was only ever consistent with the old paper broker's flat $100 fill;
+    # against a real quote a $5,000 target in a $500 stock became a $25,000
+    # position. The same bug was fixed in strategy-service's _compute_qty.
+    if current_price is None or current_price <= 0:
+        logger.warning("No quote for %s — refusing to size an order", signal.symbol)
+        return {"status": "REJECTED", "rejection_reason": "no_quote_for_sizing"}
+    qty = int(amount_usd / current_price)
+    if qty < 1:
+        logger.info(
+            "Order for %s sizes to 0 shares ($%.2f at %.4f) — skipping",
+            signal.symbol, amount_usd, current_price,
+        )
+        return {"status": "REJECTED", "rejection_reason": "qty_below_one_share"}
     stop_loss_pct = float(config.get("stop_loss_pct", 0.03))
     take_profit_pct = float(config.get("take_profit_pct", 0.06))
     stop_loss_rate = current_price * (1 - stop_loss_pct) if current_price is not None else None
@@ -557,31 +762,89 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
         response.raise_for_status()
     body = response.json()
     body["amount_usd"] = amount_usd
-    body["entry_price"] = current_price if current_price is not None else round(amount_usd / qty, 4)
+    body["entry_price"] = current_price
     body["qty"] = qty
     body["trading_mode"] = config.get("trading_mode", "demo")
     return body
 
 
-def _build_market_data_fetcher() -> OHLCVFetcherProtocol | None:
+def _day_trades() -> DayTradeTracker:
+    if state.day_trades is None:
+        state.day_trades = DayTradeTracker()
+    return state.day_trades
+
+
+async def _account_equity() -> float | None:
+    """Account equity, or None if it cannot be read.
+
+    None is not treated as "fine": the PDT guard assumes an unknown balance is
+    below the threshold, because approving on a guess is how an account gets
+    flagged.
+    """
     try:
-        return get_fetcher(MarketDataSettings())
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{settings.execution_service_url}/v1/account",
+                headers=_internal_headers(),
+            )
+            if response.status_code == 200:
+                return float(response.json().get("equity"))
     except Exception as exc:
-        logger.warning("Market data fetcher unavailable: %s", exc)
-        return None
+        logger.warning("Could not read account equity for the PDT check: %s", exc)
+    return None
 
 
-def _fetch_price_bars(fetcher: OHLCVFetcherProtocol | None, symbol: str) -> list[Any] | None:
-    if fetcher is None:
-        return None
+def _side_of(action: object) -> str:
+    """The order side as a plain string.
+
+    CandidateAction is a (str, Enum), and in Python 3.11 str() on such a member
+    yields "CandidateAction.SELL" rather than "SELL". Storing that made every
+    downstream direction check compare against a value that could never match,
+    so shorts silently kept using long-position logic.
+    """
+    return str(getattr(action, "value", action)).upper()
+
+
+def _order_accepted(order: dict[str, object]) -> bool:
+    """Whether the broker actually took the order.
+
+    execution-service returns HTTP 200 for a rejected order with the reason in
+    the body, so the status has to be read rather than inferred from the
+    response code.
+    """
+    status = str(order.get("status", "")).upper()
+    return status not in ("REJECTED", "CANCELLED")
+
+
+def _market_settings() -> MarketDataSettings:
+    if state.market_settings is None:
+        state.market_settings = MarketDataSettings()
+    return state.market_settings
+
+
+def _price_source() -> RealtimePriceSource:
+    """Shared price resolver — reads the stream cache first, then polls."""
+    if state.price_source is None:
+        state.price_source = RealtimePriceSource(_market_settings())
+    return state.price_source
+
+
+def _fetch_price_bars(symbol: str) -> list[Any] | None:
+    """Bars at the configured timeframe. ATR-based stops depend on this matching
+    the trading horizon: daily ATR on an intraday strategy sets stops far too wide."""
     try:
-        return fetcher.fetch(symbol.upper(), period_days=30)
+        return fetch_bars(symbol.upper(), _market_settings())
     except Exception as exc:
         logger.warning("Unable to fetch price bars for %s: %s", symbol, exc)
         return None
 
 
-def _register_stop_loss(symbol: str, order: dict[str, object], price_bars: list[Any] | None) -> None:
+def _register_stop_loss(
+    symbol: str,
+    order: dict[str, object],
+    price_bars: list[Any] | None,
+    side: str = "BUY",
+) -> None:
     if state.stop_loss_monitor is None:
         return
 
@@ -590,14 +853,20 @@ def _register_stop_loss(symbol: str, order: dict[str, object], price_bars: list[
         logger.warning("Skipping stop registration for %s: missing entry price", symbol)
         return
 
-    stop_price = entry_price * 0.98
+    # A short is stopped out by a RISE, so its stop sits above the entry. Placing
+    # it below (as the long formula does) puts the stop on the wrong side of the
+    # market: the direction-aware monitor would fire it on the first check,
+    # closing every short the moment it opened.
+    is_short = side.upper() == "SELL"
+    distance = entry_price * 0.02
     if price_bars:
         highs = [float(bar.high) for bar in price_bars]
         lows = [float(bar.low) for bar in price_bars]
         closes = [float(bar.close) for bar in price_bars]
         atr = compute_atr(highs, lows, closes)
         if atr > 0.0:
-            stop_price = entry_price - atr * 2.0
+            distance = atr * 2.0
+    stop_price = entry_price + distance if is_short else entry_price - distance
 
     state.stop_loss_monitor.register(
         StopLossRecord(
@@ -606,6 +875,7 @@ def _register_stop_loss(symbol: str, order: dict[str, object], price_bars: list[
             stop_price=stop_price,
             position_id=str(order.get("order_id", symbol)),
             qty=float(order.get("qty", 0.0)),
+            side=side,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -617,7 +887,15 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     if entry_price <= 0.0 or state.take_profit_monitor is None:
         return
 
-    target_price = entry_price + (settings.take_profit_target_usd / qty) if qty > 0 else entry_price * 1.06
+    # Mirror image: a short profits as price FALLS, so its target sits below the
+    # entry. An above-entry target is already satisfied at the moment of entry.
+    is_short = _side_of(signal.candidate_action) == "SELL"
+    gain_per_share = (
+        settings.take_profit_target_usd / qty if qty > 0 else entry_price * 0.06
+    )
+    target_price = (
+        entry_price - gain_per_share if is_short else entry_price + gain_per_share
+    )
     state.take_profit_monitor.register(
         TakeProfitRecord(
             symbol=signal.symbol,
@@ -625,24 +903,56 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
             target_price=target_price,
             position_id=str(order.get("order_id", signal.symbol)),
             qty=qty,
+            side=_side_of(signal.candidate_action),
             target_gain_usd=settings.take_profit_target_usd,
             created_at=datetime.now(timezone.utc),
         )
     )
 
 
+def _realized_pnl(record, exit_price: float | None) -> float | None:
+    """P&L on a closed position, or None when it cannot be determined.
+
+    Direction matters. A short profits when price falls, so the long-only
+    formula inverts its sign: a losing short would be booked as monthly profit
+    and could carry the account straight past the loss limit.
+
+    A record registered with qty=0 means "close whatever is open at the broker",
+    so the size is unknown here and no P&L can be attributed.
+    """
+    if record is None or exit_price is None:
+        return None
+    qty = float(getattr(record, "qty", 0.0) or 0.0)
+    entry = float(getattr(record, "entry_price", 0.0) or 0.0)
+    if qty <= 0.0 or entry <= 0.0:
+        return None
+    direction = -1.0 if str(getattr(record, "side", "BUY")).upper() == "SELL" else 1.0
+    return (exit_price - entry) * qty * direction
+
+
 async def _run_stop_loss_check() -> None:
     if state.stop_loss_monitor is None:
         return
-    fetcher = _build_market_data_fetcher()
-    if fetcher is None:
-        return
-    triggered = await state.stop_loss_monitor.check_all(fetcher)
+    prices = _price_source()
+    # check_all() drops each record as it fires, so snapshot before calling it.
+    tracked = state.stop_loss_monitor.records()
+    triggered = await state.stop_loss_monitor.check_all(prices)
     if not triggered:
         return
     logger.info("StopLossMonitor triggered exits for: %s", triggered)
     for symbol in triggered:
-        state.monthly_realized_loss_usd += 5.0
+        # Attribute the actual loss. Adding a flat constant per stop meant the
+        # monthly limit tripped after a fixed number of stops rather than at a
+        # real drawdown — and intraday fires stops far more often.
+        _day_trades().record_close(symbol)
+        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        if realized is None:
+            logger.warning(
+                "Stop-loss on %s: position size unknown, loss not attributed to the "
+                "monthly limit", symbol,
+            )
+        else:
+            state.monthly_realized_loss_usd += max(0.0, -realized)
         await _notify_smart("stop_loss_triggered", f"⛔ Stop-loss fired: {symbol}", tier=2)
         if state.monthly_realized_loss_usd >= settings.monthly_loss_limit_usd * 0.7:
             await _notify_smart(
@@ -661,12 +971,20 @@ async def _run_stop_loss_check() -> None:
 async def _run_take_profit_check() -> None:
     if state.take_profit_monitor is None:
         return
-    fetcher = _build_market_data_fetcher()
-    if fetcher is None:
-        return
-    triggered = await state.take_profit_monitor.check_all(fetcher)
+    prices = _price_source()
+    tracked = state.take_profit_monitor.records()
+    triggered = await state.take_profit_monitor.check_all(prices)
     for symbol in triggered:
-        state.monthly_realized_profit_usd += settings.take_profit_target_usd
+        # Book the gain actually achieved, not the target that was aimed at.
+        _day_trades().record_close(symbol)
+        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        if realized is None:
+            logger.warning(
+                "Take-profit on %s: position size unknown, gain not attributed to the "
+                "monthly target", symbol,
+            )
+        else:
+            state.monthly_realized_profit_usd += max(0.0, realized)
         await _notify_smart("take_profit", f"✅ Take-profit hit: {symbol}", tier=1)
         if state.monthly_realized_profit_usd >= settings.monthly_profit_target_usd:
             await _notify_smart(
@@ -773,12 +1091,36 @@ async def _process_approvals() -> None:
         return
     portfolio_state = await _portfolio_state()
     weekly_spend = await _weekly_spend()
-    fetcher = _build_market_data_fetcher()
     if not _monthly_limits_ok():
         return
+
+    # Deferred approvals open positions just like the direct path, so they are
+    # subject to the same day-trade budget. Skipping this let an account at its
+    # limit keep opening through the approval route.
+    account_equity = await _account_equity()
+    pdt = _day_trades().check_entry(account_equity)
+    if not pdt.allowed:
+        logger.warning("Approved orders held back: %s", pdt.reason)
+        for row in approved_rows:
+            await _audit(
+                AuditEvent(
+                    event_type="signal.rejected",
+                    symbol=str(row.get("symbol", "")),
+                    signal_id=str(row.get("signal_id", "")),
+                    decision="REJECT",
+                    reasoning=pdt.reason,
+                    metadata={"guard": "pattern_day_trader", "path": "approval"},
+                )
+            )
+        return
+
     for row in approved_rows:
         signal = SignalCandidate.model_validate(row["metadata"]["signal"])
-        price_bars = _fetch_price_bars(fetcher, signal.symbol)
+        # Re-checked per order: each accepted entry consumes budget.
+        if not _day_trades().check_entry(account_equity).allowed:
+            logger.warning("Remaining approved orders held back: day-trade budget spent")
+            break
+        price_bars = _fetch_price_bars(signal.symbol)
         # Re-run risk + policy with current state before executing
         risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
         if not risk.approved:
@@ -803,7 +1145,17 @@ async def _process_approvals() -> None:
             ))
             continue
         order = await _submit_order(signal, risk, config, portfolio_state)
-        _register_stop_loss(signal.symbol, order, price_bars)
+        if not _order_accepted(order):
+            logger.warning(
+                "Approved order for %s rejected by the broker: %s",
+                signal.symbol,
+                order.get("rejection_reason"),
+            )
+            continue
+        _day_trades().record_open(signal.symbol)
+        _register_stop_loss(
+            signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
+        )
         _register_take_profit(signal, order)
         weekly_spend += float(order.get("amount_usd", 0.0))
         state.weekly_notional_used = weekly_spend
@@ -888,6 +1240,7 @@ async def _process_exit_signals() -> int:
         if response.status_code not in (200, 201):
             continue
         closed += 1
+        _day_trades().record_close(signal.symbol)
         await _audit(
             AuditEvent(
                 event_type="trade.closed",
@@ -922,9 +1275,10 @@ async def _get_quote_price(symbol: str) -> float | None:
             )
             if response.status_code == 200:
                 return float(response.json().get("price"))
-    except Exception:
-        return None
-    return None
+    except Exception as exc:
+        logger.debug("Quote lookup via strategy-service failed for %s: %s", symbol, exc)
+    # Fall back to our own price source rather than giving up on a price.
+    return _price_source().get_price(symbol)
 
 
 async def _validate_allowlist_symbols() -> dict[str, list[str]]:

@@ -42,3 +42,21 @@ class TASummary(BaseModel):
     trend_direction: str = "neutral"  # "bullish" | "bearish" | "neutral"
     data_source: str = "unknown"
     current_price: Optional[float] = None
+
+
+class PriceSnapshot(BaseModel):
+    """A single most-recent price observation, with the provenance needed to age it."""
+
+    symbol: str
+    price: float
+    timestamp: datetime
+    source: str = "unknown"
+
+    def age_seconds(self, now: Optional[datetime] = None) -> float:
+        from datetime import timezone as _tz
+
+        reference = now or datetime.now(_tz.utc)
+        stamp = self.timestamp
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=_tz.utc)
+        return max(0.0, (reference - stamp).total_seconds())

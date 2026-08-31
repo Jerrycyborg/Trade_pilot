@@ -147,6 +147,7 @@ class AlpacaBroker:
         position_id: str,
         instrument_id: int,
         units: float | None = None,
+        symbol: str | None = None,
     ) -> bool:
         logger.warning("AlpacaBroker.close_position is not implemented")
         return False

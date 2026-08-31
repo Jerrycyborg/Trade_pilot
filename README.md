@@ -71,6 +71,26 @@ Production-minded AI trading stack: strategy proposes, policy approves, executio
 | `VOLUME_CONFIRM_ENABLED` | No | Require above-avg volume for BUY (default true) |
 | `STRATEGY_WATCHLIST` | No | Comma-separated symbols to trade |
 
+### Intraday / real-time
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MARKET_DATA_TIMEFRAME` | `daily` | Set to `intraday` to trade on intraday bars |
+| `INTRADAY_MINUTES` | `15` | Bar size. Yahoo serves 1, 2, 5, 15, 30, 60, 90 |
+| `INTRADAY_LOOKBACK_DAYS` | `5` | Bar history for indicators (Yahoo caps 1m at 7 days) |
+| `MARKET_DATA_PROVIDER` | auto | `yahoo` forces Yahoo; blank uses Alpaca when keys are set |
+| `STREAMING_ENABLED` | `false` | Real-time websocket bar stream (Alpaca only) |
+| `STREAM_SYMBOLS` | allowlist | Symbols to stream |
+| `STREAM_SYMBOL_LIMIT` | `30` | Cap on concurrent subscriptions (free IEX feed) |
+| `ALPACA_FEED` | `iex` | `sip` on a paid Alpaca data plan |
+| `MAX_PRICE_AGE_SECONDS` | `120` | Older prices are treated as unusable |
+| `ORCHESTRATOR_INTERVAL_SECONDS` | — | Cycle cadence; overrides the minutes setting |
+| `STOP_LOSS_CHECK_INTERVAL_MINUTES` | 1 intraday / 5 daily | Stop-loss poll interval |
+| `TAKE_PROFIT_CHECK_INTERVAL_MINUTES` | 1 intraday / 5 daily | Take-profit poll interval |
+| `PAPER_STARTING_CASH` | `100000` | Paper broker opening cash |
+| `PAPER_SLIPPAGE_BPS` | `2` | Simulated slippage, always against the trader |
+| `PAPER_STATE_PATH` | `./paper-broker-state.json` | Paper position ledger |
+
 ## Getting eToro API Keys
 
 1. Log into your eToro account at etoro.com
@@ -104,6 +124,188 @@ uv run uvicorn approval_gateway.main:app --port 8010
 # Open dashboard
 open apps/dashboard/index.html
 ```
+
+## Real-Time Intraday Trading
+
+Two data paths are supported. Both run the same trading loop.
+
+| | Alpaca | Yahoo |
+|---|---|---|
+| API key | free account required | none |
+| Intraday bars | real-time | delayed, typically ~15 min |
+| Websocket stream | yes | no |
+| Market calendar | authoritative (holidays, half-days) | weekday heuristic only |
+| Paper fills | real Alpaca paper account | local simulator |
+
+### Yahoo (no signup)
+
+```bash
+MARKET_DATA_PROVIDER=yahoo
+MARKET_DATA_TIMEFRAME=intraday
+INTRADAY_MINUTES=15
+BROKER=paper
+```
+
+Yahoo's intraday feed is delayed, so this is intraday but not truly real-time.
+It is the right setting for validating the pipeline before committing to a data
+provider. Prices are resolved by polling.
+
+### Alpaca (real-time)
+
+```bash
+ALPACA_API_KEY=...
+ALPACA_SECRET_KEY=...
+ALPACA_PAPER=true
+MARKET_DATA_PROVIDER=          # blank — auto-selects Alpaca
+MARKET_DATA_TIMEFRAME=intraday
+INTRADAY_MINUTES=5
+STREAMING_ENABLED=true
+BROKER=alpaca
+```
+
+Keys come from the Alpaca dashboard (alpaca.markets → Paper Trading → API
+Keys). With `STREAMING_ENABLED=true` the orchestrator subscribes to 1-minute
+bars over a websocket and serves prices from an in-memory cache, so stops are
+evaluated against a price that is seconds old rather than one HTTP call away.
+
+### Yahoo cannot satisfy the default policy limit
+
+Worth knowing before you pick a provider. Yahoo's intraday feed is delayed by
+roughly 15 minutes, while policy-service rejects any decision built on data
+older than `POLICY_MAX_DATA_AGE_SECONDS` (default **30 seconds**). Under
+defaults, the Yahoo path therefore places **zero live orders** — every signal is
+rejected as `stale_data`. That is the system failing closed correctly, not a
+bug.
+
+Three ways forward:
+
+| | What you get |
+|---|---|
+| **Use Alpaca** | Real-time prices; the default limit works as intended |
+| **Raise `POLICY_MAX_DATA_AGE_SECONDS`** | Trading on ~15-minute-old prices. Defensible on a 15-minute bar strategy, indefensible on a 1-minute one. Set it deliberately, not to make a warning go away |
+| **Use Yahoo for backtesting only** | Historical bars have no freshness requirement, so `run_backtest.py` works fine on Yahoo regardless |
+
+`scripts/verify_intraday.py` checks freshness against the *policy* limit and
+fails when it is exceeded, so this shows up before you start rather than as a
+run of rejections in the audit log.
+
+### Verify before trading
+
+Unit tests cannot prove that *this host* can reach a data provider. Run the
+preflight on the machine that will trade:
+
+```bash
+uv run python scripts/verify_intraday.py
+uv run python scripts/verify_intraday.py --symbols AAPL,MSFT --stream 30
+```
+
+It checks configuration, the market session, that intraday bars really arrive
+at the configured resolution, and that prices are fresh enough for the policy
+service to accept. It exits non-zero if anything fails.
+
+### Observing the loop
+
+```bash
+curl http://localhost:8007/v1/orchestrator/realtime
+```
+
+Reports the resolution the loop is actually running at: timeframe, provider,
+cycle and risk-check cadence, stream state, and the age of every cached price.
+Check this first if trades are being rejected — a `degrading to DAILY bars`
+error in the orchestrator log means intraday data could not be fetched and the
+strategy is no longer running at intraday resolution.
+
+### How prices are resolved
+
+Each price lookup tries three tiers, freshest first:
+
+1. the websocket stream's in-memory cache (sub-second, Alpaca only)
+2. the provider's latest-trade endpoint (one HTTP call)
+3. the close of the most recent bar
+
+Every result carries a timestamp. If no tier can supply a price, the strategy
+reports the data as **stale** rather than fresh, and the policy service rejects
+the trade. The system fails closed: no price means no order.
+
+## Does the Strategy Actually Work?
+
+The live loop will trade a strategy with no edge just as happily as a good one.
+Backtest before trusting it with money.
+
+```bash
+# 60 days of 15-minute bars across three symbols, with realistic costs
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT,NVDA
+
+# how much cost does the edge survive?
+uv run python scripts/run_backtest.py --symbols AAPL --sweep
+```
+
+The report separates **gross** return from **net**, because on an intraday
+strategy the gap between them is usually the whole story:
+
+```
+  Net return        +2.14%
+  Gross (no costs)  +8.90%
+  Cost drag         -6.76%  ($6,760, 76% of gross)
+```
+
+Costs default to 5bps spread + 1bps slippage + zero commission — roughly a
+liquid US large-cap at a commission-free broker. **Set them to match your broker
+and your symbols.** A wider spread is the fastest way for an intraday strategy
+to stop working, and `--sweep` shows exactly where it breaks:
+
+```
+      spread       return    trades
+       0.0bps       8.90%        84
+       5.0bps       2.14%        84
+      10.0bps      -4.61%        84     <- edge gone
+```
+
+If the strategy is unprofitable at your real costs, no amount of faster
+execution will fix that. Fix the strategy or stop.
+
+### What the backtest does not tell you
+
+- It runs one symbol at a time with no portfolio interaction.
+- It assumes every order fills at the next bar's open. Real market orders in
+  fast markets do worse.
+- Past results do not predict future returns. A strategy tuned until a backtest
+  looks good is a strategy fitted to history.
+
+## Pattern Day Trader (PDT) Protection
+
+Intraday trading in the US runs into a rule that automated systems breach
+quickly: **four or more day trades in five business days, with account equity
+under $25,000**, gets an account designated a pattern day trader and restricted.
+
+The orchestrator tracks day trades in a rolling five-business-day window and
+blocks new **entries** once the budget is spent. It never blocks an exit —
+holding a losing position past its stop to avoid a compliance flag trades a
+regulatory problem for a financial one.
+
+```bash
+curl http://localhost:8007/v1/orchestrator/day-trades
+```
+
+```json
+{"enabled": true, "day_trades_used": 2, "max_day_trades": 3,
+ "day_trades_remaining": 1, "equity_threshold_usd": 25000.0}
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PDT_ENABLED` | `true` | Set `false` if the rule does not apply to you |
+| `PDT_EQUITY_THRESHOLD_USD` | `25000` | Above this the rule does not bite |
+| `PDT_MAX_DAY_TRADES` | `3` | The 4th triggers designation; use `2` for margin |
+| `PDT_STATE_PATH` | `./day-trade-state.json` | Persisted; the window spans 5 days |
+
+**This is a US margin-account rule.** Cash accounts face settlement constraints
+instead, and non-US brokers have their own regimes. Confirm which applies to you
+with your broker rather than trusting this default — being flagged is
+disruptive to undo. Two known limitations: market holidays are not known, so in
+a holiday week a day trade can expire one session early (set
+`PDT_MAX_DAY_TRADES=2` for margin); and crypto round trips are counted even
+though FINRA's rule covers securities, which is conservative rather than unsafe.
 
 ## Enabling Live Mode (Step-by-Step)
 

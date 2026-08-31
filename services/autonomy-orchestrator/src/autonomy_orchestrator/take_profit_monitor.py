@@ -12,10 +12,10 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-class OHLCVFetcherProtocol(Protocol):
-    """Minimal fetcher protocol: fetch(symbol, period_days) -> list of bars."""
+class PriceSourceProtocol(Protocol):
+    """Minimal price protocol: get_price(symbol) -> current price or None."""
 
-    def fetch(self, symbol: str, period_days: int = 1) -> list:
+    def get_price(self, symbol: str) -> float | None:
         ...
 
 
@@ -25,6 +25,9 @@ class TakeProfitRecord(BaseModel):
     target_price: float
     position_id: str
     qty: float = 0.0
+    side: str = "BUY"
+    """Direction the position was opened in. P&L on a short inverts, so booking
+    it long-only turns a losing short into a recorded profit."""
     target_gain_usd: float = 20.0
     created_at: datetime
 
@@ -41,19 +44,34 @@ class TakeProfitMonitor:
     def get(self, symbol: str) -> TakeProfitRecord | None:
         return self._records.get(symbol.upper())
 
-    async def check_all(self, fetcher: OHLCVFetcherProtocol) -> list[str]:
+    def records(self) -> dict[str, TakeProfitRecord]:
+        """Snapshot of tracked targets. check_all() removes them as they fire, so
+        callers that need a fired record must take this first."""
+        return dict(self._records)
+
+    async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
         triggered: list[str] = []
         for symbol, record in list(self._records.items()):
             try:
-                bars = fetcher.fetch(symbol, period_days=1)
-                if not bars:
+                price = price_source.get_price(symbol)
+                if price is None:
+                    logger.warning(
+                        "TakeProfitMonitor: no price for %s — target not evaluated", symbol
+                    )
                     continue
-                latest_close = float(bars[-1].close)
-                if latest_close >= record.target_price:
+                # A short takes profit as price falls, not rises.
+                is_short = record.side.upper() == "SELL"
+                reached = (
+                    float(price) <= record.target_price
+                    if is_short
+                    else float(price) >= record.target_price
+                )
+                if reached:
                     logger.info(
-                        "Take-profit triggered for %s: close=%.2f >= target=%.2f",
+                        "Take-profit triggered for %s %s: price=%.2f, target=%.2f",
+                        record.side,
                         symbol,
-                        latest_close,
+                        price,
                         record.target_price,
                     )
                     if await self._trigger_close(record):
