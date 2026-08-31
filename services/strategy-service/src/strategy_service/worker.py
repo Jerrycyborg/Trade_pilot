@@ -394,6 +394,11 @@ class TradeWorker:
             logger.info(
                 "Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action
             )
+        else:
+            # An approved, sized, gate-passed order that failed to submit is an
+            # operational error, not a non-event. Counting it as nothing made a
+            # fully-rejected cycle look identical to a quiet one.
+            result.errors.append(f"{symbol}: order submission failed ({strategy_id})")
 
     def _lifecycle_gate(self, signal: SignalCandidate, strategy_id: str) -> str | None:
         """Why this signal may not reach the broker, or None if it may.
@@ -655,14 +660,35 @@ class TradeWorker:
         return {"decision": "REJECT", "reasons": ["policy_call_failed"], "approved_size_pct": 0.0}
 
     async def _submit_order(self, req: ExecutionOrderRequest, idempotency_key: str) -> bool:
+        """POST the order, authenticated the way the endpoint actually runs.
+
+        The X-Internal-Key header was missing here long after the integration
+        tests were fixed to send it (CI run 1 of the hardening work): the tests
+        learned to authenticate and the production caller never did, so in any
+        deployment with INTERNAL_API_KEY configured every worker order was
+        refused with 401 — found the first time the stack traded against live
+        data rather than through a test client.
+
+        A refusal is also *loud* now. It used to return False into a counter
+        that only counts successes, so a cycle whose every order was rejected
+        reported "0 orders, 0 errors" — indistinguishable from a quiet market.
+        """
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     f"{settings.execution_service_url}/v1/orders",
                     json=req.model_dump(mode="json"),
-                    headers={"Idempotency-Key": idempotency_key},
+                    headers={
+                        "Idempotency-Key": idempotency_key,
+                        "X-Internal-Key": os.environ.get("INTERNAL_API_KEY", ""),
+                    },
                 )
-                return resp.status_code in (200, 201)
+                if resp.status_code in (200, 201):
+                    return True
+                logger.error(
+                    "Order for %s refused by execution-service: HTTP %s %s",
+                    req.symbol, resp.status_code, resp.text[:200],
+                )
         except Exception as exc:
             logger.error("Order submission failed: %s", exc)
         return False

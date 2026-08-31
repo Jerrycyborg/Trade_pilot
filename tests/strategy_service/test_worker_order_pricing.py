@@ -524,3 +524,82 @@ class TestTheChampionSignalReadsTheMarket:
         assert received["ta"] is not None, "the signal must see the TA summary"
         assert received["bars"], "and the bars it was computed from"
         assert received["ta"].bars_count == len(received["bars"])
+
+
+class TestOrderSubmissionAuthenticates:
+    """Found by the first live paper run, not by the suite: the integration
+    tests were taught to send X-Internal-Key when CI exposed that they only
+    passed with auth unconfigured — but the worker itself was never taught. In
+    any deployment with INTERNAL_API_KEY set, every worker order got 401, and
+    the cycle reported it as "0 orders, 0 errors".
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_worker_sends_the_internal_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from strategy_service.worker import TradeWorker
+
+        monkeypatch.setenv("INTERNAL_API_KEY", "the-configured-key")
+        seen: dict = {}
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+        class _Client:
+            def __init__(self, **_kw): ...
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_a): return False
+            async def post(self, url, json=None, headers=None):
+                seen["headers"] = headers
+                return _Resp()
+
+        monkeypatch.setattr("strategy_service.worker.httpx.AsyncClient", _Client)
+        ok = await TradeWorker()._submit_order(
+            ExecutionOrderRequest(
+                signal_id="s", symbol="NVDA", side="SELL", qty=2, order_type="MARKET"
+            ),
+            idempotency_key="k",
+        )
+
+        assert ok is True
+        assert seen["headers"]["X-Internal-Key"] == "the-configured-key"
+
+    @pytest.mark.asyncio
+    async def test_a_refused_order_is_an_error_not_a_non_event(
+        self, worker_run, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An approved, sized, gate-passed order that fails to submit must not
+        leave the cycle looking identical to a quiet market."""
+        from strategy_service.worker import TradeWorker, WorkerRunResult
+
+        result = WorkerRunResult()
+        worker = TradeWorker()
+
+        async def refuse(_req, idempotency_key):
+            return False
+
+        monkeypatch.setattr(worker, "_submit_order", refuse)
+        monkeypatch.setattr(worker, "_get_market_snapshot", lambda _s: (None, []))
+
+        # Drive _execute_signal directly with a ready signal.
+        async def buying_power(): return 100_000.0
+        async def ctx():
+            from contracts import PortfolioContext
+            return PortfolioContext(gross_exposure_pct=0.0, daily_drawdown_pct=0.0)
+        async def approve(_r): return {"decision": "APPROVE", "approved_size_pct": 0.05}
+        monkeypatch.setattr(worker, "_get_buying_power", buying_power)
+        monkeypatch.setattr(worker, "_get_portfolio_context", ctx)
+        monkeypatch.setattr(worker, "_call_policy", approve)
+        from lifecycle.service import reset_lifecycle_service
+        reset_lifecycle_service(_AlwaysLive())
+
+        bars = _bars(50_000_000.0)
+        await worker._execute_signal(
+            _signal(CandidateAction.BUY), "AAPL", bars, result,
+            strategy_id="ema_rsi_macd",
+        )
+
+        assert result.orders_submitted == 0
+        assert result.errors and "submission failed" in result.errors[0]
