@@ -281,8 +281,26 @@ Each phase gated on the previous one being reviewed.
   implementation writes nothing at all, which is safer but means a campaign
   result is not persisted — so L4's champion/challenger comparison, which needs
   a durable record of what was proposed and when, has that to build first.
-- **L4 — champion/challenger in paper.** Both running, both recorded,
-  compared. Human-approved promotion only.
+- **L4 — champion/challenger in paper. Not started, and materially different
+  from the four before it.** Both running, both recorded, compared.
+  Human-approved promotion only.
+
+  L0–L3 are analysis: they read the archive and, at L3, emit an inert object.
+  L4 changes what the system *runs* — two sleeves trading the same symbols in
+  paper, distinguished by strategy version — and it has to write, because a
+  comparison needs a durable record of what was proposed, when, and under which
+  bounds. Two things should be settled before any of it is built:
+
+  1. **Where a proposal is persisted.** `lifecycle.validation_artifact` already
+     exists and is additive-friendly, but a challenger is not a validation
+     result and storing it there would blur the two. A separate proposal store
+     is probably right, and it is a schema decision rather than a coding one.
+  2. **How a paper challenger is prevented from becoming a live one by
+     accident.** L3's safety rests on a challenger having nowhere to go. The
+     moment one is registered as a sleeve — even a paper one — that stops being
+     true structurally and starts depending on the lifecycle gates, which is a
+     weaker guarantee resting on code that has already been wrong twice this
+     branch.
 
 ## Consequences
 
