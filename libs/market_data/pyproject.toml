@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "OHLCV data fetching and technical indicator computation."
 requires-python = ">=3.11"
 dependencies = [
+    "journal",
     "pydantic>=2.10.0",
     "alpaca-py>=0.38.0",
     "yfinance>=0.2.0",

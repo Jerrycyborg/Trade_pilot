@@ -13,7 +13,19 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contracts import ApprovalRequest, AuditEvent, NotificationEvent, PolicyEvaluationRequest, SignalCandidate
 from contracts.auth import verify_admin_key, verify_internal_key
 from contracts.rate_limit import rate_limit_write
+from contracts.execution import (
+    average_daily_volume,
+    marketable_limit_price,
+    participation_capped_qty,
+)
 from contracts.sanitize import sanitize_symbol
+from lifecycle import (
+    DEFAULT_LIVE_STRATEGY,
+    Evidence,
+    LifecycleRegistry,
+    State,
+    summarise,
+)
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from market_data import (
@@ -29,6 +41,7 @@ from pydantic import BaseModel
 
 from .config import settings
 from .day_trade_tracker import DayTradeTracker
+from .reconciliation import Reconciler
 from .stop_loss_monitor import StopLossMonitor, StopLossRecord
 from .take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
@@ -58,9 +71,11 @@ class OrchestratorState:
     monthly_reset_month: int = 0
     monthly_reset_year: int = 0
     price_source: RealtimePriceSource | None = None
+    reconciler: Reconciler | None = None
     stream_manager: StreamManager | None = None
     market_settings: MarketDataSettings | None = None
     day_trades: DayTradeTracker | None = None
+    lifecycle: LifecycleRegistry | None = None
 
 
 state = OrchestratorState()
@@ -124,6 +139,14 @@ def _start_scheduler() -> None:
         "interval",
         seconds=_risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES"),
         id="stop_loss_check",
+        replace_existing=True,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(_run_reconciliation()),
+        "interval",
+        seconds=int(os.getenv("RECONCILE_INTERVAL_SECONDS", "300")),
+        id="position_reconciliation",
         replace_existing=True,
         coalesce=True,
     )
@@ -290,6 +313,109 @@ def realtime_status() -> dict[str, object]:
             for symbol in source.cache.symbols()
             if (snapshot := source.cache.peek(symbol)) is not None
         },
+    }
+
+
+@app.get("/v1/orchestrator/reconciliation")
+async def reconciliation_status(refresh: bool = False) -> dict[str, object]:
+    """Last ledger-vs-broker comparison. `refresh=true` runs a fresh check."""
+    reconciler = _reconciler()
+    if refresh or reconciler.last_result is None:
+        result = await reconciler.check()
+    else:
+        result = reconciler.last_result
+    return {
+        **result.to_dict(),
+        "entries_blocked": reconciler.entries_blocked,
+        "breaks_before_halt": int(os.getenv("RECONCILE_BREAKS_BEFORE_HALT", "2")),
+    }
+
+
+@app.get("/v1/orchestrator/journal")
+def journal_status(limit: int = 25, symbol: str | None = None) -> dict[str, object]:
+    """Archive coverage and the most recent decisions, with their inputs."""
+    archive = _journal()
+    return {
+        "archive": archive.stats(),
+        "recent_decisions": archive.recent_decisions(limit=limit, symbol=symbol),
+    }
+
+
+@app.get("/v1/orchestrator/lifecycle")
+def lifecycle_status() -> dict[str, object]:
+    """The strategy roster: what is live, what is on paper, and why."""
+    return summarise(_lifecycle())
+
+
+@app.post("/v1/orchestrator/lifecycle/register")
+def lifecycle_register(
+    strategy: str, symbol: str, _: None = Depends(verify_internal_key)
+) -> dict[str, object]:
+    """Add a sleeve as a candidate. It cannot trade until it earns each step."""
+    record = _lifecycle().register(strategy, sanitize_symbol(symbol))
+    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+
+
+@app.post("/v1/orchestrator/lifecycle/promote")
+def lifecycle_promote(
+    strategy: str,
+    symbol: str,
+    evidence: Evidence,
+    _: None = Depends(verify_admin_key),
+) -> dict[str, object]:
+    """Move a sleeve up one step, if the evidence supports it.
+
+    Admin-gated because the upper step of this ladder is real money. Every gate
+    fails closed: a missing measurement is a refusal, not a pass.
+    """
+    record, result = _lifecycle().promote(strategy, sanitize_symbol(symbol), evidence)
+    return {
+        "sleeve": record.key if record else None,
+        "state": record.state.value if record else None,
+        "promoted": result.allowed,
+        "passed": result.passed,
+        "failed": result.failed,
+        "reason": result.reason,
+    }
+
+
+@app.post("/v1/orchestrator/lifecycle/demote")
+def lifecycle_demote(
+    strategy: str,
+    symbol: str,
+    to: str = "probation",
+    reason: str = "manual",
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Take a sleeve out of live. Never gated — safety must not need approval."""
+    try:
+        target = State(to)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown state {to!r}. Available: {', '.join(s.value for s in State)}",
+        ) from None
+    record = _lifecycle().demote(strategy, sanitize_symbol(symbol), target, reason)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Sleeve is not registered")
+    return {"sleeve": record.key, "state": record.state.value, "reason": record.reason}
+
+
+@app.post("/v1/orchestrator/lifecycle/health")
+def lifecycle_health(
+    strategy: str,
+    symbol: str,
+    evidence: Evidence,
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Check a live sleeve against its demotion triggers, and act on the answer."""
+    check = _lifecycle().check_health(strategy, sanitize_symbol(symbol), evidence)
+    record = _lifecycle().get(strategy, sanitize_symbol(symbol))
+    return {
+        "sleeve": record.key if record else None,
+        "healthy": check.healthy,
+        "state": record.state.value if record else None,
+        "reasons": check.reasons,
     }
 
 
@@ -476,6 +602,28 @@ async def run_cycle() -> dict[str, object]:
         # is done once, but the decision is re-taken per signal: every accepted
         # entry increments open_today, which the budget is gated on.
         account_equity = await _account_equity()
+        # A ledger that disagrees with the broker is not a safe basis for a new
+        # position. Exits stay enabled: refusing to close something we cannot
+        # account for is worse than closing it.
+        reconciliation = await _reconciler().check()
+        summary["reconciliation"] = {
+            "ok": reconciliation.ok,
+            "breaks": len(reconciliation.breaks),
+            "halted": reconciliation.halted,
+        }
+        if reconciliation.halted:
+            _journal().record_decision(
+                stage="reconcile",
+                outcome="rejected",
+                reason="position break persisted — new entries blocked",
+                inputs=reconciliation.to_dict(),
+            )
+            await _notify_smart(
+                "reconciliation_break",
+                "\u26d4 Broker and ledger disagree — new entries paused. Exits unaffected.",
+                tier=3,
+            )
+
         pdt = _day_trades().check_entry(account_equity)
         summary["pdt"] = {
             "allowed": pdt.allowed,
@@ -493,9 +641,25 @@ async def run_cycle() -> dict[str, object]:
 
         for signal in signals:
             summary["signals"] += 1
+            if reconciliation.halted:
+                summary["rejected"] += 1
+                continue
             pdt = _day_trades().check_entry(account_equity)
             if not pdt.allowed:
                 summary["rejected"] += 1
+                _journal().record_decision(
+                    stage="pdt",
+                    outcome="rejected",
+                    symbol=signal.symbol,
+                    action=str(signal.candidate_action),
+                    reason=pdt.reason,
+                    inputs={
+                        "day_trades_used": pdt.day_trades_used,
+                        "open_today": pdt.open_today,
+                        "equity": pdt.equity,
+                    },
+                    correlation_id=signal.signal_id,
+                )
                 await _audit(
                     AuditEvent(
                         event_type="signal.rejected",
@@ -511,6 +675,21 @@ async def run_cycle() -> dict[str, object]:
             risk = evaluate_risk(signal, portfolio_state, weekly_spend, config, price_bars=price_bars)
             if not risk.approved:
                 summary["rejected"] += 1
+                _journal().record_decision(
+                    stage="risk",
+                    outcome="rejected",
+                    symbol=signal.symbol,
+                    action=str(signal.candidate_action),
+                    reason=risk.reason,
+                    inputs={
+                        "size_pct": signal.size_pct,
+                        "confidence": signal.confidence,
+                        "risk_score": signal.risk_score,
+                        "bars": len(price_bars or []),
+                    },
+                    outputs={"tier": risk.tier},
+                    correlation_id=signal.signal_id,
+                )
                 await _audit(
                     AuditEvent(
                         event_type="signal.rejected",
@@ -527,7 +706,44 @@ async def run_cycle() -> dict[str, object]:
             if risk.tier >= 1:
                 await _notify(signal, risk, policy)
             if decision == "APPROVE" and risk.tier < 3:
-                order = await _submit_order(signal, risk, config, portfolio_state)
+                # The roster decides what may reach the broker. A sleeve that
+                # is validated but still on paper runs the whole pipeline and
+                # records its decision — that recorded history is exactly the
+                # evidence its promotion to live is gated on.
+                strategy_name = _strategy_of(signal)
+                gate = _lifecycle_gate(signal)
+                if gate is not None:
+                    summary["paper_only"] = summary.get("paper_only", 0) + 1
+                    _journal().record_decision(
+                        stage="lifecycle_gate",
+                        outcome="not_traded",
+                        symbol=signal.symbol,
+                        action=_side_of(signal.candidate_action),
+                        reason=gate,
+                        inputs={
+                            "strategy": strategy_name,
+                            "confidence": signal.confidence,
+                            "adjusted_size_pct": risk.adjusted_size_pct,
+                        },
+                        outputs={"would_have_traded": True},
+                        correlation_id=signal.signal_id,
+                    )
+                    await _audit(
+                        AuditEvent(
+                            event_type="signal.paper_only",
+                            symbol=signal.symbol,
+                            signal_id=signal.signal_id,
+                            decision="PAPER",
+                            reasoning=gate,
+                            metadata={"strategy": strategy_name},
+                        )
+                    )
+                    await _mark_signal_acted(signal.signal_id)
+                    continue
+
+                order = await _submit_order(
+                    signal, risk, config, portfolio_state, price_bars
+                )
                 if not _order_accepted(order):
                     # execution-service answers 200 with status REJECTED (no cash,
                     # qty limit). Recording an open here would burn a day-trade
@@ -545,6 +761,27 @@ async def run_cycle() -> dict[str, object]:
                     )
                     continue
                 _day_trades().record_open(signal.symbol)
+                _journal().record_decision(
+                    stage="order",
+                    outcome="executed",
+                    symbol=signal.symbol,
+                    action=_side_of(signal.candidate_action),
+                    reason="order_submitted",
+                    inputs={
+                        "confidence": signal.confidence,
+                        "risk_score": signal.risk_score,
+                        "adjusted_size_pct": risk.adjusted_size_pct,
+                        "policy_decision": policy.get("decision"),
+                        "research": (signal.research_summary or "")[:400],
+                    },
+                    outputs={
+                        "qty": order.get("qty"),
+                        "entry_price": order.get("entry_price"),
+                        "amount_usd": order.get("amount_usd"),
+                        "order_id": order.get("order_id"),
+                    },
+                    correlation_id=signal.signal_id,
+                )
                 _register_stop_loss(
                     signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
                 )
@@ -719,7 +956,13 @@ async def _policy_evaluate(signal: SignalCandidate, risk, config: dict[str, obje
         raise RuntimeError(f"Policy service unreachable: {exc}") from exc
 
 
-async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]) -> dict[str, object]:
+async def _submit_order(
+    signal: SignalCandidate,
+    risk,
+    config: dict[str, object],
+    portfolio_state: dict[str, object],
+    price_bars: list[Any] | None = None,
+) -> dict[str, object]:
     buying_power = float(portfolio_state.get("buying_power", 100_000.0))
     amount_usd = round(buying_power * risk.adjusted_size_pct, 2)
     current_price = await _get_quote_price(signal.symbol)
@@ -731,12 +974,39 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
         logger.warning("No quote for %s — refusing to size an order", signal.symbol)
         return {"status": "REJECTED", "rejection_reason": "no_quote_for_sizing"}
     qty = int(amount_usd / current_price)
+
+    # Trim to a share of the symbol's volume. Being a large fraction of what
+    # trades moves the price against you, so the cost of the order becomes a
+    # function of its own size — the effect that punishes thin small caps.
+    max_participation = float(os.getenv("MAX_ADV_PARTICIPATION", "0.01"))
+    adv = average_daily_volume(price_bars or [], bars_per_day=_bars_per_day())
+    capped = participation_capped_qty(qty, adv, max_participation)
+    if capped < qty:
+        logger.info(
+            "Order for %s trimmed %d -> %d shares (%.1f%% of ~%.0f ADV)",
+            signal.symbol, qty, capped, max_participation * 100, adv or 0,
+        )
+        qty = capped
+
     if qty < 1:
         logger.info(
             "Order for %s sizes to 0 shares ($%.2f at %.4f) — skipping",
             signal.symbol, amount_usd, current_price,
         )
         return {"status": "REJECTED", "rejection_reason": "qty_below_one_share"}
+
+    # A marketable limit with IOC: fills now at or inside the limit, or not at
+    # all. A market order would accept whatever the book offers, which on a
+    # spike is exactly the fill the strategy did not assume.
+    order_type, time_in_force, limit_price = "MARKET", "DAY", None
+    if os.getenv("USE_LIMIT_ORDERS", "true").lower() == "true":
+        tolerance = float(os.getenv("LIMIT_TOLERANCE_BPS", "10"))
+        limit_price = marketable_limit_price(
+            current_price, _side_of(signal.candidate_action), tolerance
+        )
+        if limit_price is not None:
+            order_type, time_in_force = "LIMIT", "IOC"
+
     stop_loss_pct = float(config.get("stop_loss_pct", 0.03))
     take_profit_pct = float(config.get("take_profit_pct", 0.06))
     stop_loss_rate = current_price * (1 - stop_loss_pct) if current_price is not None else None
@@ -749,8 +1019,10 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
                 "symbol": signal.symbol,
                 "side": signal.candidate_action,
                 "qty": qty,
-                "order_type": "MARKET",
-                "time_in_force": "DAY",
+                "order_type": order_type,
+                "time_in_force": time_in_force,
+                "limit_price": limit_price,
+                "decision_price": current_price,
                 "stop_loss_rate": stop_loss_rate,
                 "take_profit_rate": take_profit_rate,
             },
@@ -766,6 +1038,36 @@ async def _submit_order(signal: SignalCandidate, risk, config: dict[str, object]
     body["qty"] = qty
     body["trading_mode"] = config.get("trading_mode", "demo")
     return body
+
+
+def _strategy_of(signal: SignalCandidate) -> str:
+    """Which rule produced this signal.
+
+    Older producers do not set the field; they are all the momentum rule, which
+    is what the default names. Guessing the wrong strategy here would gate a
+    sleeve against another sleeve's roster entry.
+    """
+    return getattr(signal, "strategy", None) or DEFAULT_LIVE_STRATEGY
+
+
+def _lifecycle_gate(signal: SignalCandidate) -> str | None:
+    """Why this signal may not reach the broker, or None if it may.
+
+    Extracted from the cycle so the decision can be tested on its own. Buried
+    inside a hundred-line loop it could only be verified by re-implementing it
+    in the test, which tests the test.
+    """
+    strategy_name = _strategy_of(signal)
+    registry = _lifecycle()
+    if registry.can_trade(strategy_name, signal.symbol):
+        return None
+    return registry.gate_reason(strategy_name, signal.symbol)
+
+
+def _lifecycle() -> LifecycleRegistry:
+    if state.lifecycle is None:
+        state.lifecycle = LifecycleRegistry()
+    return state.lifecycle
 
 
 def _day_trades() -> DayTradeTracker:
@@ -803,6 +1105,31 @@ def _side_of(action: object) -> str:
     so shorts silently kept using long-position logic.
     """
     return str(getattr(action, "value", action)).upper()
+
+
+def _reconciler() -> Reconciler:
+    if state.reconciler is None:
+        state.reconciler = Reconciler(
+            execution_url=settings.execution_service_url,
+            portfolio_url=settings.portfolio_service_url,
+            internal_key=settings.internal_api_key,
+        )
+    return state.reconciler
+
+
+def _journal():
+    """Process-wide decision journal; a stub if journalling is unavailable."""
+    from journal import get_journal
+
+    return get_journal()
+
+
+def _bars_per_day() -> float:
+    """Bars in a session at the configured resolution, for scaling volume."""
+    market_settings = _market_settings()
+    if not market_settings.is_intraday:
+        return 1.0
+    return max(1.0, 390.0 / max(1, market_settings.intraday_minutes))
 
 
 def _order_accepted(order: dict[str, object]) -> bool:
@@ -928,6 +1255,31 @@ def _realized_pnl(record, exit_price: float | None) -> float | None:
         return None
     direction = -1.0 if str(getattr(record, "side", "BUY")).upper() == "SELL" else 1.0
     return (exit_price - entry) * qty * direction
+
+
+async def _run_reconciliation() -> None:
+    """Scheduled ledger-vs-broker check, independent of the trading cycle.
+
+    Runs on its own timer so a break is noticed even when no signals are being
+    produced — a position that appears at the broker outside the loop is exactly
+    the case worth catching.
+    """
+    result = await _reconciler().check()
+    if result.breaks:
+        await _audit(
+            AuditEvent(
+                event_type="reconciliation.break",
+                decision="ALERT",
+                reasoning="; ".join(b.describe() for b in result.breaks[:5]),
+                metadata=result.to_dict(),
+            )
+        )
+        _journal().record_decision(
+            stage="reconcile",
+            outcome="rejected" if result.halted else "skipped",
+            reason=f"{len(result.breaks)} position break(s)",
+            inputs=result.to_dict(),
+        )
 
 
 async def _run_stop_loss_check() -> None:
@@ -1144,7 +1496,7 @@ async def _process_approvals() -> None:
                 metadata={"policy": policy},
             ))
             continue
-        order = await _submit_order(signal, risk, config, portfolio_state)
+        order = await _submit_order(signal, risk, config, portfolio_state, price_bars)
         if not _order_accepted(order):
             logger.warning(
                 "Approved order for %s rejected by the broker: %s",

@@ -1,9 +1,9 @@
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "libs" / "contracts" / "src"))
+sys.path.insert(0, str(ROOT / "libs" / "lifecycle" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "brokers" / "src"))
 sys.path.insert(0, str(ROOT / "libs" / "market_data" / "src"))
 sys.path.insert(0, str(ROOT / "services" / "audit-logger" / "src"))
@@ -85,6 +85,19 @@ def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
     _active_prices = source
     monkeypatch.setenv("PAPER_STATE_PATH", str(tmp_path / "paper-broker-state.json"))
     monkeypatch.setenv("PAPER_SLIPPAGE_BPS", "0")
+    # Each test gets its own archive. Without this the suite would append to the
+    # developer's real journal.db and pollute the research record with fixtures.
+    monkeypatch.setenv("JOURNAL_PATH", str(tmp_path / "journal.db"))
+    from journal import reset_journal
+
+    reset_journal(None)
+    # Each test gets its own strategy roster. Without this the suite would
+    # write to the developer's real strategy-lifecycle.json — and, worse, read
+    # it, so whether a test passed would depend on what was live locally.
+    monkeypatch.setenv("LIFECYCLE_STATE_PATH", str(tmp_path / "strategy-lifecycle.json"))
+    from strategy_service.worker import reset_lifecycle
+
+    reset_lifecycle()
     if request.node.get_closest_marker("real_price_source"):
         # Tests of the resolver itself inject their own fetcher, so they never
         # reach the network either.

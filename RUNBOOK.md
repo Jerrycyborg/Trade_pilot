@@ -202,6 +202,375 @@ only loses money quicker.
 so there is nothing to evaluate. Lengthen `--days` or check the warm-up (EMA-50
 needs 51 bars before any signal is possible).
 
+## Deciding Whether an Edge Is Real
+
+Run this before a strategy change reaches paper, and again before paper reaches
+live. It is the check that a profitable-looking backtest cannot substitute for.
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+```
+
+Three verdicts come back. Act on them in this order:
+
+### [FAIL] Out-of-sample profitable
+
+The strategy made money on the data it was tuned on and lost it on the data
+that followed. Nothing else in the report matters. Do not deploy, do not widen
+the grid to find a configuration that passes — that is more of the same error.
+
+### [FAIL] Survives the search
+
+Out-of-sample was profitable, but not by more than a search of this size finds
+in noise. Options, in descending order of honesty:
+
+1. **Get more data.** The deflated ratio rises with sample length. A 59-day
+   intraday window is short; the same result over a year may clear the bar.
+   Note that Yahoo caps intraday history (7 days at 1-minute, 60 at most other
+   resolutions), so this usually means Alpaca.
+2. **Narrow the grid.** Fewer configurations set a lower bar — but only do this
+   by removing parameters you had no reason to vary, never by removing the ones
+   that happened to lose.
+3. **Accept it as unproven.** Paper trade it and collect out-of-sample evidence
+   forward in time, which is the only kind that does not cost a trial.
+
+What not to do: re-run with a different seed, symbol or window until one
+passes. Each attempt is another trial, and none of them get counted.
+
+### [FAIL] Folds agree on parameters
+
+Each fold picked different "optimal" settings, which means the optimum is a
+property of the window rather than of the market. The strategy may still have
+an edge — try fixing the parameters at the default and running walk-forward
+with a single-point grid. If it survives without being tuned per fold, the
+tuning was the problem, not the idea.
+
+### Everything passed
+
+It has cleared one specific way of being wrong. It has not cleared:
+
+- **Multiple symbols.** Running this on twenty symbols and deploying the best
+  is the same selection error one level up. Decide the symbol list first.
+- **Small samples.** Below 30 out-of-sample trades the report warns, and the
+  warning should be read as disqualifying rather than advisory.
+- **Assumed costs.** Re-run with the measured figure from
+  `/v1/execution/quality` (see the section above) before believing the return.
+
+### Parameter sensitivity
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --sensitivity
+```
+
+Use it to understand *why* a walk-forward result came out the way it did, not
+as a pass/fail on its own. A spike — the best configuration far above its
+immediate neighbours — explains a failed walk-forward. A plateau does not
+prove anything on its own: on a sample that happened to trend, every momentum
+configuration profits and they form a plateau together.
+
+### "Not enough data for N walk-forward folds"
+
+Each fold needs an initial training window plus a test window, on top of the
+indicator warm-up. Either raise `--days`, drop `--splits` to 2 or 3, or move to
+a smaller `--minutes` so the same calendar window yields more bars.
+
+### The run is slow
+
+The grid is 81 configurations by default and the walk-forward runs it once per
+fold. A year of 1-minute bars is a large job. Narrow the grid via the service's
+`grid` parameter rather than reducing folds — folds are the part doing the
+actual validating.
+
+## Checking What Execution Is Costing You
+
+```bash
+curl http://localhost:8002/v1/execution/quality
+```
+
+Read three numbers, in this order:
+
+1. **`fill_rate`** — the share of orders that actually filled. A rate well below
+   1.0 means the strategy you are running is not the strategy you backtested:
+   some of its trades never happened. Widen `LIMIT_TOLERANCE_BPS`, or accept
+   that those signals were the expensive ones.
+2. **`mean_shortfall_bps`** — average cost per fill, positive being a cost.
+   This is the honest input to the backtest's slippage assumption.
+3. **`worst_shortfall_bps`** and **`mean_shortfall_by_symbol`** — where the cost
+   actually lives. One symbol paying several times the rest is a liquidity
+   problem in that symbol; consider dropping it from the watchlist rather than
+   widening the tolerance for everything.
+
+Then close the loop — re-run the backtest with the measured cost rather than
+the default guess:
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT --slippage-bps 2.5
+```
+
+If the strategy was net positive at the assumed cost and net negative at the
+measured one, the edge was in the assumption. That is a finding, not a
+setback — it is exactly what this measurement exists to catch, and it is
+cheaper to learn here than from the account balance.
+
+### Fill rate has collapsed
+
+Every order coming back `limit_not_marketable` usually means one of:
+
+- **The tolerance is too tight for the symbol's spread.** 10bps on a stock with
+  a 30bps spread will essentially never fill. Raise `LIMIT_TOLERANCE_BPS` or
+  trade something tighter.
+- **The decision price is stale.** Check `/v1/orchestrator/realtime` for data
+  age. A limit priced off a two-minute-old quote is priced off a market that
+  has moved on.
+- **The market is moving fast.** Legitimate: this is the protection working,
+  and the fills you are missing are the ones that would have been worst.
+
+To confirm the mechanism rather than the market, set `USE_LIMIT_ORDERS=false`
+for one session and compare `mean_shortfall_bps` with limits on and off.
+
+### Orders are smaller than expected
+
+Sizing is capped at `MAX_ADV_PARTICIPATION` of average daily volume. The
+orchestrator logs the trim (`Order for X trimmed 500 -> 40 shares`). If a
+symbol is consistently trimmed hard it is too thin for the size you are
+trading — reduce the position size or drop the symbol. Raising the cap does not
+make the liquidity appear; it moves the cost from the trim into the fill price.
+
+## Adding or Combining Strategies
+
+### Seeing what is available
+
+```bash
+curl http://localhost:8011/backtest/strategies
+```
+
+### Before adding a strategy to the portfolio
+
+Run it on its own first, then in combination. A strategy that fails
+walk-forward alone does not become viable by being averaged with others.
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT --portfolio
+```
+
+Then check one thing above all: `max_correlation`. If the new strategy
+correlates above 0.7 with one already in the portfolio, it is not a new
+strategy — it is the existing one at a different size, and adding it doubles
+the cost without changing the risk.
+
+### "[FAIL] Sleeves actually diversify"
+
+Diversification ratio near 1.0. The sleeves move together. Causes, in order:
+
+1. **Same idea, different parameters.** Two trend rules will correlate whatever
+   their lookbacks. Check `/backtest/strategies` — the two shipped rules read
+   disjoint parameters precisely so this cannot happen by accident.
+2. **Same symbol.** Two strategies on one symbol share its moves. Spread across
+   symbols before adding strategies.
+3. **Correlated symbols.** Three large-cap US tech names are close to one
+   position. The report cannot know that from prices alone over a short window
+   — you have to.
+
+### "[FAIL] Beats its best sleeve"
+
+The combination did worse than one of its parts. This is not automatically a
+reason to drop the others: the best sleeve is only knowable in hindsight, and
+choosing it after the fact is the selection error this whole section exists to
+prevent. What it *is* a reason to do:
+
+- Check whether the losing sleeves failed walk-forward individually. If so,
+  they should not have been in the portfolio.
+- Check the trade counts. A sleeve with four trades has not demonstrated
+  anything either way.
+
+### "[FAIL] Survives the search"
+
+Same meaning as in walk-forward, and here the trial count is usually the
+problem: it defaults to the number of sleeves. If you screened a watchlist and
+kept the best performers, pass `--considered <how many you looked at>` and read
+the result again. It will be worse, and it will be correct.
+
+### A strategy was dropped from the run
+
+The report names it and why — either no bars were supplied for the symbol, or
+there were fewer bars than the strategy's warm-up needs. `bollinger_reversion`
+warms up faster than `ema_rsi_macd` (no MACD), so a short window can produce a
+portfolio where only one strategy ran. Check the sleeve list matches what you
+asked for before reading any of the numbers.
+
+## Promoting a Strategy to Real Money
+
+```bash
+curl http://localhost:8007/v1/orchestrator/lifecycle
+```
+
+Sleeves climb `candidate -> paper -> live`, one step per call. There is no way
+to skip paper: the gates for live read measurements only paper trading
+produces, so skipping it would make them unreachable.
+
+### Step 1 — register
+
+```bash
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/register?strategy=ema_rsi_macd&symbol=AAPL" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY"
+```
+
+Until this, the sleeve cannot trade at all — `sleeve_not_registered`.
+
+### Step 2 — earn paper
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+```
+
+Take `deflated_sharpe_ratio`, `out_of_sample_trades` and
+`out_of_sample_return_pct` from that output and pass them to `/promote`. If it
+refuses, the response lists every gate that failed. Do not work around a
+refusal by widening the parameter grid until something passes — that is the
+overfitting this was built to catch, one level up.
+
+### Step 3 — earn live
+
+Leave it on paper. It runs in the live loop and records every decision it would
+have taken; those recordings are the evidence. After the paper period:
+
+```bash
+# the measured cost, not the assumed one
+curl http://localhost:8002/v1/execution/quality
+
+# correlation against what is already live
+uv run python scripts/run_backtest.py --symbols AAPL,<live symbols> --portfolio
+```
+
+Then promote with `paper_started_at`, `paper_decisions`,
+`measured_shortfall_bps` and `max_correlation_with_live`. Promotion is
+admin-gated; demotion is not.
+
+### "sleeve_paper" in the logs, no orders placed
+
+Working as intended. The sleeve is validated but has not earned live. Check
+`/v1/orchestrator/lifecycle` for its state and `since`, and the journal for
+what it would have traded:
+
+```bash
+curl "http://localhost:8007/v1/orchestrator/journal?limit=50" | grep lifecycle_gate
+```
+
+### "sleeve_not_registered" for something you expected to trade
+
+Either it was never registered, or the roster file was lost. Check:
+
+```bash
+cat ./strategy-lifecycle.json
+```
+
+If the file is missing or corrupt the registry loads **empty** and nothing
+trades — that is deliberate, because the alternative is a corrupt file silently
+re-enabling a retired sleeve. Re-register and re-promote; the gates will make
+you re-supply the evidence, which is the point.
+
+### A sleeve was demoted to probation
+
+The reason is in the state and the journal:
+
+```bash
+curl http://localhost:8007/v1/orchestrator/lifecycle
+```
+
+- **Drawdown breach** — a fact, not a judgement. Do not promote it back until
+  the drawdown is inside the limit; the probation gate enforces that anyway.
+- **Sharpe decay** — the live record is materially below what walk-forward
+  validated, over enough trades to mean something. Re-run walk-forward on
+  recent data before doing anything else: if it no longer validates, the edge
+  is gone rather than the sleeve being unlucky.
+
+It returns to **paper**, never straight to live, and has to re-earn the live
+gates. Three probations retire it permanently.
+
+### Emergency: take everything off live
+
+Demotion is never gated, so this always works:
+
+```bash
+for sleeve in $(curl -s http://localhost:8007/v1/orchestrator/lifecycle \
+  | python -c "import json,sys; print(' '.join(json.load(sys.stdin)['trading']))"); do
+  symbol=${sleeve%%:*}; strategy=${sleeve#*:}
+  curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/demote?strategy=$strategy&symbol=$symbol&to=probation&reason=emergency" \
+    -H "X-Internal-Key: $INTERNAL_API_KEY"
+done
+```
+
+This blocks new entries only. Exits keep working, which is the intent — see the
+kill switch section for halting the loop entirely, and note that neither closes
+open positions for you.
+
+## Position Break — "New entries paused"
+
+The ledger and the broker disagree about what is held. Exits still work; only
+new entries are blocked.
+
+```bash
+curl "http://localhost:8007/v1/orchestrator/reconciliation?refresh=true"
+```
+
+Act on the `kind` field:
+
+- **`phantom_position`** — we think we hold something the broker does not. Most
+  urgent: a stop-loss is watching a position that is not there. Usually a close
+  that succeeded at the broker without a fill being recorded. Check
+  `/v1/fills`, then re-run `POST /v1/portfolio/reconcile`.
+- **`untracked_position`** — the broker holds something we do not know about.
+  Either a manual trade placed outside the system, or an order that filled
+  after our record of it failed. **Decide manually whether to keep or close
+  it** — do not let the system adopt it silently.
+- **`quantity_mismatch`** — usually a partial fill. Compare `/v1/fills` for the
+  symbol against the broker's own quantity.
+
+Once resolved, the next check clears the halt automatically. To clear a break
+you have judged to be spurious, restart the orchestrator — the counter is
+in-memory by design, so a halt never outlives an operator decision.
+
+If reconciliation reports `ok: false` with an `error` rather than breaks, a
+service is unreachable. That is not a divergence and does not halt trading.
+
+## Reading the Archive
+
+```bash
+curl http://localhost:8007/v1/orchestrator/journal          # coverage + decisions
+curl "http://localhost:8007/v1/orchestrator/journal?symbol=AAPL&limit=50"
+```
+
+To ask why a specific trade happened, find its `correlation_id` (the signal id)
+and read every stage of that signal's journey:
+
+```sql
+SELECT ts, stage, outcome, reason, inputs_json
+FROM decisions WHERE correlation_id = '<signal-id>' ORDER BY ts;
+```
+
+To find what the system refused and why:
+
+```sql
+SELECT symbol, COUNT(*), reason FROM decisions
+WHERE outcome = 'rejected' GROUP BY symbol, reason ORDER BY 2 DESC;
+```
+
+Stale-price refusals live in `price_observations` with `accepted = 0`. A run of
+those explains a quiet day better than any log will.
+
+### The archive is growing too fast
+
+At minute resolution across a large allowlist the file grows steadily. Bars
+deduplicate, so growth is bounded by real market time, not by cycle frequency.
+Prices and decisions are append-only. To trim, delete old rows rather than the
+file — losing history costs you the research you are capturing it for:
+
+```sql
+DELETE FROM price_observations WHERE observed_at < date('now', '-90 days');
+VACUUM;
+```
+
 ## Emergency Procedures
 
 ### Service crash
@@ -239,7 +608,7 @@ curl "http://localhost:8006/v1/audit/summary"
 
 ```bash
 # All services
-for port in 8001 8002 8003 8004 8005 8006 8007 8008 8009 8010; do
+for port in 8001 8002 8003 8004 8005 8006 8007 8008 8009 8010 8011; do
   echo -n "Port $port: "
   curl -s http://localhost:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))"
 done

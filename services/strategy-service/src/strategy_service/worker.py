@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -18,6 +19,12 @@ from contracts import (
     SignalCandidate,
     TechnicalSummaryContract,
 )
+from contracts.execution import (
+    average_daily_volume,
+    marketable_limit_price,
+    participation_capped_qty,
+)
+from lifecycle import DEFAULT_LIVE_STRATEGY, LifecycleRegistry
 from market_data import (
     MarketDataSettings,
     RealtimePriceSource,
@@ -30,6 +37,22 @@ from .ai_pipeline import AISignalPipeline, _build_deterministic_signal
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+# One roster per process, shared by every cycle.
+_registry: LifecycleRegistry | None = None
+
+
+def _lifecycle() -> LifecycleRegistry:
+    global _registry
+    if _registry is None:
+        _registry = LifecycleRegistry()
+    return _registry
+
+
+def reset_lifecycle() -> None:
+    """Drop the cached roster — for tests, and after an out-of-band edit."""
+    global _registry
+    _registry = None
 
 
 @dataclass
@@ -49,6 +72,9 @@ class WorkerRunResult:
     symbols_processed: int = 0
     signals_generated: int = 0
     orders_submitted: int = 0
+    orders_gated: int = 0
+    """Signals the strategy roster did not permit to trade. Recorded, not
+    dropped — a paper sleeve's decisions are the evidence it is promoted on."""
     errors: list[str] = field(default_factory=list)
 
 
@@ -175,6 +201,20 @@ class TradeWorker:
         if reference_price is None and bars:
             reference_price = float(bars[-1].close)
         qty = _compute_qty(approved_size_pct, buying_power, reference_price)
+
+        # Trim to a share of the symbol's volume — a large order in a thin name
+        # pays for its own market impact.
+        bars_per_day = (
+            max(1.0, 390.0 / max(1, self._market_settings.intraday_minutes))
+            if self._market_settings.is_intraday
+            else 1.0
+        )
+        qty = participation_capped_qty(
+            qty,
+            average_daily_volume(bars, bars_per_day=bars_per_day),
+            float(os.getenv("MAX_ADV_PARTICIPATION", "0.01")),
+        )
+
         if qty < 1:
             logger.debug(
                 "Qty < 1 for %s (size_pct=%.4f, buying_power=%.2f, price=%s) — skipping order",
@@ -185,19 +225,91 @@ class TradeWorker:
             )
             return
 
-        # 6. Submit order to execution-service
+        # 6. The strategy roster decides whether this may reach the broker.
+        # This worker posts to execution-service directly, so without the check
+        # here it would walk around the orchestrator's gate entirely — and a
+        # safety control one code path can bypass is worse than none, because
+        # it creates confidence that is not warranted. Both paths read the same
+        # roster from the same state file.
+        gate = self._lifecycle_gate(signal)
+        if gate is not None:
+            logger.info(
+                "Not trading %s %s: %s (signal recorded, no order placed)",
+                signal.candidate_action, symbol, gate,
+            )
+            self._record_gated_decision(signal, symbol, qty, reference_price, gate)
+            result.orders_gated += 1
+            return
+
+        # 7. Submit order to execution-service
+        # Marketable limit + IOC: fills now at or inside the limit, or not at
+        # all. Nothing is left working that would need managing.
+        order_type, time_in_force, limit_price = "MARKET", "DAY", None
+        if os.getenv("USE_LIMIT_ORDERS", "true").lower() == "true":
+            limit_price = marketable_limit_price(
+                reference_price,
+                str(getattr(signal.candidate_action, "value", signal.candidate_action)),
+                float(os.getenv("LIMIT_TOLERANCE_BPS", "10")),
+            )
+            if limit_price is not None:
+                order_type, time_in_force = "LIMIT", "IOC"
+
         order_req = ExecutionOrderRequest(
             signal_id=signal.signal_id,
             symbol=signal.symbol,
             side=signal.candidate_action,
             qty=qty,
-            order_type="MARKET",
-            time_in_force="DAY",
+            order_type=order_type,
+            time_in_force=time_in_force,
+            limit_price=limit_price,
+            decision_price=reference_price,
         )
         submitted = await self._submit_order(order_req, idempotency_key=f"worker-{signal.signal_id}")
         if submitted:
             result.orders_submitted += 1
             logger.info("Order submitted for %s: %d shares %s", symbol, qty, signal.candidate_action)
+
+    def _lifecycle_gate(self, signal: SignalCandidate) -> str | None:
+        """Why this signal may not reach the broker, or None if it may."""
+        registry = _lifecycle()
+        strategy = getattr(signal, "strategy", None) or DEFAULT_LIVE_STRATEGY
+        if registry.can_trade(strategy, signal.symbol):
+            return None
+        return registry.gate_reason(strategy, signal.symbol)
+
+    def _record_gated_decision(
+        self,
+        signal: SignalCandidate,
+        symbol: str,
+        qty: int,
+        reference_price: float | None,
+        gate: str,
+    ) -> None:
+        """Archive the trade that would have happened.
+
+        A sleeve on paper is not idle — this recorded history is exactly the
+        evidence its promotion to live is gated on, so dropping the signal
+        silently would make it unpromotable.
+        """
+        try:
+            from journal import get_journal
+
+            get_journal().record_decision(
+                stage="lifecycle_gate",
+                outcome="not_traded",
+                symbol=symbol,
+                action=str(getattr(signal.candidate_action, "value", signal.candidate_action)),
+                reason=gate,
+                inputs={
+                    "strategy": getattr(signal, "strategy", DEFAULT_LIVE_STRATEGY),
+                    "confidence": signal.confidence,
+                    "reference_price": reference_price,
+                },
+                outputs={"would_have_traded": True, "qty": qty},
+                correlation_id=signal.signal_id,
+            )
+        except Exception as exc:  # pragma: no cover - journalling is best effort
+            logger.debug("Gated decision not journalled: %s", exc)
 
     def _market_context(self, symbol: str, bars: list) -> MarketContext:
         """Build the policy's market context from observed data, not assumptions.

@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from brokers import PaperBroker
 from contracts import ExecutionOrderRequest, OrderStatus
 
@@ -270,3 +269,89 @@ class TestSideValidation:
             )
         )
         assert result.status == OrderStatus.ACCEPTED
+
+
+def _limit_order(
+    limit_price: float,
+    symbol: str = "AAPL",
+    side: str = "BUY",
+    qty: int = 10,
+) -> ExecutionOrderRequest:
+    return ExecutionOrderRequest(
+        signal_id=f"sig-{symbol}-{side}",
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        order_type="LIMIT",
+        limit_price=limit_price,
+        decision_price=200.0,
+    )
+
+
+class TestLimitOrders:
+    """A paper run that only ever fills cannot show what limit pricing costs.
+
+    The simulator has to be able to miss, otherwise the fill rate reported by
+    paper mode is a fiction and the backtest inherits it.
+    """
+
+    def test_marketable_buy_limit_fills(self, broker: PaperBroker) -> None:
+        result = broker.place_order(_limit_order(200.2))
+        assert result.status == OrderStatus.ACCEPTED
+        assert result.fill_price == 200.0
+
+    def test_buy_limit_fills_at_the_market_when_the_market_is_better(
+        self, broker: PaperBroker, prices: Prices
+    ) -> None:
+        """The limit is a cap, not a price you volunteer to pay."""
+        prices.book["AAPL"] = 199.5
+        result = broker.place_order(_limit_order(200.2))
+        assert result.fill_price == 199.5
+
+    def test_buy_limit_beyond_the_market_is_cancelled(
+        self, broker: PaperBroker, prices: Prices
+    ) -> None:
+        prices.book["AAPL"] = 201.0
+        result = broker.place_order(_limit_order(200.2))
+        assert result.status == OrderStatus.CANCELLED
+        assert result.rejection_reason == "limit_not_marketable"
+        assert result.fill_price is None
+
+    def test_marketable_sell_limit_fills(self, broker: PaperBroker) -> None:
+        broker.place_order(_order(side="BUY", qty=10))
+        result = broker.place_order(_limit_order(199.8, side="SELL"))
+        assert result.status == OrderStatus.ACCEPTED
+        assert result.fill_price == 200.0
+
+    def test_sell_limit_below_the_market_is_cancelled(
+        self, broker: PaperBroker, prices: Prices
+    ) -> None:
+        broker.place_order(_order(side="BUY", qty=10))
+        prices.book["AAPL"] = 199.0
+        result = broker.place_order(_limit_order(199.8, side="SELL"))
+        assert result.status == OrderStatus.CANCELLED
+        assert result.rejection_reason == "limit_not_marketable"
+
+    def test_a_missed_limit_leaves_cash_and_positions_untouched(
+        self, broker: PaperBroker, prices: Prices
+    ) -> None:
+        """A cancel that still moved the ledger would be worse than no simulation."""
+        cash_before = broker.get_account().cash
+        positions_before = len(broker.get_positions())
+
+        prices.book["AAPL"] = 201.0
+        assert broker.place_order(_limit_order(200.2)).status == OrderStatus.CANCELLED
+
+        assert broker.get_account().cash == cash_before
+        assert len(broker.get_positions()) == positions_before
+
+    def test_a_limit_order_without_a_limit_price_behaves_as_a_market_order(
+        self, broker: PaperBroker, prices: Prices
+    ) -> None:
+        """Nothing to enforce, so it must not silently cancel every order."""
+        prices.book["AAPL"] = 201.0
+        request = _limit_order(200.2)
+        request.limit_price = None
+        result = broker.place_order(request)
+        assert result.status == OrderStatus.ACCEPTED
+        assert result.fill_price == 201.0

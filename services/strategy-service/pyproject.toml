@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Deterministic fake strategy service."
 requires-python = ">=3.11"
 dependencies = [
+  "journal",
   "contracts",
+  "lifecycle",
   "market_data",
   "fastapi>=0.115.0",
   "sqlalchemy>=2.0.0",

@@ -2,36 +2,72 @@
 
 # Trade_pilot — Autonomous Trading Platform
 
-Production-minded AI trading stack: strategy proposes, policy approves, execution fills, and portfolio reconciles. This repo includes autonomous orchestration, approvals, notifications, sentiment, audit logging, and dashboard controls on top of the core trading services.
+An intraday trading stack where strategy proposes, policy approves, execution
+fills, and portfolio reconciles — with the measurement and gating needed to
+decide whether any of it should be trading real money.
+
+**Status, stated plainly.** The pipeline runs end to end against a paper broker
+and a real-time data feed. It has never been validated against live market
+data in this repository's CI, and no strategy here has demonstrated an edge —
+the tooling to test that claim is built (see
+[Is the Edge Real, or Fitted?](#is-the-edge-real-or-fitted)), and running it is
+your job before any money is involved. The defaults are deliberately
+conservative: nothing trades until it is registered and promoted.
+
+## Where to start
+
+| If you want to… | Read |
+|---|---|
+| Run it locally on delayed data | [Running in Demo Mode](#running-in-demo-mode) |
+| Trade on real-time intraday bars | [Real-Time Intraday Trading](#real-time-intraday-trading) |
+| Know whether the strategy makes money | [Does the Strategy Actually Work?](#does-the-strategy-actually-work) |
+| Know whether that result is real or fitted | [Is the Edge Real, or Fitted?](#is-the-edge-real-or-fitted) |
+| Run more than one strategy | [Strategies and the Portfolio](#strategies-and-the-portfolio) |
+| Control what is allowed to trade | [The Strategy Lifecycle](#the-strategy-lifecycle) |
+| See what an order actually cost | [Execution Quality](#execution-quality) |
+| Go live | [Enabling Live Mode](#enabling-live-mode-step-by-step) |
+
+Operational procedures — what to do when something breaks — are in
+[RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Autonomy Orchestrator :8007                  │
-│        scheduler → signal fetch → risk → policy → execute      │
-└──────┬──────────────┬────────────────┬───────────────┬──────────┘
-       │              │                │               │
-       ▼              ▼                ▼               ▼
-  Risk Engine    Policy Gate      Execution        Audit Logger
-  (sizing,       (hard rules,     Service :8002    :8006
-   drawdown,      sector conc,    (broker order)   (append-only)
-   PDT, sector)   event block)         │
-                       │               ▼
-                       │         Broker (eToro/Paper)
-                       │
-              ┌────────┴─────────┐
+│   scheduler → signals → risk → policy → ROSTER → execute        │
+└──────┬──────────────┬────────────┬──────────┬──────────┬────────┘
+       │              │            │          │          │
+       ▼              ▼            ▼          ▼          ▼
+  Risk Engine    Policy Gate   Strategy   Execution   Audit Logger
+  (sizing,       (hard rules,  Lifecycle  Service     :8006
+   drawdown,      sector conc,  (roster:   :8002      (append-only)
+   PDT, sector)   event block)  may this  (marketable
+                       │        sleeve     limit+IOC)
+                       │        trade?)         │
+                       │             │          ▼
+                       │             │    Broker (eToro/Paper)
+                       │             │
+              ┌────────┴─────────┐   └──▶ blocked ⇒ recorded, not dropped
               ▼                  ▼
      Notification :8009    Approval Gateway :8010
      (webhook, tiered)     (PENDING/APPROVE/REJECT)
 
-── External Data ──────────────────────────────────────────────────
+── Data and evidence ──────────────────────────────────────────────
   Strategy Service :8003   (signals, TA, ADX, patterns)
   Portfolio Service :8004  (positions, NAV)
   Research Service :8005   (AI research summaries)
   Sentiment Aggregator :8008 (NewsAPI, AlphaVantage)
+  Backtest Service :8011   (backtest, walk-forward, sensitivity, portfolio)
   Dashboard :8080          (kill switch UI, approvals, stats)
+
+  Journal (journal.db)     every bar, price and decision, point-in-time
+  Roster (lifecycle.json)  which sleeves may trade, and why
 ```
+
+The **roster** is the addition that matters most: no (strategy, symbol) sleeve
+places an order until it has earned the state that permits it, and evidence the
+system recorded itself is what earns it.
 
 ## Service Port Map
 
@@ -47,6 +83,7 @@ Production-minded AI trading stack: strategy proposes, policy approves, executio
 | sentiment-aggregator | 8008 | News/sentiment scoring |
 | notification-service | 8009 | Webhook notifications (tiered) |
 | approval-gateway | 8010 | Human approval flow (PENDING/APPROVE/REJECT) |
+| backtest-service | 8011 | Backtesting, walk-forward, parameter sensitivity |
 | dashboard | 8080 | Web UI (kill switch, approvals, stats bar) |
 
 ## Environment Variables
@@ -91,6 +128,14 @@ Production-minded AI trading stack: strategy proposes, policy approves, executio
 | `PAPER_SLIPPAGE_BPS` | `2` | Simulated slippage, always against the trader |
 | `PAPER_STATE_PATH` | `./paper-broker-state.json` | Paper position ledger |
 
+### Execution quality
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `USE_LIMIT_ORDERS` | `true` | Send marketable limit + IOC instead of market orders |
+| `LIMIT_TOLERANCE_BPS` | `10` | How far through the touch the limit is priced |
+| `MAX_ADV_PARTICIPATION` | `0.01` | Cap an order at this share of average daily volume (0 disables) |
+
 ## Getting eToro API Keys
 
 1. Log into your eToro account at etoro.com
@@ -120,6 +165,7 @@ uv run uvicorn autonomy_orchestrator.main:app --port 8007
 uv run uvicorn sentiment_aggregator.main:app --port 8008
 uv run uvicorn notification_service.main:app --port 8009
 uv run uvicorn approval_gateway.main:app --port 8010
+uv run uvicorn backtest_service.main:app --port 8011
 
 # Open dashboard
 open apps/dashboard/index.html
@@ -270,7 +316,417 @@ execution will fix that. Fix the strategy or stop.
 - It assumes every order fills at the next bar's open. Real market orders in
   fast markets do worse.
 - Past results do not predict future returns. A strategy tuned until a backtest
-  looks good is a strategy fitted to history.
+  looks good is a strategy fitted to history — which is what the next section
+  is for.
+
+## Is the Edge Real, or Fitted?
+
+A backtest over the whole history answers "what would have happened?". It
+cannot answer "would it happen again?", and it is trivially gamed: try enough
+parameter combinations and one of them fits the sample.
+
+This is not a subtle risk. The suite contains a test that builds **200
+strategies out of pure random noise**, picks the best one, and checks the
+numbers it produces:
+
+```
+best of 200 noise runs:  annualised Sharpe 10.45
+naive confidence:        99.8%
+deflated Sharpe ratio:    0.53   <- a coin flip
+```
+
+Nothing was there. The first two numbers would still get a strategy funded.
+
+Two commands exist to catch this.
+
+### Walk-forward: choose on the past, judge on what followed
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --walk-forward
+```
+
+The data is split into sequential folds. For each fold, every configuration in
+the grid is scored on the bars *before* the test window, the best one is
+selected, and only then is it run on the test window. The out-of-sample
+segments are stitched together and reported; the in-sample figures appear for
+one reason, which is to show the size of the drop.
+
+```
+  fold 1  2025-05-07 -> 2025-05-10  ema10/60 rsi40-70 macd>0
+          in-sample    3.66   out-of-sample   -0.22   return -0.35%  (5 trades)
+  fold 2  2025-05-10 -> 2025-05-14  ema10/60 rsi40-70 macd>0
+          in-sample    1.97   out-of-sample    3.26   return +3.71%  (3 trades)
+
+  Out-of-sample Sharpe             5.20
+  In-sample Sharpe (mean)          2.75
+  Degradation                     -2.44
+
+  [PASS] Out-of-sample profitable     +20.78%
+  [FAIL] Survives the search          deflated Sharpe ratio 0.949
+  [PASS] Folds agree on parameters    67% picked the same configuration
+```
+
+The three checks, and why each is there:
+
+| Check | What it catches |
+|---|---|
+| Out-of-sample profitable | The strategy only worked on the data it was tuned on |
+| Survives the search | The winner is what a search of this size finds in noise |
+| Folds agree on parameters | Each fold's "optimal" settings are a property of its window |
+
+**Read `sharpe_degradation` first.** A strategy scoring 2.5 in-sample and 0.1
+out-of-sample has not found an edge; it has memorised a sample. A *negative*
+degradation means out-of-sample beat in-sample, which is luck rather than
+vindication — with few folds it happens often.
+
+Two design points worth knowing, because they are where leakage would hide:
+
+- **The embargo.** Bars immediately before each test window are dropped from
+  training. Adjacent bars carry nearly the same information — an EMA at the
+  boundary is largely built from bars about to become test data — so optimising
+  right up to the edge is close to optimising on the test set. Defaults to the
+  indicator warm-up length.
+- **Warm-up is not leakage.** The test segment computes its indicators from the
+  bars preceding it. That is what live trading does; leakage would be using
+  data from *after* the decision. Trades and equity are counted only from the
+  test window's first bar.
+
+### The deflated Sharpe ratio
+
+The probability that the result beats what the best of N random configurations
+would produce by luck alone. Below 0.95 it does not.
+
+It rises with sample length and falls with the number of configurations tried
+and how much they differ from each other — so a wider grid is not a more
+thorough search, it is a more expensive one. It also corrects for skew and
+kurtosis, which matters because "wins small and often, loses catastrophically"
+has a flattering Sharpe and a real risk of ruin.
+
+What is compared, precisely: the *out-of-sample* record is tested against a
+benchmark built from the spread of the configurations' *in-sample* Sharpe
+ratios. The textbook version tests the in-sample winner against that benchmark;
+holding the out-of-sample record to it is the stricter of the two. Worth
+knowing so the number is not read as the canonical statistic.
+
+**The caveat no formula can fix:** the trial count is the configurations *this
+run* evaluated. Every parameter you tried by hand beforehand, every strategy
+variant abandoned along the way, and every symbol swapped in and out is also a
+trial, and none of them are counted. The true multiple-testing burden is higher
+than what is reported. Treat the number as an upper bound on your confidence,
+not a measurement of it.
+
+### Parameter sensitivity: plateau or spike?
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL --sensitivity
+```
+
+Scores every configuration in the grid and looks at the shape of the surface
+rather than its peak. A real effect is a plateau — the neighbours of the best
+configuration work nearly as well. A fitted one is a spike, alone above
+configurations that lose money.
+
+```
+  Profitable configurations    81/81 (100%)
+  Neighbours of the best       4.35 Sharpe vs its 4.81 (90% retained)
+  [PASS] Plateau, not a spike  the result survives one step in any parameter
+```
+
+**A plateau is necessary but not sufficient.** In a sample that happened to
+trend, every momentum configuration profits and they form a plateau together —
+this is reproducible on synthetic random-walk data. Sensitivity is in-sample by
+design and reads as a companion to `--walk-forward`, never as a substitute.
+
+### Via the service
+
+```bash
+curl -X POST http://localhost:8011/backtest/walk-forward \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"AAPL","timeframe":"intraday","period_days":59,"n_splits":4}'
+
+curl -X POST http://localhost:8011/backtest/parameter-sensitivity \
+  -H "Content-Type: application/json" -d '{"symbol":"AAPL"}'
+```
+
+Both accept a `grid` object to narrow or widen the search, and walk-forward
+accepts `n_splits`, `embargo_bars` and `objective` (`sharpe`, `return` or
+`profit_factor`).
+
+### What this still does not prove
+
+Being explicit, because these checks are easy to over-read:
+
+- **It is one symbol at a time.** Passing on AAPL says nothing about the
+  portfolio, and running the same test on twenty symbols and reporting the best
+  is the same multiple-testing error at a different level.
+- **The out-of-sample sample is small.** Walk-forward over a 60-day intraday
+  window produces a handful of round trips per fold. A Sharpe from nine trades
+  is an anecdote; the report says so when the count is below 30.
+- **Costs are still assumed.** Feed the measured `mean_shortfall_bps` from
+  `/v1/execution/quality` into `--slippage-bps` so this is validating the
+  strategy you would actually run.
+- **Passing is not a green light.** It removes one specific way of being wrong.
+
+## Strategies and the Portfolio
+
+One strategy on one symbol is a bet on one regime. When that regime ends the
+rule does not stop producing signals — it starts producing losing ones. The
+standard answer is to run several, but that only helps if they lose money at
+*different times*. Two momentum rules with different lookbacks are one strategy
+with a typo, and combining them adds cost and complexity without adding any
+protection.
+
+### The two strategies
+
+```bash
+curl http://localhost:8011/backtest/strategies
+```
+
+| Name | Bets on | Reads |
+|---|---|---|
+| `ema_rsi_macd` | **Strength.** Dual-EMA trend with RSI and MACD confirmation. | `ema_fast`, `ema_slow`, `rsi_buy_min`, `rsi_buy_max`, `macd_hist_min` |
+| `bollinger_reversion` | **Weakness.** Buys a close below the lower Bollinger band with RSI oversold; exits on a return to the mean. | `bb_period`, `bb_std`, `rsi_oversold`, `rsi_overbought` |
+
+They are deliberately opposed: one buys what is going up, the other buys what
+has fallen. Their parameter sets do not overlap at all, which the test suite
+enforces — an overlap would make them variants of one rule rather than two
+rules.
+
+`request.strategy` used to be a label nothing read, so a request for any other
+strategy silently ran the momentum one. It now resolves through a registry and
+an unknown name is an error that lists the alternatives.
+
+Adding a third: write a signal function, declare which parameters it reads, and
+register it. Walk-forward, sensitivity, the portfolio and the deflated Sharpe
+ratio all work against the registry, so it gets validated the same way the
+existing two do without further work.
+
+### Running them together
+
+```bash
+uv run python scripts/run_backtest.py --symbols AAPL,MSFT,NVDA --portfolio
+```
+
+A **sleeve** is one (strategy, symbol, parameters) triple. Sleeves are
+simulated independently, aligned by timestamp, and combined by weight.
+
+```
+  sleeve                        weight   sharpe     return  trades
+  AAA:bollinger_reversion       16.7%     1.06     1.13%       4
+  AAA:ema_rsi_macd              16.7%     0.02    -0.34%      18
+  BBB:ema_rsi_macd              16.7%    -1.05    -4.07%      19
+  ...
+
+  Combined Sharpe                   -4.29
+  Best single sleeve                 1.06  (AAA:bollinger_reversion)
+  Diversification ratio              2.32
+
+  [FAIL] Beats its best sleeve        -4.29 vs 1.06
+  [PASS] Sleeves actually diversify   diversification ratio 2.32
+  [PASS] No redundant pair            highest correlation +0.04
+```
+
+The numbers to read, in order:
+
+1. **`max_correlation`.** This is the entire mechanism. A pair above 0.7 is one
+   position held in two accounts, paying two sets of costs. The report names
+   the offending pair.
+2. **`diversification_ratio`** — weighted average sleeve volatility over the
+   volatility of the combination. Above 1.0 means the whole is calmer than its
+   parts. At 1.0 the sleeves are the same bet.
+3. **`best_sleeve_sharpe`** — the question an operator actually has: would I
+   have been better off just running that one? Note the trap: picking it in
+   hindsight is its own selection error.
+
+**Diversification reduces variance. It does not create return.** This is the
+most common misreading of a good diversification ratio, and it is asserted as a
+test: on uncorrelated sleeves the combined return sits *inside* the range of
+its parts, always. What it buys is a smaller drawdown than the average sleeve —
+a smoother ride to the same place, not a better place.
+
+### Allocation
+
+`--allocation equal` (default) or `inverse_volatility`, which weights calmer
+sleeves more heavily. Be clear about what the second one is: weights computed
+from the same data you are evaluating on are fitted in-sample, and the
+improvement they show is partly the fit. Validate the allocation the same way
+you validate a parameter — on data it was not chosen from.
+
+### Counting the search honestly
+
+Phase 2 flagged this and the portfolio is where it bites: running a strategy on
+twenty symbols and reporting the best three is a twenty-symbol search, and the
+deflated Sharpe ratio can only price that in if you tell it.
+
+```bash
+# screened 50 symbols, running the best 3
+uv run python scripts/run_backtest.py --symbols AAA,BBB,CCC --portfolio --considered 50
+```
+
+Without `--considered` the trial count defaults to the number of sleeves, which
+is only correct if you never dropped a candidate.
+
+### What the portfolio result does not model
+
+Stated plainly, because each of these flatters the number:
+
+- **Each sleeve gets its own capital.** They are simulated independently and
+  never compete for it. A real account has one balance, so six sleeves either
+  run at a sixth of the size or fail to fill each other's orders. Read the
+  combined return as an upper bound.
+- **No portfolio-level risk limits.** The live loop has position caps, sector
+  concentration limits and the PDT guard; the portfolio backtest has none of
+  them, so it will happily hold six correlated longs.
+- **Correlation is measured on the sample.** Correlations rise in a selloff —
+  the moment diversification is supposed to help is the moment it stops. A
+  backtest over a calm period will overstate it.
+- **Costs are still assumed.** Six sleeves trade roughly six times as often.
+  Feed the measured `mean_shortfall_bps` in before believing the return.
+
+## The Strategy Lifecycle
+
+The archive records what was seen, execution quality records what trading cost,
+walk-forward records whether an edge survived validation, and the portfolio
+records whether strategies diversify. None of that changed what the system
+would actually trade — a human still decided, from opinion, and nothing removed
+a strategy once it stopped working. This closes that loop.
+
+Every **(strategy, symbol) sleeve** holds a state:
+
+```
+    candidate ──▶ paper ──▶ live
+                    ▲          │
+                    └── probation ◀─┘
+                             │
+                          retired
+```
+
+| State | May trade? | Meaning |
+|---|---|---|
+| `candidate` | No | Registered, no evidence yet |
+| `paper` | No | Validated on history. Runs in the live loop and records decisions, places no orders |
+| `live` | **Yes** | Permitted to place real orders |
+| `probation` | No | Was live; decayed or breached a limit. Entries blocked, exits always allowed |
+| `retired` | No | Off. Coming back requires re-registration, deliberately |
+
+**A sleeve nobody registered cannot trade.** That is the point: a strategy
+nobody validated does not get to trade because it happened to emit a signal.
+
+### The three principles
+
+Worth stating, because they are what make this a control rather than a
+dashboard that happens to say "live".
+
+**Refuse by default.** A missing measurement is a no, not a neutral. Every gate
+fails closed. Promoting on an absent measurement is how a system ends up
+trading something nobody checked — and if the roster file is unreadable, the
+registry loads empty and *nothing* may trade, rather than defaulting to
+permissive.
+
+**Promotion is slow, demotion is fast.** Promotion needs every gate to pass;
+demotion needs any one trigger to fire, and demotion is never gated at all —
+safety must not require approval. The asymmetry is deliberate: being slow to
+promote costs opportunity, being slow to demote costs money.
+
+**A small sample cannot promote, but a hard breach can always demote.** You
+cannot conclude decay from five trades, so the Sharpe-decay check waits for
+`LIFECYCLE_MIN_LIVE_TRADES`. A drawdown breach is not a statistical claim — it
+is a fact about money already lost — and demotes immediately at any sample size.
+
+### The gates
+
+Each one reads something an earlier phase produced. That is the loop closing:
+the measurements are no longer just reported, they decide.
+
+**candidate → paper** (backtest evidence only, no money involved):
+
+| Gate | Source |
+|---|---|
+| Deflated Sharpe ratio ≥ 0.95 | `run_backtest.py --walk-forward` |
+| ≥ 30 out-of-sample trades | same |
+| Out-of-sample return positive | same |
+
+**paper → live** (every gate reads something only paper trading produces):
+
+| Gate | Source |
+|---|---|
+| ≥ 20 days of paper decisions | the decision journal |
+| ≥ 20 recorded decisions | same |
+| Execution cost **measured**, not assumed | `/v1/execution/quality` |
+| Correlation with live sleeves < 0.7 | `/backtest/portfolio` |
+
+**live → probation** (any one fires):
+
+| Trigger | Waits for a sample? |
+|---|---|
+| Live drawdown > 15% | No — a breach is a fact |
+| Live Sharpe more than 2.0 below the validated figure | Yes, ≥ 20 trades |
+
+Triggers are not weighed against each other. A profitable sleeve breaching its
+drawdown limit still demotes — that is a trade nobody would approve if asked
+directly.
+
+**probation → paper**, never straight back to live. A sleeve that broke has to
+re-earn the live gates. Bouncing in and out of live on noise is how a bad week
+becomes a bad month. Three probations retires it.
+
+### Using it
+
+```bash
+curl http://localhost:8007/v1/orchestrator/lifecycle
+
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/register?strategy=ema_rsi_macd&symbol=AAPL" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY"
+
+# Promotion is admin-gated: the top of this ladder is real money.
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/promote?strategy=ema_rsi_macd&symbol=AAPL" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY" -H "X-Admin-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"deflated_sharpe_ratio":0.97,"out_of_sample_trades":45,"out_of_sample_return_pct":0.08}'
+
+# Demotion is not gated.
+curl -X POST "http://localhost:8007/v1/orchestrator/lifecycle/demote?strategy=ema_rsi_macd&symbol=AAPL&to=probation&reason=manual" \
+  -H "X-Internal-Key: $INTERNAL_API_KEY"
+```
+
+A refused promotion names every gate that failed, so there is no need to read
+code to find out what to fix:
+
+```json
+{"promoted": false,
+ "failed": ["no walk-forward result on file — run --walk-forward first",
+            "out-of-sample trade count unknown"]}
+```
+
+### Both order paths are gated
+
+`autonomy-orchestrator` and `strategy-service`'s worker can each place orders —
+the worker posts to execution-service directly. So the roster lives in
+`libs/lifecycle` and both read the same state file. A safety control that one
+code path can walk around is worse than no control, because it creates
+confidence that is not warranted.
+
+A gated signal is **recorded, not dropped**: it goes to the journal under
+`lifecycle_gate` with `would_have_traded: true`. That recorded history is
+exactly the evidence the sleeve's promotion to live is gated on, so a paper
+sleeve that silently discarded its signals could never be promoted.
+
+### What this does not do
+
+Being explicit, because "autonomous" oversells it:
+
+- **Evidence is supplied, not harvested.** Nothing runs walk-forward on a
+  schedule and feeds the result in. You run it and pass the numbers to
+  `/promote`. The gates are automatic; gathering what they read is not.
+- **Health checks are called, not scheduled.** `/lifecycle/health` evaluates
+  and acts on the triggers, but something has to call it with current live
+  figures. Until you wire that to a cron or the orchestrator's cycle, decay
+  detection is manual.
+- **The thresholds are conventions, not derivations.** 0.95, 30 trades, 20
+  days, 0.7 correlation — each is defensible and none is a law. They are
+  environment variables so you can argue with them.
+- **It cannot make a bad strategy good.** It only stops one reaching real money
+  before it has shown anything, and takes it away when it stops working.
 
 ## Pattern Day Trader (PDT) Protection
 
@@ -307,9 +763,169 @@ a holiday week a day trade can expire one session early (set
 `PDT_MAX_DAY_TRADES=2` for margin); and crypto round trips are counted even
 though FINRA's rule covers securities, which is conservative rather than unsafe.
 
+## The Point-in-Time Archive
+
+Every bar, every price and every decision the system makes is recorded to a
+single SQLite file (`JOURNAL_PATH`, default `./journal.db`). Three tables:
+
+| Table | Records | Deduplicated? |
+|---|---|---|
+| `bar_observations` | OHLCV as delivered by a provider | Yes, on (symbol, timeframe, bar time) |
+| `price_observations` | Every price resolved — **including ones refused as stale** | No |
+| `decisions` | Each pipeline stage, with the inputs that produced it | No |
+
+The distinction that matters is between **when the market printed a value** and
+**when this system learned of it** (`bar_ts` vs `recorded_at`, `price_ts` vs
+`observed_at`). Research that conflates the two is research contaminated by
+hindsight, and you cannot recover the difference after the fact — which is why
+this is worth capturing from the first day rather than the first loss.
+
+Refused prices are archived deliberately: a price rejected as stale explains a
+trade the system did *not* make, and a post-mortem that only sees fills cannot
+account for it.
+
+```bash
+curl http://localhost:8007/v1/orchestrator/journal        # coverage + recent decisions
+```
+
+The file is plain SQLite — open it with any client, or load it into pandas:
+
+```python
+import pandas as pd, sqlite3
+bars = pd.read_sql("SELECT * FROM bar_observations", sqlite3.connect("journal.db"))
+```
+
+Journalling never blocks trading. Every write is best-effort: a full disk
+degrades research, it does not halt the loop or raise mid-order.
+
+## Execution Quality
+
+A strategy that looks profitable on close prices can lose money once it has to
+trade. The gap between the two is execution cost, and until you measure it you
+are guessing at the single number that decides whether an intraday edge
+survives contact with the market.
+
+### Marketable limit orders
+
+Orders go out as **marketable limits with immediate-or-cancel**, not market
+orders. A market order accepts whatever price the book offers — on a thin
+symbol or during a spike that can be well away from what the strategy assumed.
+A marketable limit is priced `LIMIT_TOLERANCE_BPS` through the reference price
+in the paying direction (a buy at 200.00 with 10bps sends a 200.20 limit), so
+it fills immediately under normal conditions but refuses a fill beyond the
+tolerance. IOC means it fills now or cancels: nothing is left working that
+would later need managing or cancelling.
+
+The trade-off is explicit and it is a real one:
+
+| | Narrow tolerance | Wide tolerance |
+|---|---|---|
+| Fill rate | Lower | Higher |
+| Price paid when filled | Better | Worse |
+| Failure mode | Signals missed | Bad fills accepted |
+
+Neither failure is free. Missing the fills your backtest assumed changes the
+strategy you are actually running, which is why misses are recorded as
+carefully as fills.
+
+Set `USE_LIMIT_ORDERS=false` to fall back to market orders — worth doing once,
+side by side, to see what the limits are costing or saving you.
+
+### Implementation shortfall
+
+Every order carries the price the decision was based on (`decision_price`).
+When it fills, the difference against the fill price is recorded as
+implementation shortfall, in basis points, **signed so that positive is always
+a cost** — a buy filled high and a sell filled low both count as costs. Without
+that convention, averaging buys and sells together cancels real costs to zero
+and the system reports free trading.
+
+Orders that did not fill are recorded too, with `filled = 0`. A fill rate read
+only from fills is 100% by construction.
+
+```bash
+curl http://localhost:8002/v1/execution/quality
+```
+
+```json
+{
+  "orders": 3,
+  "filled": 2,
+  "fill_rate": 0.6667,
+  "mean_shortfall_bps": 2.5,
+  "worst_shortfall_bps": 5.0,
+  "mean_shortfall_by_symbol": {"AAPL": 1.0, "THIN": 5.0}
+}
+```
+
+**Feed `mean_shortfall_bps` back into the backtest.** The backtest's slippage
+assumption is otherwise a guess; this is a measurement from your own orders, on
+your own symbols, at your own size. Run the strategy in paper mode long enough
+to accumulate fills, then re-run the backtest with the measured figure:
+
+```bash
+uv run python scripts/run_backtest.py --slippage-bps <measured mean>
+```
+
+Read `worst_shortfall_bps` and the per-symbol breakdown as well as the mean. A
+tolerable average with one symbol paying five times the rest is a liquidity
+problem in that symbol, not a pricing problem in the strategy.
+
+### Volume-aware sizing
+
+An order that is a large fraction of a symbol's volume moves the price against
+itself, so its cost becomes a function of its own size. Orders are therefore
+capped at `MAX_ADV_PARTICIPATION` of average daily volume, inferred from the
+bars already being fetched (intraday bar volumes are scaled up by the number of
+bars in a session).
+
+At the default 1% this never binds on mega-caps and binds hard on thin names —
+which is the intent. A symbol too thin to support even one share at the cap is
+skipped rather than rounded up to a size that would pay for its own impact.
+
+Caveat, stated plainly: ADV inferred from a short intraday lookback is a rough
+estimate, and it says nothing about the spread or the depth at the touch. It
+is a guard against the obviously oversized order, not a market-impact model.
+
+## Position Reconciliation
+
+**The broker is the source of truth.** `portfolio-service` derives holdings from
+our own fill history, which makes it a cache — and a cache that silently
+diverges will eventually trade against a position that does not exist, or leave
+a real position with nothing watching it.
+
+A scheduled job compares the two and reports three kinds of break:
+
+| Kind | Meaning |
+|---|---|
+| `untracked_position` | The broker holds something we do not know about |
+| `phantom_position` | We think we hold something the broker does not — a stop watching nothing |
+| `quantity_mismatch` | Both know the position, sizes disagree |
+
+```bash
+curl "http://localhost:8007/v1/orchestrator/reconciliation?refresh=true"
+```
+
+Two design choices worth knowing:
+
+- **A single mismatch does not halt anything.** A fill in flight legitimately
+  appears at the broker before it appears in our fills. Only a break that
+  survives `RECONCILE_BREAKS_BEFORE_HALT` consecutive checks is believed.
+- **Only entries are blocked, never exits.** Refusing to close a position you
+  cannot account for is strictly worse than closing it.
+
+An unreachable service is not treated as a divergence — otherwise every
+container restart would stop trading.
+
 ## Enabling Live Mode (Step-by-Step)
 
 ⚠️ Only proceed after at least 30 days of demo/paper trading with no policy violations.
+
+**Live mode and the roster are two separate switches, and you need both.**
+Live mode connects the system to a real broker; the roster decides which
+sleeves may send it anything. Enabling live mode alone produces a system that
+connects to your broker and places no orders — which is the safe failure, but
+it looks like a bug if you are not expecting it.
 
 1. Set `ETORO_DEMO=false` and `BROKER=etoro` in `.env`
 2. Set `ADMIN_API_KEY` to a strong random secret in `.env`
@@ -324,10 +940,27 @@ though FINRA's rule covers securities, which is conservative rather than unsafe.
      -H "Content-Type: application/json" \
      -d '{"enable": true, "confirmation": "I CONFIRM LIVE TRADING"}'
    ```
-7. Monitor the first 10 trades manually via the dashboard
+7. Promote at least one sleeve to `live` — see
+   [The Strategy Lifecycle](#the-strategy-lifecycle) for the gates, and the
+   RUNBOOK for the walkthrough. Confirm with:
+   ```bash
+   curl http://localhost:8007/v1/orchestrator/lifecycle   # "trading": [...]
+   ```
+   An empty `trading` list means nothing will be sent to the broker.
+8. Monitor the first 10 trades manually via the dashboard
 
 ## Running Tests
 
 ```bash
-uv run pytest tests/ -x -q --ignore=tests/integration
+uv run pytest
+```
+
+Run it bare. `pytest tests/` skips `services/backtest-service/tests` — the
+backtest engine, the overfitting statistics and the portfolio all live there,
+which is around a fifth of the suite. Both paths are in `testpaths`, so no
+argument is needed.
+
+```bash
+uv run pytest -q --ignore=tests/integration   # skip the ones needing Postgres
+uv run ruff check .                            # lint
 ```
