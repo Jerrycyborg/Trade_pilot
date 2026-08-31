@@ -94,6 +94,9 @@ jobs:
       - name: Build and start the stack
         run: docker compose up -d --build --wait postgres migrate execution-service
 
+      - name: Service state
+        run: docker compose ps
+
       - name: Migrations applied
         run: |
           docker compose exec -T postgres \
@@ -103,14 +106,19 @@ jobs:
         # The roster refuses anything it has not admitted, so a stack that has
         # just come up trades nothing until a sleeve is registered and promoted.
         run: |
-          code=$(curl -s -o /tmp/body.json -w '%{http_code}' \
+          # --retry-connrefused as well as the healthcheck: the healthcheck is
+          # the fix, this is so a slow first request reports the real HTTP
+          # result rather than a connection error.
+          code=$(curl -sS --retry 10 --retry-delay 2 --retry-connrefused \
+            -o /tmp/body.json -w '%{http_code}' \
             -X POST http://localhost:8002/v1/orders \
             -H "Content-Type: application/json" \
             -H "Idempotency-Key: ci-$RANDOM" \
-            -H "X-Internal-Key: ${INTERNAL_API_KEY:-dev-internal-key}" \
+            -H "X-Internal-Key: ${INTERNAL_API_KEY}" \
             -d '{"signal_id":"ci-1","symbol":"AAPL","side":"BUY","qty":1,
                  "order_type":"MARKET","strategy_id":"ema_rsi_macd"}')
-          echo "HTTP $code"; cat /tmp/body.json
+          echo "HTTP $code"; cat /tmp/body.json; echo
+          test "$code" = "200"
           grep -q "sleeve_not_registered" /tmp/body.json
 
       - name: Live mode is off by default

@@ -78,6 +78,17 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
     ports: ["8002:8002"]
+    healthcheck:
+      # `compose up --wait` waits for *healthy*, and without this it waits only
+      # for *running* — which for a uvicorn container means the process has
+      # been created, not that it is accepting connections. CI's first request
+      # arrived in the same second the container started and got
+      # connection-refused.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
   strategy-service:
     build:

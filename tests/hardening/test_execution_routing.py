@@ -336,3 +336,84 @@ class TestNoAuthorityMeansNoLiveTrading:
             strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
         )
         assert routed.decision.route is ExecutionRoute.SIMULATED
+
+
+class TestAnUnreachableAuthorityIsNotADevFallback:
+    """A configured authority that cannot be reached must not degrade to
+    simulated-only for the life of the process.
+
+    The first version of build_router connected once at import and, on failure,
+    returned a simulated-only router permanently. A database that blipped
+    during startup left the service trading on paper with no roster, silently,
+    until someone restarted it. CI is what surfaced this.
+    """
+
+    def test_an_unreachable_authority_blocks_entries(
+        self, paper: PaperBroker, live: LiveAdapterSpy
+    ) -> None:
+        def _never_connects():
+            raise RuntimeError("connection refused")
+
+        router = BrokerRouter(
+            store=None, simulated=paper, live=live, store_factory=_never_connects
+        )
+        routed = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
+        )
+        assert routed.decision.route is ExecutionRoute.BLOCKED
+        assert "unreachable" in routed.decision.reason
+
+    def test_an_unreachable_authority_still_permits_exits(
+        self, paper: PaperBroker, live: LiveAdapterSpy
+    ) -> None:
+        def _never_connects():
+            raise RuntimeError("connection refused")
+
+        router = BrokerRouter(
+            store=None, simulated=paper, live=live, store_factory=_never_connects
+        )
+        routed = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
+        )
+        assert routed.places_order is True
+        assert live.calls == []
+
+    def test_it_retries_and_recovers(self, paper: PaperBroker, live: LiveAdapterSpy) -> None:
+        """The point of the fix: a later order connects, rather than the
+        process being stuck until a restart."""
+        attempts = {"n": 0}
+
+        def _flaky():
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise RuntimeError("connection refused")
+            return FakeStore(state="paper")
+
+        router = BrokerRouter(
+            store=None, simulated=paper, live=live, store_factory=_flaky
+        )
+        first = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
+        )
+        assert first.decision.route is ExecutionRoute.BLOCKED
+
+        second = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
+        )
+        assert second.decision.route is ExecutionRoute.BLOCKED
+
+        recovered = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
+        )
+        assert recovered.decision.route is ExecutionRoute.SIMULATED
+
+    def test_no_configured_authority_is_still_the_documented_dev_mode(
+        self, paper: PaperBroker, live: LiveAdapterSpy
+    ) -> None:
+        """No factory means nothing was configured — that is the intentional
+        single-process case and stays simulated-only."""
+        router = BrokerRouter(store=None, simulated=paper, live=live)
+        routed = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
+        )
+        assert routed.decision.route is ExecutionRoute.SIMULATED

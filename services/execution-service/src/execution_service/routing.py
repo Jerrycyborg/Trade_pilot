@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from brokers import PaperBroker, get_broker
@@ -61,8 +62,16 @@ class BrokerRouter:
         simulated: object | None = None,
         live: object | None = None,
         max_qty: int = 1000,
+        store_factory: "Callable[[], PostgresLifecycleStore] | None" = None,
     ) -> None:
         self._store = store
+        # When a factory is supplied the store is built lazily and retried on
+        # every order. Building it once at import meant a database that was
+        # briefly unreachable at startup left the service running for its whole
+        # life with no roster — silently, and with no way back short of a
+        # restart. A configured-but-unreachable authority must block entries
+        # and keep trying, not degrade to unrouted trading.
+        self._store_factory = store_factory
         # The simulated adapter is always a real PaperBroker: a PAPER sleeve
         # must produce genuine simulated fills, P&L and shortfall records, not
         # a no-op that reports success.
@@ -96,6 +105,18 @@ class BrokerRouter:
         return self._store.live_mode_enabled(account_id)
 
     # ------------------------------------------------------------------
+    def _resolve_store(self) -> PostgresLifecycleStore | None:
+        """The authority, building it on demand when a factory was supplied."""
+        if self._store is not None or self._store_factory is None:
+            return self._store
+        try:
+            self._store = self._store_factory()
+        except Exception as exc:
+            logger.error("Lifecycle authority still unreachable: %s", exc)
+            return None
+        logger.info("Lifecycle authority connected")
+        return self._store
+
     def route(
         self,
         *,
@@ -106,6 +127,12 @@ class BrokerRouter:
     ) -> RoutedOrder:
         """Resolve where this order may go."""
         intent = OrderIntent.REDUCE_ONLY if reduce_only else OrderIntent.ENTRY
+
+        store = self._resolve_store()
+        if store is None and self._store_factory is not None:
+            # An authority was configured and cannot be reached. Not the same
+            # as "none configured": block entries, keep exits.
+            return self._authority_lost(intent, "lifecycle_authority_unreachable")
 
         if self._store is None:
             # No shared authority. Simulated only — see the module docstring.
@@ -195,13 +222,16 @@ def build_router(max_qty: int = 1000) -> BrokerRouter:
         )
         return BrokerRouter(store=None, max_qty=max_qty)
 
-    try:
-        store = PostgresLifecycleStore(StoreSettings.from_env())
-    except Exception as exc:
-        logger.error(
-            "Could not reach the lifecycle authority (%s). Routing simulated-only "
-            "until it is available.", exc,
-        )
-        return BrokerRouter(store=None, max_qty=max_qty)
+    def _connect() -> PostgresLifecycleStore:
+        return PostgresLifecycleStore(StoreSettings.from_env())
 
-    return BrokerRouter(store=store, max_qty=max_qty)
+    try:
+        return BrokerRouter(store=_connect(), max_qty=max_qty, store_factory=_connect)
+    except Exception as exc:
+        # Configured but not reachable yet. Entries are blocked and exits
+        # preserved until a later order succeeds in connecting.
+        logger.error(
+            "Lifecycle authority configured but unreachable (%s). Entries are "
+            "blocked until it responds; exits remain available.", exc,
+        )
+        return BrokerRouter(store=None, max_qty=max_qty, store_factory=_connect)
