@@ -65,20 +65,47 @@ class _AlwaysLive:
 
     configured = True
 
-    def __init__(self, permitted: bool = True, reason: str = "live") -> None:
+    def __init__(
+        self,
+        permitted: bool = True,
+        reason: str = "live",
+        challengers: list | None = None,
+        parameters: dict | None = None,
+    ) -> None:
         self._permitted = permitted
         self._reason = reason
+        self._challengers = challengers or []
+        self._parameters = parameters or {}
+        self.gate_calls: list[str] = []
 
     def may_open(self, strategy_id: str, symbol: str, account_id: str | None = None):
         from lifecycle.service import GateAnswer
 
+        self.gate_calls.append(strategy_id)
         return GateAnswer(self._permitted, self._reason)
 
+    def paper_challengers(self, symbol: str):
+        return list(self._challengers)
 
-def _make_live(monkeypatch, permitted: bool = True, reason: str = "live") -> None:
+    def challenger_parameters(self, challenger_id: str):
+        value = self._parameters.get(challenger_id)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def _make_live(
+    monkeypatch,
+    permitted: bool = True,
+    reason: str = "live",
+    challengers: list | None = None,
+    parameters: dict | None = None,
+) -> "_AlwaysLive":
     from lifecycle.service import reset_lifecycle_service
 
-    reset_lifecycle_service(_AlwaysLive(permitted, reason))
+    stub = _AlwaysLive(permitted, reason, challengers, parameters)
+    reset_lifecycle_service(stub)
+    return stub
 
 
 @pytest.fixture
@@ -95,9 +122,22 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
         bar_count: int = 30,
         flat: bool = False,
         ta: object = _UNSET,
+        challengers: list | None = None,
+        parameters: dict | None = None,
+        bars_override: list | None = None,
     ) -> ExecutionOrderRequest | None:
+        captured.clear()
+        if challengers is not None or parameters is not None:
+            # Only replace the service when the test wires challengers in;
+            # several tests install their own refused/unavailable authority
+            # before calling run(), and that setup must stand.
+            run.service = _make_live(
+                monkeypatch, challengers=challengers, parameters=parameters
+            )
         worker = TradeWorker()
-        bars = _bars(volume, n=bar_count, flat=flat)
+        bars = bars_override if bars_override is not None else _bars(
+            volume, n=bar_count, flat=flat
+        )
 
         monkeypatch.setattr(
             "strategy_service.worker._build_deterministic_signal", lambda _s: _signal(action)
@@ -137,6 +177,7 @@ def worker_run(monkeypatch: pytest.MonkeyPatch, stub_prices):
         )
 
         await worker._process_symbol("AAPL", WorkerRunResult())
+        run.orders = list(captured)
         return captured[-1] if captured else None
 
     return run
@@ -263,3 +304,198 @@ class TestTheRegimeGateFailsClosed:
     @pytest.mark.asyncio
     async def test_a_measurable_range_is_still_refused(self, worker_run) -> None:
         assert await worker_run(flat=True) is None
+
+
+def _challenger_sleeve(challenger_id: str = "chal-abc123"):
+    """A roster row as the worker sees it: paper, challenger-origin, derived id."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        strategy_id=f"ema_rsi_macd@{challenger_id}",
+        strategy_version=challenger_id,
+        symbol="AAPL",
+        state="paper",
+        origin="challenger",
+        account_id="default",
+    )
+
+
+def _tradeable_bars(n: int = 80) -> list[OHLCVBar]:
+    """Rising with dips, ending in a small up-leg: RSI ~69, MACD histogram
+    positive, ADX ~27. A monotonic rise pins RSI at 100, which no challenger
+    with rsi_buy_max <= 85 may trade — and a fixture no subject can pass tests
+    the fixture, not the subject."""
+    now = datetime.now(timezone.utc)
+    closes, price = [], 190.0
+    for i in range(n):
+        if i >= n - 3:
+            price += 0.25  # a small up-leg so MACD momentum is positive now
+        else:
+            price += -0.6 if i % 3 == 2 else 0.5
+        closes.append(price)
+    return [
+        OHLCVBar(
+            symbol="AAPL",
+            timestamp=now - timedelta(minutes=5 * (n - 1 - i)),
+            open=c, high=c + 0.1, low=c - 0.1, close=c, volume=50_000_000.0,
+        )
+        for i, c in enumerate(closes)
+    ]
+
+
+class TestChallengersTradeTheirOwnParameters:
+    """L4's missing half. Challenger sleeves could sit on the roster while the
+    worker traded one global parameter set, so the comparison had no divergent
+    fills to read. The challenger pass runs each paper challenger's *recorded
+    proposal* through the identical pipeline, tagged with its derived id.
+    """
+
+    WIDE_BAND = {
+        "ema_fast": 20.0, "ema_slow": 50.0,
+        "rsi_buy_min": 45.0, "rsi_buy_max": 85.0, "macd_hist_min": 0.0,
+    }
+
+    @pytest.mark.asyncio
+    async def test_champion_and_challenger_both_submit_under_their_own_ids(
+        self, worker_run
+    ) -> None:
+        sleeve = _challenger_sleeve()
+        await worker_run(
+            bars_override=_tradeable_bars(),
+            challengers=[sleeve],
+            parameters={"chal-abc123": dict(self.WIDE_BAND)},
+        )
+
+        ids = [order.strategy_id for order in worker_run.orders]
+        assert ids == ["ema_rsi_macd", "ema_rsi_macd@chal-abc123"]
+
+    @pytest.mark.asyncio
+    async def test_the_challenger_trades_its_parameters_not_the_champions(
+        self, worker_run
+    ) -> None:
+        """The same bars, a band that excludes them: the challenger holds while
+        the champion trades. If both always agreed, the comparison would be a
+        mirror, not a comparison."""
+        sleeve = _challenger_sleeve()
+        narrow = {**self.WIDE_BAND, "rsi_buy_min": 45.0, "rsi_buy_max": 55.0}
+        await worker_run(
+            bars_override=_tradeable_bars(),
+            challengers=[sleeve],
+            parameters={"chal-abc123": narrow},
+        )
+
+        ids = [order.strategy_id for order in worker_run.orders]
+        assert ids == ["ema_rsi_macd"], "the narrow band excludes these bars"
+
+    @pytest.mark.asyncio
+    async def test_a_challenger_with_no_recorded_proposal_trades_nothing(
+        self, worker_run
+    ) -> None:
+        """Parameters come from lifecycle.challenger_proposal and nowhere else.
+        Guessing them would record evidence for a strategy nobody proposed."""
+        await worker_run(
+            bars_override=_tradeable_bars(),
+            challengers=[_challenger_sleeve()],
+            parameters={},
+        )
+
+        ids = [order.strategy_id for order in worker_run.orders]
+        assert ids == ["ema_rsi_macd"]
+
+    @pytest.mark.asyncio
+    async def test_a_broken_challenger_costs_nobody_else_anything(
+        self, worker_run
+    ) -> None:
+        """One challenger's failure is contained: the champion has already run,
+        and the remaining challengers still get their turn."""
+        broken = _challenger_sleeve("chal-broken")
+        healthy = _challenger_sleeve("chal-healthy")
+        await worker_run(
+            bars_override=_tradeable_bars(),
+            challengers=[broken, healthy],
+            parameters={
+                "chal-broken": RuntimeError("proposal store on fire"),
+                "chal-healthy": dict(self.WIDE_BAND),
+            },
+        )
+
+        ids = [order.strategy_id for order in worker_run.orders]
+        assert ids == ["ema_rsi_macd", "ema_rsi_macd@chal-healthy"]
+
+    @pytest.mark.asyncio
+    async def test_the_gate_is_asked_about_the_challengers_own_sleeve(
+        self, worker_run
+    ) -> None:
+        """A challenger is gated against its own roster row, not smuggled
+        through under the champion's."""
+        await worker_run(
+            bars_override=_tradeable_bars(),
+            challengers=[_challenger_sleeve()],
+            parameters={"chal-abc123": dict(self.WIDE_BAND)},
+        )
+
+        assert worker_run.service.gate_calls == [
+            "ema_rsi_macd",
+            "ema_rsi_macd@chal-abc123",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_entry_gates_bind_challengers_too(self, worker_run) -> None:
+        """A challenger proposes thresholds inside the rule; it does not get to
+        skip the regime filter that sits in front of the rule. Six bars is not
+        a measurable regime for anyone."""
+        await worker_run(
+            bar_count=6,
+            challengers=[_challenger_sleeve()],
+            parameters={"chal-abc123": dict(self.WIDE_BAND)},
+        )
+
+        assert worker_run.orders == []
+
+
+class TestTheParameterisedRule:
+    def _ta(self, bars):
+        return build_ta_summary("AAPL", bars, data_source="intraday")
+
+    def test_champion_defaults_reproduce_the_original_rule_exactly(self) -> None:
+        """One code path serves champion and challenger, so the champion's
+        behaviour under it must be bit-for-bit what it was. Asserted across
+        rising, falling and flat series rather than believed."""
+        from strategy_service.rule_engine import CHAMPION_PARAMETERS, evaluate_rules
+
+        for kind, bars in (
+            ("tradeable", _tradeable_bars()),
+            ("rising", _bars(1_000_000.0, n=80)),
+            ("flat", _bars(1_000_000.0, n=80, flat=True)),
+        ):
+            ta = self._ta(bars)
+            plain = evaluate_rules(ta, bars=bars)
+            explicit = evaluate_rules(ta, bars=bars, parameters=dict(CHAMPION_PARAMETERS))
+            assert (plain.action, plain.confidence, plain.risk_score) == (
+                explicit.action, explicit.confidence, explicit.risk_score,
+            ), f"defaults diverged on the {kind} series"
+
+    def test_non_default_periods_are_computed_from_the_bars(self) -> None:
+        from strategy_service.rule_engine import evaluate_rules
+
+        bars = _tradeable_bars()
+        result = evaluate_rules(
+            self._ta(bars), bars=bars,
+            parameters={"ema_fast": 10.0, "ema_slow": 30.0, "rsi_buy_max": 85.0},
+        )
+        assert "EMA10" in result.reasoning and "EMA30" in result.reasoning
+
+    def test_too_little_history_for_the_slow_average_holds(self) -> None:
+        """Trading a challenger on the champion's averages would record
+        evidence for a strategy nobody proposed. The answer is 'not
+        evaluated', never a quiet substitution."""
+        from strategy_service.rule_engine import evaluate_rules
+
+        bars = _tradeable_bars(20)
+        result = evaluate_rules(
+            self._ta(bars), bars=bars,
+            parameters={"ema_fast": 10.0, "ema_slow": 60.0},
+        )
+        assert result.action == "HOLD"
+        assert result.size_pct == 0.0
+        assert "not evaluated" in result.reasoning

@@ -341,6 +341,31 @@ Each phase gated on the previous one being reviewed.
   automated adoption attempt, and became promotable only after a named person
   adopted it — with their name on the transition.
 
+  **The challenger pass.** The comparison above initially had nothing real to
+  read: the strategy worker ran one global parameter set, so a challenger
+  sleeve sat on the roster while nothing traded its parameters. The worker now
+  runs each paper challenger's *recorded proposal* through the identical
+  pipeline — the same entry gates, policy service, sizing, PDT budget and
+  lifecycle gate, with orders tagged by the derived strategy id. Parameters
+  come from `lifecycle.challenger_proposal` and nowhere else: a challenger with
+  no recorded proposal trades nothing, because trading it on guessed parameters
+  would record evidence for a strategy nobody proposed. One challenger's
+  failure is contained; the champion runs first, unconditionally.
+
+  Wiring it exposed a defect in the ladder itself, older than L4. The router
+  sends a paper sleeve to the simulator — the enforcement layer's stated
+  design — but the workers' advisory gate (`may_open`) refused everything
+  below live. So the signal loop never submitted for a paper sleeve, and the
+  simulated fills `derive_paper_evidence` reads were never produced. Every
+  promotion to live requires paper evidence, which meant the ladder could not
+  be climbed through normal operation at all: paper fills existed only where
+  someone posted orders to execution-service by hand. The gate now permits
+  paper (the router still guarantees a paper sleeve reaches only the
+  simulator), skips the live-mode switch for paper — that switch gates
+  real-money routes, and tying paper evidence to it would stop accumulation
+  exactly when it is safest — and keeps the halt latch, because paper evidence
+  built on an unreliable record is not evidence.
+
 ## Consequences
 
 **Accepted.** The loop will be slower than a system that redeploys itself, and

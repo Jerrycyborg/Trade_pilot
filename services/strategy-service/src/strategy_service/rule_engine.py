@@ -18,11 +18,25 @@ class RuleSignal:
     size_pct: float
 
 
+#: The champion's thresholds, stated once. `evaluate_rules` with these values
+#: is the rule as it has always run; a challenger substitutes its own recorded
+#: proposal. The sell band mirrors the buy band around RSI 50, matching the
+#: backtest strategy's deliberate reduction of the search space.
+CHAMPION_PARAMETERS: dict[str, float] = {
+    "ema_fast": 20.0,
+    "ema_slow": 50.0,
+    "rsi_buy_min": 45.0,
+    "rsi_buy_max": 70.0,
+    "macd_hist_min": 0.0,
+}
+
+
 def evaluate_rules(
     ta: TASummary,
     config: dict | None = None,
     sentiment_score: float | None = None,
     bars: list | None = None,
+    parameters: dict | None = None,
 ) -> RuleSignal:
     """
     Deterministic Dual-EMA Momentum + RSI + MACD strategy.
@@ -46,13 +60,60 @@ def evaluate_rules(
     ind = ta.indicators
     rsi = ind.rsi_14
     macd_hist = ind.macd_histogram
-    ema_20 = ind.ema_20
-    ema_50 = ind.ema_50
     adx = ta.adx
 
+    # Parameterised thresholds (L4: a challenger trades its recorded proposal;
+    # the champion trades CHAMPION_PARAMETERS, which reproduce the original
+    # hardcoded rule exactly — a test asserts that identity).
+    active = {**CHAMPION_PARAMETERS, **(parameters or {})}
+    rsi_buy_min = float(active["rsi_buy_min"])
+    rsi_buy_max = float(active["rsi_buy_max"])
+    macd_hist_min = float(active["macd_hist_min"])
+    ema_fast_period = int(active["ema_fast"])
+    ema_slow_period = int(active["ema_slow"])
+
+    if ema_fast_period == 20 and ema_slow_period == 50:
+        # The champion's averages come from the TA summary, exactly as before.
+        ema_fast = ind.ema_20
+        ema_slow = ind.ema_50
+    else:
+        # Non-default periods need the series. Without enough of it the answer
+        # is "cannot evaluate", never a rule quietly run on the wrong averages:
+        # a challenger's whole identity is its parameters, and trading it on
+        # the champion's would record evidence for a strategy nobody proposed.
+        closes = [float(b.close) for b in (bars or []) if getattr(b, "close", None)]
+        if len(closes) < ema_slow_period:
+            return RuleSignal(
+                action="HOLD",
+                confidence=0.0,
+                risk_score="HIGH",
+                reasoning=(
+                    f"EMA({ema_fast_period}/{ema_slow_period}) needs "
+                    f"{ema_slow_period} bars, have {len(closes)} — not evaluated"
+                ),
+                size_pct=0.0,
+            )
+        from market_data.indicators import compute_ema
+
+        ema_fast = compute_ema(closes, ema_fast_period)
+        ema_slow = compute_ema(closes, ema_slow_period)
+
+    # The sell band mirrors the buy band around RSI 50; with the champion's
+    # 45-70 that is the original 30-55.
+    rsi_sell_min = 100.0 - rsi_buy_max
+    rsi_sell_max = 100.0 - rsi_buy_min
+
     # --- Determine action ---
-    buy_conditions = ema_20 > ema_50 and 45 < rsi < 70 and macd_hist > 0
-    sell_conditions = ema_20 < ema_50 and 30 < rsi < 55 and macd_hist < 0
+    buy_conditions = (
+        ema_fast > ema_slow
+        and rsi_buy_min < rsi < rsi_buy_max
+        and macd_hist > macd_hist_min
+    )
+    sell_conditions = (
+        ema_fast < ema_slow
+        and rsi_sell_min < rsi < rsi_sell_max
+        and macd_hist < -macd_hist_min
+    )
 
     if buy_conditions:
         action = "BUY"
@@ -66,9 +127,9 @@ def evaluate_rules(
     if adx > 25:
         confidence += 0.10
     # No conflicting signals: all indicators point same direction
-    if action == "BUY" and rsi > 50 and macd_hist > 0 and ema_20 > ema_50:
+    if action == "BUY" and rsi > 50 and macd_hist > 0 and ema_fast > ema_slow:
         confidence += 0.05
-    elif action == "SELL" and rsi < 50 and macd_hist < 0 and ema_20 < ema_50:
+    elif action == "SELL" and rsi < 50 and macd_hist < 0 and ema_fast < ema_slow:
         confidence += 0.05
     confidence = min(confidence, 0.95)
 
@@ -82,7 +143,8 @@ def evaluate_rules(
 
     # --- Reasoning ---
     reasoning = (
-        f"EMA20={ema_20:.2f} {'>' if ema_20 > ema_50 else '<='} EMA50={ema_50:.2f}, "
+        f"EMA{ema_fast_period}={ema_fast:.2f} "
+        f"{'>' if ema_fast > ema_slow else '<='} EMA{ema_slow_period}={ema_slow:.2f}, "
         f"RSI={rsi:.1f}, MACD_hist={macd_hist:.6f}, ADX={adx:.1f} -> {action}"
     )
 

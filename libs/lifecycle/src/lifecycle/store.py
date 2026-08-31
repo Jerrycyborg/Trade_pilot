@@ -532,6 +532,23 @@ class PostgresLifecycleStore:
     # ------------------------------------------------------------------
     # Evidence — written by the server, never from a request body
     # ------------------------------------------------------------------
+    def paper_challengers(
+        self, symbol: str | None = None, account_id: str | None = None
+    ) -> list[Sleeve]:
+        """Challenger-origin sleeves currently in paper — the ones under
+        comparison. What the worker's challenger pass runs."""
+        account = account_id or self._settings.account_id
+        conditions = [
+            self._sleeve.c.origin == "challenger",
+            self._sleeve.c.state == "paper",
+            self._sleeve.c.account_id == account,
+        ]
+        if symbol is not None:
+            conditions.append(self._sleeve.c.symbol == symbol.upper())
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(self._sleeve).where(*conditions)).all()
+        return [self._row_to_sleeve(r) for r in rows]
+
     def adopt_challenger(self, sleeve: Sleeve, *, actor: str, reason: str) -> Sleeve:
         """A person takes responsibility for a challenger-derived sleeve.
 
@@ -654,11 +671,14 @@ class PostgresLifecycleStore:
         strategy_id: str | None = None,
         symbol: str | None = None,
         campaign_id: str | None = None,
+        challenger_id: str | None = None,
         account_id: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         """What was proposed, and what the campaign concluded."""
         conditions = []
+        if challenger_id is not None:
+            conditions.append(self._challenger.c.challenger_id == challenger_id)
         if strategy_id is not None:
             conditions.append(self._challenger.c.strategy_id == strategy_id)
         if symbol is not None:

@@ -1039,6 +1039,21 @@ table the gate trusts is the one place it must never appear.
 paper comparison is the step where a promotion gate gets bypassed by
 arithmetic.
 
+**And challengers actually trade.** The strategy worker runs each paper
+challenger's recorded proposal through the identical pipeline — same entry
+gates, same policy service, same sizing, same PDT budget — tagged with its
+derived id, so the journal separates the two sides' fills. Parameters come from
+`lifecycle.challenger_proposal` and nowhere else: no proposal row, no trades. A
+broken challenger is skipped; the champion runs first, unconditionally.
+
+> Wiring this exposed a defect older than L4: the workers' advisory gate
+> refused every sleeve below `live`, so the signal loop never produced the
+> paper fills that promotion evidence requires — the lifecycle ladder could not
+> be climbed through normal operation. The gate now permits paper sleeves; the
+> router still guarantees they reach only the simulator, the live-mode switch
+> still gates every real-money route, and the halt latch still covers paper
+> entries.
+
 > **One deviation from the ADR.** It says the two sleeves are distinguished by
 > strategy version, but the roster's identity is
 > `UNIQUE (strategy_id, symbol, account_id)` — no version. Widening that would

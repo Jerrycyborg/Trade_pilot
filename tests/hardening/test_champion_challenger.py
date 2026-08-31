@@ -348,3 +348,110 @@ class TestTheRouterRefusesLiveForAChallengerToo:
             origin="challenger",
         )
         assert decision.route is ExecutionRoute.LIVE
+
+
+class TestPaperSleevesCanActuallyTrade:
+    """The ladder's missing rung. The router sends a paper sleeve to the
+    simulator — that is the enforcement layer's stated design — but the
+    worker's advisory gate refused everything below live, so the signal loop
+    never submitted for a paper sleeve and the simulated fills that
+    derive_paper_evidence reads were never produced. Every promotion to live
+    requires paper evidence, so the ladder could not be climbed through normal
+    operation at all: paper fills existed only where someone posted orders to
+    execution-service by hand.
+    """
+
+    def _service(self, store):
+        from lifecycle.service import LifecycleService
+
+        return LifecycleService(store=store)
+
+    def test_a_paper_sleeve_is_permitted(self, store) -> None:
+        sleeve = store.register("ladder", "AAPL")
+        store.transition(sleeve, "paper", "earning its record")
+
+        answer = self._service(store).may_open("ladder", "AAPL")
+        assert answer.permitted is True
+        assert answer.reason == "paper"
+
+    def test_a_candidate_is_still_refused(self, store) -> None:
+        """Candidates shadow; they do not trade, even in the simulator."""
+        store.register("ladder", "AAPL")
+        answer = self._service(store).may_open("ladder", "AAPL")
+        assert answer.permitted is False
+        assert answer.reason == "sleeve_candidate"
+
+    def test_paper_ignores_the_live_mode_switch(self, store) -> None:
+        """Live mode gates real-money routes; a paper sleeve cannot reach one
+        whatever this gate says. Tying paper trading to the live switch would
+        stop evidence accumulating exactly when it is safest to accumulate."""
+        sleeve = store.register("ladder", "AAPL")
+        store.transition(sleeve, "paper", "setup")
+        assert store.live_mode_enabled() is False, "the default, and the point"
+
+        assert self._service(store).may_open("ladder", "AAPL").permitted is True
+
+    def test_a_live_sleeve_still_needs_the_switch(self, store) -> None:
+        sleeve = store.register("ladder", "AAPL")
+        sleeve = store.transition(sleeve, "paper", "setup")
+        store.transition(sleeve, "live", "setup")
+
+        answer = self._service(store).may_open("ladder", "AAPL")
+        assert answer.permitted is False
+        assert answer.reason == "live_mode_disabled_by_operator"
+
+    def test_the_halt_latch_still_covers_paper_entries(self, store) -> None:
+        """A journal gap or reconciliation break makes the record unreliable,
+        and paper evidence built on an unreliable record is not evidence."""
+        sleeve = store.register("ladder", "AAPL")
+        store.transition(sleeve, "paper", "setup")
+        store.halt_entries(broker="live", environment="live", reason="journal gap")
+
+        answer = self._service(store).may_open("ladder", "AAPL")
+        assert answer.permitted is False
+
+
+class TestTheChallengerRoster:
+    def test_paper_challengers_lists_exactly_the_sleeves_under_comparison(
+        self, store
+    ) -> None:
+        under_test = _paper_challenger(store, _proposal())
+        # A human paper sleeve, a candidate challenger, and a challenger on
+        # another symbol: none of them belong in AAPL's challenger pass.
+        human = store.register("human_paper", SYMBOL)
+        store.transition(human, "paper", "setup")
+        store.register(
+            derived_strategy_id(CHAMPION, "chal-candidate"), SYMBOL,
+            strategy_version="chal-candidate", origin="challenger",
+        )
+        other = store.register(
+            derived_strategy_id(CHAMPION, "chal-elsewhere"), "MSFT",
+            strategy_version="chal-elsewhere", origin="challenger",
+        )
+        store.transition(other, "paper", "setup")
+
+        listed = store.paper_challengers(SYMBOL)
+        assert [s.strategy_id for s in listed] == [under_test.strategy_id]
+
+    def test_the_service_returns_the_recorded_parameters(self, store) -> None:
+        from lifecycle.service import LifecycleService
+
+        challenger = _proposal()
+        store.record_challenger_proposal(
+            campaign_id="camp-params", challenger=challenger.to_dict(),
+        )
+
+        service = LifecycleService(store=store)
+        assert service.challenger_parameters(challenger.challenger_id) == {
+            "ema_fast": 24.0, "ema_slow": 50.0,
+        }
+        assert service.challenger_parameters("chal-never-recorded") is None
+
+    def test_no_authority_means_no_challengers_not_an_error(self) -> None:
+        """The challenger pass is research. Losing it degrades research and
+        never the champion's own processing."""
+        from lifecycle.service import LifecycleService
+
+        service = LifecycleService(store=None)
+        assert service.paper_challengers(SYMBOL) == []
+        assert service.challenger_parameters("chal-x") is None
