@@ -1108,17 +1108,7 @@ async def _portfolio_state() -> dict[str, object]:
 async def _policy_evaluate(
     signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]
 ) -> dict[str, object]:
-    try:
-        from strategy_service.earnings_calendar import check_earnings_blackout
-
-        # The gate reports its own reachability and honours
-        # EARNINGS_GATE_FAIL_CLOSED; an unreachable calendar is logged there.
-        event_blackout = check_earnings_blackout(signal.symbol).active
-    except Exception as exc:
-        logger.warning(
-            "Earnings gate unavailable for %s (%s) — failing open", signal.symbol, exc
-        )
-        event_blackout = False
+    event_blackout = _earnings_blackout_for(signal.symbol)
 
     request = PolicyEvaluationRequest(
         signal_id=signal.signal_id,
@@ -1261,6 +1251,36 @@ def _strategy_of(signal: SignalCandidate) -> str:
     sleeve against another sleeve's roster entry.
     """
     return getattr(signal, "strategy", None) or DEFAULT_LIVE_STRATEGY
+
+
+def _earnings_blackout_for(symbol: str) -> bool:
+    """The earnings gate's verdict, honouring the operator's failure posture.
+
+    The gate itself handles an unanswerable calendar per
+    EARNINGS_GATE_FAIL_CLOSED. This wrapper covers the failures *outside* it —
+    the cross-service import missing from this container, or the module
+    raising before any posture applies. A blanket `except: False` here
+    silently failed OPEN for an operator who had configured the gate to fail
+    CLOSED, and swallowed the gate's own refusal of a garbage config value.
+    """
+    try:
+        from strategy_service.earnings_calendar import check_earnings_blackout
+
+        return check_earnings_blackout(symbol).active
+    except ValueError:
+        # A garbage EARNINGS_GATE_FAIL_CLOSED is refused, not defaulted around
+        # — the gate's documented contract.
+        raise
+    except Exception as exc:
+        fail_closed = (
+            os.getenv("EARNINGS_GATE_FAIL_CLOSED", "false").strip().lower() == "true"
+        )
+        logger.error(
+            "Earnings gate unavailable for %s (%s) — failing %s per "
+            "EARNINGS_GATE_FAIL_CLOSED", symbol, exc,
+            "CLOSED" if fail_closed else "open",
+        )
+        return fail_closed
 
 
 def _lifecycle_gate(signal: SignalCandidate) -> str | None:

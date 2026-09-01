@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -50,13 +51,19 @@ def save_records(path: Path | None, records: dict, label: str) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        # Write-then-rename: a crash mid-write must leave the previous state
+        # file intact, not a truncated one. A truncated file loads as empty
+        # on the next start — every tracked stop orphaned, which is the exact
+        # restart failure this persistence exists to close.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
             json.dumps(
                 {"records": {s: r.model_dump(mode="json") for s, r in records.items()}},
                 indent=2,
             ),
             encoding="utf-8",
         )
+        os.replace(tmp, path)
     except Exception as exc:
         # The in-memory record still protects the position for this process's
         # life; only restart durability is degraded. Loud, not fatal.

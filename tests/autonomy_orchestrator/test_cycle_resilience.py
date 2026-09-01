@@ -104,3 +104,37 @@ async def test_a_failed_cycle_never_leaves_the_orchestrator_busy(
     with pytest.raises(ValueError):
         await m.run_cycle()
     assert m.state.running is False, "a dead dependency must not wedge the loop"
+
+
+@pytest.mark.asyncio
+async def test_the_earnings_posture_survives_a_broken_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blanket `except: False` around the earnings gate silently failed OPEN
+    for an operator who configured EARNINGS_GATE_FAIL_CLOSED=true — the module
+    import missing from this container, or any error before the gate's own
+    posture applies, discarded the configured posture entirely."""
+
+    def boom(_symbol: str):
+        raise RuntimeError("gate unreachable")
+
+    monkeypatch.setattr(
+        "strategy_service.earnings_calendar.check_earnings_blackout", boom
+    )
+    monkeypatch.setenv("EARNINGS_GATE_FAIL_CLOSED", "true")
+    assert m._earnings_blackout_for("NVDA") is True
+
+    monkeypatch.setenv("EARNINGS_GATE_FAIL_CLOSED", "false")
+    assert m._earnings_blackout_for("NVDA") is False
+
+
+@pytest.mark.asyncio
+async def test_a_garbage_gate_config_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate refuses an unparseable EARNINGS_GATE_FAIL_CLOSED on the first
+    call; the orchestrator's wrapper must not swallow that refusal into a
+    silent fail-open."""
+    monkeypatch.setenv("EARNINGS_GATE_FAIL_CLOSED", "yes please")
+    with pytest.raises(ValueError, match="EARNINGS_GATE_FAIL_CLOSED"):
+        m._earnings_blackout_for("NVDA")

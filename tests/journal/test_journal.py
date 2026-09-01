@@ -477,3 +477,33 @@ class TestHeadlineArchive:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
         archive.record_headlines("NVDA", [{"headline": "late news"}])
         assert archive.headlines_as_of("NVDA", cutoff) == []
+
+
+class TestAsOfQueriesKeepTheNewest:
+    """When the lookback window holds more rows than the limit, the limit must
+    drop the OLDEST rows: ordering ascending and then limiting kept the oldest
+    N, so a role's 'latest' was days stale exactly when a symbol was busiest."""
+
+    def test_sentiment_limit_drops_the_oldest(self, archive: Journal) -> None:
+        from datetime import datetime, timezone
+
+        for score in (0.1, 0.2, 0.3):
+            archive.record_sentiment("NVDA", score=score)
+        rows = archive.sentiment_as_of("NVDA", datetime.now(timezone.utc), limit=2)
+        assert [r["score"] for r in rows] == [0.2, 0.3], "newest two, oldest first"
+
+    def test_headline_limit_drops_the_oldest(self, archive: Journal) -> None:
+        from datetime import datetime, timezone
+
+        for text in ("first", "second", "third"):
+            archive.record_headlines("NVDA", [{"headline": text}])
+        rows = archive.headlines_as_of("NVDA", datetime.now(timezone.utc), limit=2)
+        assert [r["headline"] for r in rows] == ["second", "third"]
+
+    def test_research_limit_drops_the_oldest(self, archive: Journal) -> None:
+        from datetime import datetime, timezone
+
+        for sentiment in ("bearish", "neutral", "bullish"):
+            archive.record_research("NVDA", sentiment=sentiment)
+        rows = archive.research_as_of("NVDA", datetime.now(timezone.utc), limit=2)
+        assert [r["sentiment"] for r in rows] == ["neutral", "bullish"]

@@ -143,3 +143,20 @@ class TestServing:
             }}})
         )
         assert RealtimePriceSource(MarketDataSettings()).get_price("AAPL") == 314.58
+
+    def test_a_dead_feeder_looks_like_an_outage_not_a_price(self, tmp_path) -> None:
+        """When nothing on file is inside the requested window, the stale tail
+        used to be served anyway — the ticker showed a 'live' price computed
+        from a weeks-old close with no error anywhere. Fail closed instead,
+        naming the newest bar so the operator sees how long the feeder has
+        been dead."""
+        old = datetime.now(timezone.utc) - timedelta(days=21)
+        stale = [
+            {"timestamp": (old + timedelta(days=i)).isoformat(),
+             "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+             "volume": 1000.0}
+            for i in range(3)
+        ]
+        (tmp_path / "AAPL_1d.json").write_text(json.dumps({"bars": stale}))
+        with pytest.raises(DataUnavailableError, match="feeder"):
+            FileDropFetcher(tmp_path).fetch("AAPL", period_days=5)

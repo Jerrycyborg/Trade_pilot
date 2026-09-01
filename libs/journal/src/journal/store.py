@@ -440,9 +440,13 @@ class Journal:
                         SentimentObservation.observed_at <= cutoff,
                         SentimentObservation.observed_at >= window_start,
                     )
-                    .order_by(SentimentObservation.observed_at)
+                    # Newest N, then chronological: ordering ascending and
+                    # then limiting keeps the OLDEST rows when the window
+                    # holds more than the limit, so the roles' "latest" was
+                    # days stale exactly when a symbol was busiest.
+                    .order_by(SentimentObservation.observed_at.desc())
                     .limit(limit)
-                ).all()
+                ).all()[::-1]
                 return [
                     {
                         "symbol": r.symbol,
@@ -509,9 +513,13 @@ class Journal:
                         HeadlineObservation.observed_at <= cutoff,
                         HeadlineObservation.observed_at >= window_start,
                     )
-                    .order_by(HeadlineObservation.observed_at)
+                    # Newest N, then chronological: ordering ascending and
+                    # then limiting keeps the OLDEST rows when the window
+                    # holds more than the limit, so the roles' "latest" was
+                    # days stale exactly when a symbol was busiest.
+                    .order_by(HeadlineObservation.observed_at.desc())
                     .limit(limit)
-                ).all()
+                ).all()[::-1]
                 return [
                     {
                         "symbol": r.symbol,
@@ -578,9 +586,13 @@ class Journal:
                         ResearchObservation.observed_at <= cutoff,
                         ResearchObservation.observed_at >= window_start,
                     )
-                    .order_by(ResearchObservation.observed_at)
+                    # Newest N, then chronological: ordering ascending and
+                    # then limiting keeps the OLDEST rows when the window
+                    # holds more than the limit, so the roles' "latest" was
+                    # days stale exactly when a symbol was busiest.
+                    .order_by(ResearchObservation.observed_at.desc())
                     .limit(limit)
-                ).all()
+                ).all()[::-1]
                 return [
                     {
                         "symbol": r.symbol,

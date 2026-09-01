@@ -393,7 +393,19 @@ class FileDropFetcher:
     def fetch(self, symbol: str, period_days: int = 60) -> list[OHLCVBar]:
         bars = self._read_bars(symbol, "1d")
         cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
-        return [b for b in bars if b.timestamp >= cutoff] or bars[-period_days:]
+        windowed = [b for b in bars if b.timestamp >= cutoff]
+        if not windowed:
+            # The file exists but nothing in it is recent enough: a dead
+            # feeder, and it must look like one. Serving the stale tail here
+            # gave the ticker a "live" price computed from a weeks-old close
+            # with no error anywhere — the outage the fail-closed contract
+            # says must surface. fetch_intraday already behaves this way.
+            raise DataUnavailableError(
+                f"No bars for {symbol} inside the last {period_days} day(s); "
+                f"the newest on file is {bars[-1].timestamp.isoformat()} — "
+                f"has the feeder stopped?"
+            )
+        return windowed
 
     def fetch_intraday(
         self,
