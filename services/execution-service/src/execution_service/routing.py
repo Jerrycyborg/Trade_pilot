@@ -80,6 +80,13 @@ class BrokerRouter:
         self._simulated = simulated or PaperBroker(max_qty=max_qty)
         self._live = live
         self._live_resolved = live is not None
+        # Transient authority failures may occur while a real position is open.
+        # Keep only routes previously observed from the authoritative store.
+        # This cache never permits entries and is intentionally process-local:
+        # after a restart with no authority, guessing a venue is unsafe.
+        self._last_known_routes: dict[
+            tuple[str, str, str], tuple[ExecutionRoute, str]
+        ] = {}
 
     # ------------------------------------------------------------------
     def _live_adapter(self):
@@ -153,12 +160,17 @@ class BrokerRouter:
     ) -> RoutedOrder:
         """Resolve where this order may go."""
         intent = OrderIntent.REDUCE_ONLY if reduce_only else OrderIntent.ENTRY
+        route_key = (strategy_id, symbol.upper(), account_id)
 
         store = self._resolve_store()
         if store is None and self._store_factory is not None:
             # An authority was configured and cannot be reached. Not the same
             # as "none configured": block entries, keep exits.
-            return self._authority_lost(intent, "lifecycle_authority_unreachable")
+            return self._authority_lost(
+                intent,
+                "lifecycle_authority_unreachable",
+                route_key,
+            )
 
         if self._store is None:
             # No shared authority. Simulated only — see the module docstring.
@@ -178,16 +190,33 @@ class BrokerRouter:
                 account_id=account_id,
             )
         except LifecycleUnavailableError as exc:
-            return self._authority_lost(intent, str(exc))
+            return self._authority_lost(intent, str(exc), route_key)
         except Exception as exc:  # database down, network partition, bad schema
             logger.error("Lifecycle authority unreadable: %s", exc)
-            return self._authority_lost(intent, f"lifecycle_unavailable: {exc}")
+            return self._authority_lost(
+                intent,
+                f"lifecycle_unavailable: {exc}",
+                route_key,
+            )
 
         if sleeve is None:
             # An unregistered sleeve has never been permitted anything. It
             # cannot hold a position either, so there is nothing to reduce.
             return RoutedOrder(
                 RouteDecision(ExecutionRoute.BLOCKED, "sleeve_not_registered"), None, "none"
+            )
+
+        strategy_version = getattr(sleeve, "strategy_version", "")
+        position_environment = str(sleeve.position_environment).lower()
+        if position_environment == "live":
+            self._last_known_routes[route_key] = (
+                ExecutionRoute.LIVE,
+                strategy_version,
+            )
+        elif position_environment in {"paper", "simulated"}:
+            self._last_known_routes[route_key] = (
+                ExecutionRoute.SIMULATED,
+                strategy_version,
             )
 
         decision = resolve_route(
@@ -221,25 +250,44 @@ class BrokerRouter:
                     None,
                     "none",
                 )
-        return self._bind(
-            decision,
-            getattr(sleeve, "strategy_version", ""),
-        )
+        return self._bind(decision, strategy_version)
 
-    def _authority_lost(self, intent: OrderIntent, reason: str) -> RoutedOrder:
-        """Losing the roster blocks entries and preserves exits.
+    def _authority_lost(
+        self,
+        intent: OrderIntent,
+        reason: str,
+        route_key: tuple[str, str, str],
+    ) -> RoutedOrder:
+        """Block entries; exit only through an authoritative last-known venue.
 
-        An exit routes to the simulated adapter rather than a live one: without
-        the roster we cannot know whether this sleeve's positions are real, and
-        sending a real order on a guess is the worse error.
+        Routing an unknown exit to paper creates a false success while a real
+        position remains open. Guessing live can close the wrong account. A
+        process-local route observed before the outage is safe for a transient
+        failure; after a restart, the request halts until authority recovers.
         """
-        if intent is OrderIntent.REDUCE_ONLY:
+        if intent is not OrderIntent.REDUCE_ONLY:
             return RoutedOrder(
-                RouteDecision(ExecutionRoute.SIMULATED, f"exit_allowed_despite_{reason}"),
-                self._simulated,
-                "paper",
+                RouteDecision(ExecutionRoute.BLOCKED, reason),
+                None,
+                "none",
             )
-        return RoutedOrder(RouteDecision(ExecutionRoute.BLOCKED, reason), None, "none")
+
+        cached = self._last_known_routes.get(route_key)
+        if cached is None:
+            return RoutedOrder(
+                RouteDecision(
+                    ExecutionRoute.BLOCKED,
+                    f"exit_route_unknown_during_{reason}",
+                ),
+                None,
+                "none",
+            )
+
+        route, strategy_version = cached
+        return self._bind(
+            RouteDecision(route, f"last_known_exit_during_{reason}"),
+            strategy_version,
+        )
 
     def _bind(
         self,

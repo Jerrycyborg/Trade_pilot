@@ -294,10 +294,10 @@ class TestExitsSurviveEveryHalt:
         assert entry.route is ExecutionRoute.BLOCKED
         assert exit_.route is ExecutionRoute.LIVE
 
-    def test_losing_the_authority_blocks_entries_and_permits_exits(
+    def test_losing_authority_never_claims_an_unknown_exit_succeeded(
         self, paper: PaperBroker, live: LiveAdapterSpy
     ) -> None:
-        """A database outage must not become an unmanaged position."""
+        """An unknown exit must block, not silently fill against the paper book."""
         store = FakeStore(raises=RuntimeError("connection refused"))
         router = BrokerRouter(store=store, simulated=paper, live=live)
 
@@ -309,8 +309,31 @@ class TestExitsSurviveEveryHalt:
         )
         assert entry.decision.route is ExecutionRoute.BLOCKED
         assert "lifecycle_unavailable" in entry.decision.reason
-        assert exit_.places_order is True
-        assert live.calls == [], "an exit on a lost authority must not guess at a live venue"
+        assert exit_.decision.route is ExecutionRoute.BLOCKED
+        assert "exit_route_unknown" in exit_.decision.reason
+        assert live.calls == []
+
+    def test_losing_authority_uses_only_a_last_known_live_exit_route(
+        self, paper: PaperBroker, live: LiveAdapterSpy
+    ) -> None:
+        store = FakeStore(
+            state="live",
+            live_mode=True,
+            position_environment="live",
+        )
+        router = BrokerRouter(store=store, simulated=paper, live=live)
+        observed = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
+        )
+        assert observed.decision.route is ExecutionRoute.LIVE
+
+        store._raises = RuntimeError("connection refused")
+        exit_ = router.route(
+            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
+        )
+        assert exit_.decision.route is ExecutionRoute.LIVE
+        assert exit_.adapter is live
+        assert "last_known_exit" in exit_.decision.reason
 
 
 class TestNoAuthorityMeansNoLiveTrading:
@@ -363,7 +386,7 @@ class TestAnUnreachableAuthorityIsNotADevFallback:
         assert routed.decision.route is ExecutionRoute.BLOCKED
         assert "unreachable" in routed.decision.reason
 
-    def test_an_unreachable_authority_still_permits_exits(
+    def test_an_unreachable_authority_blocks_an_unroutable_exit(
         self, paper: PaperBroker, live: LiveAdapterSpy
     ) -> None:
         def _never_connects():
@@ -375,7 +398,8 @@ class TestAnUnreachableAuthorityIsNotADevFallback:
         routed = router.route(
             strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
         )
-        assert routed.places_order is True
+        assert routed.decision.route is ExecutionRoute.BLOCKED
+        assert "exit_route_unknown" in routed.decision.reason
         assert live.calls == []
 
     def test_it_retries_and_recovers(self, paper: PaperBroker, live: LiveAdapterSpy) -> None:
