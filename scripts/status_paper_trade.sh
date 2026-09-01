@@ -1,20 +1,41 @@
 #!/usr/bin/env bash
-# Trade_pilot — Status check
-PIDDIR="/tmp/tradepilot/pids"
-echo "=== Trade_pilot Service Status ==="
-declare -A PORTS=(
-  [audit-logger]=8006 [policy-service]=8001 [execution-service]=8002
-  [portfolio-service]=8004 [strategy-service]=8003 [sentiment-aggregator]=8008
-  [notification-service]=8009 [approval-gateway]=8010 [research-service]=8005
-  [autonomy-orchestrator]=8007
+# Trade Pilot — read-only status for the local paper stack.
+
+set -euo pipefail
+
+STATE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/trade-pilot"
+PIDDIR="$STATE_ROOT/pids"
+declare -A SERVICES=(
+  [audit-logger]="audit_logger.main:app 8006"
+  [policy-service]="policy_service.main:app 8001"
+  [execution-service]="execution_service.main:app 8002"
+  [portfolio-service]="portfolio_service.main:app 8004"
+  [strategy-service]="strategy_service.main:app 8003"
+  [sentiment-aggregator]="sentiment_aggregator.main:app 8008"
+  [notification-service]="notification_service.main:app 8009"
+  [approval-gateway]="approval_gateway.main:app 8010"
+  [research-service]="research_service.main:app 8005"
+  [autonomy-orchestrator]="autonomy_orchestrator.main:app 8007"
 )
-for name in "${!PORTS[@]}"; do
-  port="${PORTS[$name]}"
+
+echo "=== Trade Pilot service status ==="
+for name in "${!SERVICES[@]}"; do
+  read -r module port <<<"${SERVICES[$name]}"
   pidfile="$PIDDIR/$name.pid"
-  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    http=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$port/health" 2>/dev/null || echo "ERR")
-    [ "$http" = "200" ] && echo "  [$name] ✅ running :$port" || echo "  [$name] ⚠️  pid alive but /health returned $http"
-  else
-    echo "  [$name] ❌ not running"
+  if [ ! -f "$pidfile" ] || [ -L "$pidfile" ]; then
+    echo "  [$name] not running"
+    continue
   fi
+  pid=$(<"$pidfile")
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+    echo "  [$name] not running"
+    continue
+  fi
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  if [[ "$command" != *"uvicorn $module"* ]]; then
+    echo "  [$name] PID conflict"
+    continue
+  fi
+  http=$(curl -sS -o /dev/null -w "%{http_code}"     "http://127.0.0.1:$port/health" 2>/dev/null || true)
+  [ "$http" = "200" ]     && echo "  [$name] healthy on 127.0.0.1:$port"     || echo "  [$name] process alive; health returned $http"
 done

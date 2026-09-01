@@ -63,8 +63,14 @@ start_service() {
     local existing
     existing=$(<"$pidfile")
     if [[ "$existing" =~ ^[0-9]+$ ]] && kill -0 "$existing" 2>/dev/null; then
-      echo "  [$name] already running (pid $existing)"
-      return
+      local command
+      command=$(ps -p "$existing" -o command= 2>/dev/null || true)
+      if [[ "$command" == *"uvicorn $module"* ]]; then
+        echo "  [$name] already running (pid $existing)"
+        return
+      fi
+      echo "PID conflict for $name; refusing to overwrite $pidfile" >&2
+      exit 1
     fi
   fi
   env "${PAPER_ENV[@]}" "$UV" run "${UV_ENV_ARGS[@]}"     uvicorn "$module" --host 127.0.0.1 --port "$port"     >"$LOGDIR/$name.log" 2>&1 &
