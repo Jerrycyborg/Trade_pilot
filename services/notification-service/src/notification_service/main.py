@@ -42,10 +42,15 @@ async def notify(
     _history.appendleft(payload)
     if event.tier >= 2:
         _pending_approvals.appendleft(payload)
-    if settings.webhook_url:
+    try:
+        webhook_url = settings.verified_webhook_url
+    except ValueError:
+        payload["webhook_status"] = "misconfigured"
+        webhook_url = ""
+    if webhook_url:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(settings.webhook_url, json=payload)
+                await client.post(webhook_url, json=payload)
         except Exception:
             payload["webhook_status"] = "failed"
     return {"status": "queued", "tier": event.tier}
