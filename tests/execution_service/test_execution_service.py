@@ -129,20 +129,46 @@ def test_list_orders_returns_newest_first_and_filters() -> None:
     assert filtered[0].rejection_reason == "symbol_rejected"
 
 
-def test_close_order_endpoint_calls_broker_wrapper(monkeypatch) -> None:
+def test_close_order_endpoint_uses_the_resolved_adapter(monkeypatch) -> None:
     main = _setup()
     captured = {}
 
-    def fake_close_position(*, position_id: str, symbol: str, units=None) -> bool:
-        captured["position_id"] = position_id
-        captured["symbol"] = symbol
-        captured["units"] = units
-        return True
+    class Adapter:
+        def close_position(
+            self, *, position_id: str, instrument_id: int, units=None, symbol: str
+        ) -> bool:
+            captured.update(
+                position_id=position_id,
+                instrument_id=instrument_id,
+                symbol=symbol,
+                units=units,
+            )
+            return True
 
-    monkeypatch.setattr(main, "close_position", fake_close_position)
+    class Decision:
+        is_live = False
+        reason = "paper"
 
+    class Routed:
+        places_order = True
+        adapter = Adapter()
+        adapter_name = "paper"
+        decision = Decision()
+
+    monkeypatch.setattr(main.router, "route", lambda **_kwargs: Routed())
     response = main.close_order(
-        main.ClosePositionRequest(symbol="AAPL", position_id="pos-1", signal_id="sig-exit"),
+        main.ClosePositionRequest(
+            symbol="AAPL",
+            position_id="pos-1",
+            signal_id="sig-exit",
+            strategy_id="ema_rsi_macd",
+            account_id="default",
+        ),
     )
     assert response["status"] == "closed"
-    assert captured == {"position_id": "pos-1", "symbol": "AAPL", "units": None}
+    assert captured == {
+        "position_id": "pos-1",
+        "instrument_id": 0,
+        "symbol": "AAPL",
+        "units": None,
+    }

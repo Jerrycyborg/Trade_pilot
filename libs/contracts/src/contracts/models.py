@@ -272,7 +272,7 @@ class ExecutionOrderRequest(BaseModel):
 
     signal_id: str = Field(min_length=1, max_length=128)
     symbol: str = Field(min_length=1, max_length=32)
-    side: Literal["BUY", "SELL"]
+    side: str
     qty: int = Field(gt=0, le=1_000_000)
     order_type: Literal["MARKET", "LIMIT"]
     time_in_force: Literal["DAY", "GTC", "IOC"] = "DAY"
