@@ -135,6 +135,9 @@ class TradeWorker:
                 await client.post(
                     f"{settings.research_service_url}/v1/research/report",
                     json={"symbols": symbols},
+                    headers={
+                        "X-Internal-Key": os.environ.get("INTERNAL_API_KEY", ""),
+                    },
                 )
         except Exception as exc:
             logger.debug("Research cache warm failed (non-fatal): %s", exc)
