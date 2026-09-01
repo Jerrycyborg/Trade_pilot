@@ -100,6 +100,7 @@ system recorded itself is what earns it.
 | `NEWSAPI_KEY` | No | NewsAPI.org key for sentiment |
 | `ALPHAVANTAGE_KEY` | No | AlphaVantage key for sentiment |
 | `WEBHOOK_URL` | No | Slack/Discord/custom webhook for notifications |
+| `WEBHOOK_ALLOWED_HOSTS` | With webhook | Exact hosts permitted for HTTPS notification egress |
 | `BROKER` | No | `etoro` or `paper` (default paper) |
 | `WORKER_ENABLED` | No | `true` to enable strategy worker polling |
 | `ORCHESTRATOR_INTERVAL_MINUTES` | No | Cycle interval (default 5) |
