@@ -18,6 +18,7 @@ env:
   # and a test that needs a real credential is a test that must not exist.
   INTERNAL_API_KEY: ci-internal-key
   ADMIN_API_KEY: ci-admin-key
+  POSTGRES_PASSWORD: ci-postgres-password
   BROKER: paper
 
 jobs:
@@ -40,14 +41,14 @@ jobs:
         env:
           POSTGRES_DB: trading_stack
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: ci-postgres-password
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres -d trading_stack"
           --health-interval 3s --health-timeout 3s --health-retries 20
     env:
-      TEST_LIFECYCLE_POSTGRES_URL: postgresql+psycopg://postgres:postgres@localhost:5432/trading_stack
-      LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/trading_stack
+      TEST_LIFECYCLE_POSTGRES_URL: postgresql+psycopg://postgres:ci-postgres-password@localhost:5432/trading_stack
+      LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:ci-postgres-password@localhost:5432/trading_stack
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

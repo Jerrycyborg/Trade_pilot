@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -41,7 +42,7 @@ def load_prompt(prompt_id: str, expected_sha256: str = "") -> PromptArtifact:
     if not raw or len(raw) > _MAX_PROMPT_BYTES:
         raise RuntimeError("Prompt is empty or exceeds the size limit")
     digest = hashlib.sha256(raw).hexdigest()
-    if expected_sha256 and not hashlib.compare_digest(digest, expected_sha256.lower()):
+    if expected_sha256 and not hmac.compare_digest(digest, expected_sha256.lower()):
         raise RuntimeError(
             f"Prompt digest mismatch for {prompt_id}: expected {expected_sha256}, got {digest}"
         )
@@ -56,6 +57,7 @@ def untrusted_block(label: str, value: object, *, max_chars: int = 8_000) -> str
     """Serialize external data so it cannot forge prompt control delimiters."""
     safe_label = _LABEL.sub("-", label.strip().lower()).strip("-") or "data"
     serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    serialized = serialized.replace("<", "\\u003c").replace(">", "\\u003e")
     if len(serialized) > max_chars:
         serialized = serialized[:max_chars] + "...[truncated]"
     return (
