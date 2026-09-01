@@ -405,7 +405,7 @@ class TestPaperSleevesCanActuallyTrade:
         and paper evidence built on an unreliable record is not evidence."""
         sleeve = store.register("ladder", "AAPL")
         store.transition(sleeve, "paper", "setup")
-        store.halt_entries(broker="live", environment="live", reason="journal gap")
+        store.halt_entries(broker="paper", environment="paper", reason="journal gap")
 
         answer = self._service(store).may_open("ladder", "AAPL")
         assert answer.permitted is False
