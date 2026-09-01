@@ -31,6 +31,12 @@ from .compare import (
     is_derived,
 )
 from .generate import DEFAULT_STEPS, describe, perturbations
+from .learning import (
+    LearningCycleReport,
+    LearningStore,
+    LearningThresholds,
+    run_learning_cycle,
+)
 from .proposal import Challenger, Clamp, UnboundedParameter, build_challenger
 
 __all__ = [
@@ -41,6 +47,9 @@ __all__ = [
     "ChallengerBounds",
     "ChallengerResult",
     "Comparison",
+    "LearningCycleReport",
+    "LearningStore",
+    "LearningThresholds",
     "Side",
     "champion_of",
     "compare",
@@ -53,4 +62,5 @@ __all__ = [
     "describe",
     "evaluate_campaign",
     "perturbations",
+    "run_learning_cycle",
 ]
