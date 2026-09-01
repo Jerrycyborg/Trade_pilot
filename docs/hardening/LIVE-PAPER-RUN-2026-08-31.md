@@ -213,3 +213,33 @@ sequence of answers), and SentimentSpecialist, FundamentalsSpecialist and
 NewsSpecialist read only through the point-in-time seam. All five specified
 roles now report, each still declaring unavailability when its archive holds
 nothing for the moment in question.
+
+## Post-fix drill: the loop closed end-to-end, and found two more
+
+After the review findings were fixed, the orchestrator drill environment
+(synthetic feed, isolated archive, drill-local policy) was rebuilt from
+scratch and the full loop exercised once more: a rule-driven BUY through
+policy, execution and the paper broker; durable stop-loss and take-profit
+records carrying the sleeve's strategy_id; a synthetic 7% drop firing the
+stop within its one-minute check; the exit filled at the fresh quote and
+journalled under the sleeve's scope — `net_position` returned to exactly
+0.0, which is the property the exit-ledger fix exists to guarantee.
+
+The rebuild also surfaced two defects, both fixed the same night:
+
+- **The signal endpoint traded a hash, not the market.** POST
+  /v1/signals/generate (non-AI path) called the deterministic builder bare,
+  so every request landed in its no-data fallback — direction from the
+  symbol name's character sum, at confidence 0.77 for NVDA, twice
+  identically, over a feed serving a clean uptrend. The same defect was
+  fixed on the worker's path earlier; the HTTP path had kept the old shape.
+  The endpoint now builds the market snapshot first (on a thread, with the
+  earnings-gate call moved off the event loop alongside it) and the fallback
+  remains reachable only when the market genuinely cannot be observed.
+- **A closed position left its sibling risk record armed.** The stop fired,
+  closed the position and removed its own record — the take-profit record
+  for the same dead position stayed on file (and vice versa; the exit-signal
+  pass cleared neither). An orphaned record triggers on price alone: it
+  books phantom P&L into the monthly ceilings, burns a PDT day-trade slot,
+  and sends a close for a position that no longer exists. Every exit path
+  now clears both records.

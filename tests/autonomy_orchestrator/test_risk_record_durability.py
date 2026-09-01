@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from autonomy_orchestrator.stop_loss_monitor import StopLossMonitor, StopLossRecord
 from autonomy_orchestrator.take_profit_monitor import TakeProfitMonitor, TakeProfitRecord
 
@@ -86,3 +87,79 @@ class TestTargetsSurviveARestart:
 
         assert StopLossMonitor("http://b", "k", state_path=stops).get("MSFT") is None
         assert TakeProfitMonitor("http://b", "k", state_path=targets).get("NVDA") is None
+
+
+class TestAClosedPositionLeavesNoOrphanedRecords:
+    """Found by the post-fix orchestrator drill: the stop fired and removed
+    its own record, while the take-profit record for the same dead position
+    stayed on file. An orphaned record triggers on price alone — it books
+    phantom P&L into the monthly ceilings, burns a PDT day-trade slot, and
+    sends a close for a position that no longer exists."""
+
+    def _monitors(self, tmp_path: Path, monkeypatch):
+        from autonomy_orchestrator import main as m
+
+        stops = StopLossMonitor("http://b", "k", state_path=tmp_path / "stops.json")
+        targets = TakeProfitMonitor("http://b", "k", state_path=tmp_path / "targets.json")
+        monkeypatch.setattr(m.state, "stop_loss_monitor", stops)
+        monkeypatch.setattr(m.state, "take_profit_monitor", targets)
+
+        class _Prices:
+            def __init__(self, price: float) -> None:
+                self._price = price
+
+            def get_price(self, _symbol: str) -> float:
+                return self._price
+
+        async def _quiet(*_a, **_k) -> None:
+            return None
+
+        class _DayTrades:
+            def record_close(self, _symbol: str) -> None:
+                return None
+
+        monkeypatch.setattr(m, "_notify_smart", _quiet)
+        monkeypatch.setattr(m, "_day_trades", lambda: _DayTrades())
+        return m, stops, targets, _Prices
+
+    @pytest.mark.asyncio
+    async def test_a_fired_stop_also_clears_the_take_profit_record(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        m, stops, targets, prices = self._monitors(tmp_path, monkeypatch)
+        stops.register(_stop())
+        targets.register(_target())
+
+        async def confirmed(_record) -> bool:
+            return True
+
+        monkeypatch.setattr(stops, "_trigger_exit", confirmed)
+        monkeypatch.setattr(m, "_price_source", lambda: prices(190.0))
+
+        await m._run_stop_loss_check()
+
+        assert stops.get("NVDA") is None
+        assert targets.get("NVDA") is None, (
+            "the orphaned target would fire later on price alone"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_hit_target_also_clears_the_stop_record(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        m, stops, targets, prices = self._monitors(tmp_path, monkeypatch)
+        stops.register(_stop())
+        targets.register(_target())
+
+        async def confirmed(_record) -> bool:
+            return True
+
+        monkeypatch.setattr(targets, "_trigger_close", confirmed)
+        monkeypatch.setattr(m, "_price_source", lambda: prices(230.0))
+
+        await m._run_take_profit_check()
+
+        assert targets.get("NVDA") is None
+        assert stops.get("NVDA") is None, (
+            "the orphaned stop would book a phantom loss on the next dip"
+        )

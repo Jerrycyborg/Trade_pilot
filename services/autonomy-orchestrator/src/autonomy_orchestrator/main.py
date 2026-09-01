@@ -1527,6 +1527,22 @@ async def _run_reconciliation() -> None:
         )
 
 
+def _clear_risk_records(symbol: str) -> None:
+    """Both risk records for a position that just closed, whoever closed it.
+
+    Found by the post-fix orchestrator drill: the stop fired, closed the
+    position, and removed its own record — while the take-profit record for
+    the same dead position stayed on file. An orphaned record triggers on
+    price alone: it books phantom P&L into the monthly loss/profit ceilings,
+    burns a PDT day-trade slot, and sends a close for a position that no
+    longer exists. remove() tolerates a record already gone, so clearing both
+    is safe from every exit path.
+    """
+    for monitor in (state.stop_loss_monitor, state.take_profit_monitor):
+        if monitor is not None:
+            monitor.remove(symbol)
+
+
 async def _run_stop_loss_check() -> None:
     if state.stop_loss_monitor is None:
         return
@@ -1538,6 +1554,7 @@ async def _run_stop_loss_check() -> None:
         return
     logger.info("StopLossMonitor triggered exits for: %s", triggered)
     for symbol in triggered:
+        _clear_risk_records(symbol)
         # Attribute the actual loss. Adding a flat constant per stop meant the
         # monthly limit tripped after a fixed number of stops rather than at a
         # real drawdown — and intraday fires stops far more often.
@@ -1574,6 +1591,7 @@ async def _run_take_profit_check() -> None:
     tracked = state.take_profit_monitor.records()
     triggered = await state.take_profit_monitor.check_all(prices)
     for symbol in triggered:
+        _clear_risk_records(symbol)
         # Book the gain actually achieved, not the target that was aimed at.
         _day_trades().record_close(symbol)
         realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
@@ -1883,6 +1901,7 @@ async def _process_exit_signals() -> int:
         if response.status_code not in (200, 201):
             continue
         closed += 1
+        _clear_risk_records(signal.symbol)
         _day_trades().record_close(signal.symbol)
         await _audit(
             AuditEvent(

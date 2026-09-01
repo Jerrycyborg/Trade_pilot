@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
 from contracts import CandidateAction, SignalCandidate, TechnicalSummaryContract, WorkerStatus
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from market_data import MarketDataSettings, build_ta_summary, get_fetcher
+from market_data import MarketDataSettings, build_ta_summary, fetch_bars, get_fetcher
 from market_data.fetcher import DataUnavailableError
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -51,6 +52,25 @@ if settings.worker_enabled:
     start_scheduler(app)
 
 
+def _market_snapshot(symbol: str):
+    """Bars + TA at the configured timeframe, or (None, []) when unobtainable.
+
+    Mirrors the worker's _get_market_snapshot: (None, []) sends the builder to
+    its documented no-data fallback, but only when the market genuinely cannot
+    be observed — never because nobody asked.
+    """
+    market_settings = MarketDataSettings()
+    try:
+        bars = fetch_bars(symbol, market_settings)
+    except Exception as exc:
+        logger.warning("Bar fetch failed for %s — signal falls back: %s", symbol, exc)
+        return None, []
+    if not bars:
+        return None, []
+    source = "intraday" if market_settings.is_intraday else "daily"
+    return build_ta_summary(symbol, bars, data_source=source), bars
+
+
 @app.post("/v1/signals/generate", response_model=SignalCandidate)
 async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
     """Generate a trading signal. Uses AI pipeline when ANTHROPIC_API_KEY is set."""
@@ -64,10 +84,17 @@ async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
         pipeline = AISignalPipeline()
         signal = await pipeline.generate(target_symbol)
     else:
-        signal = _build_deterministic_signal(target_symbol)
+        # The observed market, not the fallback: called bare, the builder
+        # never sees a bar and every request lands in its no-data fallback,
+        # which fabricates a direction from the symbol's name. The worker's
+        # path was fixed the same way; this endpoint had kept the old shape.
+        ta, bars = await asyncio.to_thread(_market_snapshot, target_symbol)
+        signal = _build_deterministic_signal(target_symbol, ta_summary=ta, bars=bars)
 
-    event_blackout = is_earnings_blackout(
-        target_symbol, blackout_days=settings.earnings_blackout_days
+    # On a thread: the calendar reaches yfinance synchronously and must not
+    # stall the event loop (same treatment as the worker and orchestrator).
+    event_blackout = await asyncio.to_thread(
+        is_earnings_blackout, target_symbol, blackout_days=settings.earnings_blackout_days
     )
     if event_blackout:
         logger.info("Earnings blackout active for %s — signal suppressed to HOLD", target_symbol)

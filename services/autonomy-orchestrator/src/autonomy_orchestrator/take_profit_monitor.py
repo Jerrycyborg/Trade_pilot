@@ -64,6 +64,10 @@ class TakeProfitMonitor:
     def get(self, symbol: str) -> TakeProfitRecord | None:
         return self._records.get(symbol.upper())
 
+    def remove(self, symbol: str) -> None:
+        self._records.pop(symbol.upper(), None)
+        save_records(self._state_path, self._records, "TakeProfitMonitor")
+
     def records(self) -> dict[str, TakeProfitRecord]:
         """Snapshot of tracked targets. check_all() removes them as they fire, so
         callers that need a fired record must take this first."""
@@ -95,8 +99,7 @@ class TakeProfitMonitor:
                         record.target_price,
                     )
                     if await self._trigger_close(record):
-                        self._records.pop(symbol, None)
-                        save_records(self._state_path, self._records, "TakeProfitMonitor")
+                        self.remove(symbol)
                         triggered.append(symbol)
             except Exception as exc:
                 logger.warning("Take-profit check failed for %s: %s", symbol, exc)
