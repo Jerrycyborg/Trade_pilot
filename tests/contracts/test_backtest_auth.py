@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
+import importlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,19 +11,12 @@ from fastapi.testclient import TestClient
 def _client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("INTERNAL_API_KEY", "test-internal-key")
     root = Path(__file__).resolve().parents[2]
-    module_path = (
-        root
-        / "services"
-        / "backtest-service"
-        / "src"
-        / "backtest_service"
-        / "main.py"
-    )
-    spec = importlib.util.spec_from_file_location("backtest_auth_main", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Unable to load backtest service")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    service_src = root / "services" / "backtest-service" / "src"
+    sys.path.insert(0, str(service_src))
+    try:
+        module = importlib.import_module("backtest_service.main")
+    finally:
+        sys.path.remove(str(service_src))
     return TestClient(module.app)
 
 
