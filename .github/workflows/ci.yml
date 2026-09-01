@@ -25,8 +25,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
       - run: uv sync --frozen --all-packages
@@ -50,8 +50,8 @@ jobs:
       TEST_LIFECYCLE_POSTGRES_URL: postgresql+psycopg://postgres:ci-postgres-password@localhost:5432/trading_stack
       LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:ci-postgres-password@localhost:5432/trading_stack
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
       - run: uv sync --frozen --all-packages
@@ -90,7 +90,7 @@ jobs:
     # migrations, and routes an order to the paper broker and nowhere else.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Build and start the stack
         run: docker compose up -d --build --wait postgres migrate execution-service
@@ -102,6 +102,21 @@ jobs:
         run: |
           docker compose exec -T postgres \
             psql -U postgres -d trading_stack -c "\dt lifecycle.*"
+
+      - name: Missing or invalid authentication places no order
+        run: |
+          for supplied_key in "" "wrong-key"; do
+            args=()
+            if [ -n "$supplied_key" ]; then
+              args=(-H "X-Internal-Key: $supplied_key")
+            fi
+            code=$(curl -sS -o /tmp/auth-body.json -w '%{http_code}' \
+              -X POST http://localhost:8002/v1/orders \
+              -H "Content-Type: application/json" "${args[@]}" \
+              -d '{"signal_id":"ci-auth","symbol":"AAPL","side":"BUY","qty":1,
+                   "order_type":"MARKET"}')
+            test "$code" = "401"
+          done
 
       - name: An unregistered sleeve places no order
         # The roster refuses anything it has not admitted, so a stack that has
