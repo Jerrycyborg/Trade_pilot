@@ -99,6 +99,15 @@ class PointInTimeArchive:
             "sentiment_observations",
         )
 
+    def headlines(self, symbol: str) -> list[dict[str, Any]]:
+        """Headlines fetched by `as_of`, oldest first — what was in the news
+        record at the moment, not what is in the news now."""
+        return self._safe(
+            lambda: self._journal.headlines_as_of(symbol, self._as_of),
+            f"headlines_as_of({symbol})",
+            "headline_observations",
+        )
+
     def research(self, symbol: str) -> list[dict[str, Any]]:
         """Research reports observed by `as_of`, oldest first.
 

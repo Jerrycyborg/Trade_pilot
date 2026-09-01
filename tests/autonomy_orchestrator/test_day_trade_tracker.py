@@ -8,7 +8,7 @@ fourth.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -202,13 +202,20 @@ class TestRollingWindow:
 
 
 def _today_at(hour_utc: int) -> datetime:
-    """A moment in the current session.
+    """A moment in the current session, minutes ago, ordered by the hour asked.
 
     Persistence tests must use current dates: loading prunes history well
     outside the window, so a 2024 fixture would correctly be discarded and the
     test would be asserting the wrong thing.
+
+    Deliberately NOT `now().replace(hour=...)`: between 00:00 UTC and the US
+    session rollover, "today at 15:00 UTC" is a moment in the *next* session,
+    and the rolling window (which ends at the current session) correctly
+    excludes it — so the suite went red every night at UTC midnight. Anchoring
+    minutes behind `now` keeps every fixture inside the session `now` is in,
+    while the hour argument still orders opens before closes.
     """
-    return datetime.now(timezone.utc).replace(hour=hour_utc, minute=0, microsecond=0)
+    return datetime.now(timezone.utc) - timedelta(minutes=24 - hour_utc)
 
 
 class TestPersistence:

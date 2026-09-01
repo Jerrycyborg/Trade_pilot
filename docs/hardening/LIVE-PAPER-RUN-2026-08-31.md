@@ -200,3 +200,16 @@ JOURNAL_PATH=<run>/state/journal.db \
   VETO_WINDOW_HOURS=336 VETO_MIN_ARCHIVED_BARS=30 \
   uv run python scripts/specialist_report.py --symbols AAPL,MSFT,NVDA --timeframe 1d
 ```
+
+## Post-run: the specialist roster completed
+
+The run's L1 read-back reported "2 of 5 roles have a point-in-time archive"
+— the finding that phase exists to produce. In the nights after the run all
+three blocked roles were unblocked the way the roster itself prescribed:
+sentiment scores, research reports and fetched headlines now land in
+append-only journal archives with their observed-at moments (the serving
+caches are unchanged — they hold the current answer; the archives hold the
+sequence of answers), and SentimentSpecialist, FundamentalsSpecialist and
+NewsSpecialist read only through the point-in-time seam. All five specified
+roles now report, each still declaring unavailability when its archive holds
+nothing for the moment in question.

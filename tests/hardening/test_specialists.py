@@ -294,24 +294,27 @@ class TestTheRosterIsHonestAboutWhatItCannotDo:
         ]
 
     def test_the_unarchived_roles_name_why_and_what_is_needed(self) -> None:
-        """Sentiment and fundamentals left this list when their sources
-        started journalling into append-only archives; news still has no
-        point-in-time store to read."""
+        """Every specified role now has a point-in-time archive — sentiment,
+        fundamentals and news left this list one by one as their sources
+        started journalling into append-only archives. The class stays for
+        the next role someone specifies before its storage exists."""
         blocked = [s for s in default_roster() if isinstance(s, UnarchivedRole)]
-        assert {s.role for s in blocked} == {"news"}
-        for role in blocked:
-            assert role.needed
+        assert blocked == []
 
     def test_an_unarchived_role_produces_no_claims(self, journal) -> None:
         """Rather than reading the live source, which would be worse than
         producing nothing: an assessment 'as of' a past moment built from
         today's data is invisible leakage."""
-        news = next(s for s in default_roster() if s.role == "news")
-        assessment = assess_at(news, journal, SYMBOL, datetime.now(timezone.utc))
+        stub = UnarchivedRole(
+            "options_flow",
+            "no options archive: nothing stores the chain with an observed-at time",
+            needed="an options store with observed_at, written on fetch",
+        )
+        assessment = assess_at(stub, journal, SYMBOL, datetime.now(timezone.utc))
 
         assert assessment.claims == []
         assert "observed-at" in assessment.unavailable[0]
-        assert assessment.produced_by == "unavailable:news"
+        assert assessment.produced_by == "unavailable:options_flow"
 
     def test_the_report_leads_with_how_many_roles_have_an_archive(
         self, journal, archive_start
@@ -320,8 +323,8 @@ class TestTheRosterIsHonestAboutWhatItCannotDo:
         report = build_report(journal, [SYMBOL])
 
         assert report["roles"]["specified"] == 5
-        assert report["roles"]["with_an_archive"] == 4
-        assert set(report["roles"]["blocked"]) == {"news"}
+        assert report["roles"]["with_an_archive"] == 5
+        assert report["roles"]["blocked"] == {}
         assert report["reproducibility"]["all_reproducible"] is True
 
 
@@ -422,10 +425,10 @@ class TestTheSentimentRoleReadsTheArchive:
         )
         assert assessment.unavailable
 
-    def test_the_roster_now_supports_three_roles(self, journal) -> None:
+    def test_the_roster_supports_every_specified_role(self, journal) -> None:
         report = build_report(journal, [SYMBOL], check_reproducibility=False)
-        assert report["roles"]["with_an_archive"] == 4
-        assert set(report["roles"]["blocked"]) == {"news"}
+        assert report["roles"]["with_an_archive"] == 5
+        assert report["roles"]["blocked"] == {}
 
 
 class TestTheFundamentalsRoleReadsTheArchive:
@@ -479,6 +482,61 @@ class TestTheFundamentalsRoleReadsTheArchive:
         moment = datetime.now(timezone.utc) - timedelta(minutes=5)
         self._record(journal, "bullish")
         assessment = FundamentalsSpecialist().assess(
+            PointInTimeArchive(journal, moment), SYMBOL
+        )
+        assert assessment.unavailable
+
+
+class TestTheNewsRoleReadsTheArchive:
+    """News was the last blocked role: headlines flowed straight into a
+    sentiment score and vanished. The role reports coverage from the headline
+    archive — flow is context, so every claim is neutral — and a headline
+    fetched after the moment in question does not exist for it."""
+
+    def _record(self, journal, headlines, symbol=SYMBOL):
+        journal.record_headlines(
+            symbol, [{"headline": h} for h in headlines], source="test"
+        )
+
+    def test_archived_headlines_make_a_neutral_flow_claim(self, journal) -> None:
+        from specialists import NewsSpecialist
+
+        self._record(journal, ["A beats estimates", "A raises guidance"])
+        assessment = NewsSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert not assessment.unavailable
+        claim = assessment.claims[0]
+        assert claim.stance == "neutral"
+        assert claim.measure == 2.0
+        assert claim.evidence[0].source == "headline_observations"
+
+    def test_heavy_flow_is_named(self, journal) -> None:
+        from specialists import NewsSpecialist
+
+        self._record(journal, [f"headline {i}" for i in range(9)])
+        assessment = NewsSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert "heavy" in assessment.claims[0].statement
+
+    def test_no_archived_headlines_is_unavailability(self, journal) -> None:
+        from specialists import NewsSpecialist
+
+        assessment = NewsSpecialist().assess(
+            PointInTimeArchive(journal, datetime.now(timezone.utc)), SYMBOL
+        )
+        assert assessment.unavailable
+        assert not assessment.claims
+
+    def test_a_headline_fetched_after_the_moment_does_not_exist_for_it(
+        self, journal
+    ) -> None:
+        from specialists import NewsSpecialist
+
+        moment = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self._record(journal, ["late-breaking news"])
+        assessment = NewsSpecialist().assess(
             PointInTimeArchive(journal, moment), SYMBOL
         )
         assert assessment.unavailable

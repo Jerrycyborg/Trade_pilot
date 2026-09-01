@@ -1,19 +1,14 @@
 """The typed roles from ADR 0001, and which of them the archive can support.
 
-Five roles are specified. Four can be built today — market and technical from
-the bar archive, sentiment and fundamentals unblocked when their sources
-started journalling every computed score and every generated report into
-append-only archives. The remaining one is declared here as unavailable, with
-the specific reason it is blocked, because that is L1's real finding and
-deleting it from the table would hide it:
-
-- **News** has no headline archive. Nothing stores headlines with an
-  observed-at time, so there is no way to ask what was known at a moment.
-
-Each of those could be made to produce output today by reading the live source
-instead. That would be worse than producing nothing: an assessment "as of" last
-Tuesday built from today's sentiment is the exact leakage the archive exists to
-prevent, and it would be invisible in the output.
+Five roles are specified, and all five now have a point-in-time archive to
+read: market and technical from the bar archive, and sentiment, fundamentals
+and news unblocked one by one as their sources started journalling every
+computed score, generated report and fetched headline into append-only
+archives. UnarchivedRole remains for the next role someone specifies before
+its storage exists: declaring the gap beats reading the live source, because
+an assessment "as of" last Tuesday built from today's data is the exact
+leakage the archive exists to prevent, and it would be invisible in the
+output.
 """
 
 from __future__ import annotations
@@ -427,6 +422,74 @@ class FundamentalsSpecialist(_Base):
         )
 
 
+NEWS_HEAVY_FLOW = 8
+"""Distinct archived headlines in the window above which coverage is heavy."""
+
+
+class NewsSpecialist(_Base):
+    """News coverage from the headline archive: what was in the record, when.
+
+    Deliberately modest. Judging whether a headline is good or bad news is
+    the sentiment role's job (and the scores it reads were computed from
+    these same headlines); this role reports the *flow* — how much coverage
+    the archive holds for the moment in question, and what the most recent
+    item said — so a reader of the argument sees the news context the other
+    roles were formed under. All claims are neutral: coverage intensity is
+    context, not a side.
+    """
+
+    role = "news"
+    input_scope = ("headline_observations",)
+
+    def assess(self, archive: PointInTimeArchive, symbol: str) -> Assessment:
+        rows = archive.headlines(symbol)
+        if not rows:
+            return self._blank(
+                archive,
+                symbol,
+                "no archived headlines inside the lookback window",
+            )
+
+        distinct = {r["headline"] for r in rows}
+        latest = rows[-1]
+        evidence = (
+            EvidenceRef(
+                source="headline_observations",
+                detail=f"headlines_as_of({symbol}) -> {len(rows)} rows",
+                value={
+                    "distinct": len(distinct),
+                    "latest": str(latest.get("headline"))[:200],
+                    "latest_source": latest.get("source"),
+                },
+            ),
+        )
+        flow = (
+            "heavy — the symbol is in the news"
+            if len(distinct) >= NEWS_HEAVY_FLOW
+            else "light"
+        )
+        claims = [
+            Claim(
+                statement=(
+                    f"archived news flow is {flow}: {len(distinct)} distinct "
+                    f"headline(s) in the window"
+                ),
+                stance="neutral",
+                measure=float(len(distinct)),
+                threshold=float(NEWS_HEAVY_FLOW),
+                evidence=evidence,
+            )
+        ]
+        return Assessment(
+            role=self.role,
+            symbol=symbol,
+            as_of=archive.as_of,
+            produced_by=self.produced_by,
+            claims=claims,
+            queries=[q.to_dict() for q in archive.queries],
+        )
+
+
 class UnarchivedRole(_Base):
     """A role ADR 0001 specifies that has no point-in-time archive to read.
 
@@ -454,12 +517,7 @@ def default_roster() -> list[Specialist]:
     return [
         MarketSpecialist(),
         TechnicalSpecialist(),
-        UnarchivedRole(
-            "news",
-            "no headline archive: nothing stores headlines with an observed-at "
-            "time, so there is no moment to ask about",
-            needed="a headline store with observed_at, written on fetch",
-        ),
+        NewsSpecialist(),
         SentimentSpecialist(),
         FundamentalsSpecialist(),
     ]

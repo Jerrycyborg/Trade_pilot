@@ -60,3 +60,28 @@ async def test_an_unwritable_archive_does_not_block_the_score(monkeypatch) -> No
         assert result.symbol == "NVDA"
     finally:
         reset_journal(None)
+
+
+def test_fetched_headlines_are_archived_with_provider_stamps() -> None:
+    """_archive_headlines is the write-on-fetch seam for the news archive:
+    provider timestamps are kept when parseable, garbage stamps degrade to
+    None rather than dropping the headline."""
+    from datetime import datetime, timezone
+
+    from journal import get_journal
+    from sentiment_aggregator.main import _archive_headlines
+
+    _archive_headlines(
+        "NVDA",
+        [
+            {"headline": "NVDA beats estimates", "published_at": "2026-08-31T14:00:00Z"},
+            {"headline": "NVDA raises guidance", "published_at": "not a date"},
+        ],
+        source="newsapi",
+    )
+    rows = get_journal().headlines_as_of("NVDA", datetime.now(timezone.utc))
+    assert [r["headline"] for r in rows] == [
+        "NVDA beats estimates", "NVDA raises guidance",
+    ]
+    assert rows[0]["published_at"] is not None
+    assert rows[1]["published_at"] is None

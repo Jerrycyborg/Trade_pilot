@@ -146,6 +146,30 @@ class SentimentObservation(Base):
     """When this system computed it. The as-of cutoff reads against this."""
 
 
+class HeadlineObservation(Base):
+    """One headline as this system saw it, stamped with when it saw it.
+
+    Written on fetch: headlines used to flow straight from the provider into
+    a sentiment score and vanish, so there was no way to ask what was in the
+    news about a symbol at any past moment — the news role's blocker.
+    """
+
+    __tablename__ = "headline_observations"
+    __table_args__ = (Index("ix_headline_symbol_observed", "symbol", "observed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """The provider's own stamp, when it supplied a parseable one."""
+
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    """When this system fetched it. The as-of cutoff reads against this."""
+
+
 class ResearchObservation(Base):
     """One generated research report, as the system held it when generated.
 

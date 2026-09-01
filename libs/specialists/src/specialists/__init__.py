@@ -23,6 +23,7 @@ from .reproduce import ReproductionResult, assess_at, reproduce
 from .roles import (
     FundamentalsSpecialist,
     MarketSpecialist,
+    NewsSpecialist,
     SentimentSpecialist,
     Specialist,
     TechnicalSpecialist,
@@ -39,6 +40,7 @@ __all__ = [
     "EvidenceRef",
     "FundamentalsSpecialist",
     "MarketSpecialist",
+    "NewsSpecialist",
     "PointInTimeArchive",
     "Query",
     "ReproductionResult",

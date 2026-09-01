@@ -34,6 +34,7 @@ from .models import (
     Base,
     Decision,
     ExecutionQuality,
+    HeadlineObservation,
     PriceObservation,
     ResearchObservation,
     SentimentObservation,
@@ -454,6 +455,75 @@ class Journal:
                 ]
         except Exception as exc:
             logger.warning("Sentiment read failed: %s", exc)
+            return []
+
+    def record_headlines(
+        self,
+        symbol: str,
+        headlines: list[dict[str, Any]],
+        source: str = "",
+    ) -> None:
+        """Archive fetched headlines, append-only, stamped with now.
+
+        Each item: {"headline": str, "published_at": datetime | None}. Written
+        on fetch, per the roster's own requirement — a headline that only ever
+        flowed into a score cannot be asked about afterwards.
+        """
+        if not self.enabled:
+            return
+        observed_at = datetime.now(timezone.utc)
+        for item in headlines:
+            text = str(item.get("headline") or "").strip()
+            if not text:
+                continue
+            published = item.get("published_at")
+            self._insert(
+                HeadlineObservation,
+                {
+                    "symbol": symbol.upper(),
+                    "headline": text[:1000],
+                    "source": str(source)[:32],
+                    "published_at": _utc(published) if published else None,
+                    "observed_at": observed_at,
+                },
+            )
+
+    def headlines_as_of(
+        self,
+        symbol: str,
+        as_of: datetime,
+        window_days: float = 3.0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Headlines fetched by `as_of`, oldest first, windowed."""
+        if not self.enabled:
+            return []
+        cutoff = _utc(as_of)
+        window_start = cutoff - timedelta(days=window_days)
+        try:
+            with self._session_factory() as session:  # type: ignore[misc]
+                rows = session.scalars(
+                    select(HeadlineObservation)
+                    .where(
+                        HeadlineObservation.symbol == symbol.upper(),
+                        HeadlineObservation.observed_at <= cutoff,
+                        HeadlineObservation.observed_at >= window_start,
+                    )
+                    .order_by(HeadlineObservation.observed_at)
+                    .limit(limit)
+                ).all()
+                return [
+                    {
+                        "symbol": r.symbol,
+                        "headline": r.headline,
+                        "source": r.source,
+                        "published_at": _read_utc(r.published_at) if r.published_at else None,
+                        "observed_at": _read_utc(r.observed_at),
+                    }
+                    for r in rows
+                ]
+        except Exception as exc:
+            logger.warning("Headline read failed: %s", exc)
             return []
 
     def record_research(

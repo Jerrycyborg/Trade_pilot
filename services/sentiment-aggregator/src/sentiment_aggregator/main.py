@@ -48,6 +48,32 @@ async def get_batch(
     ]
 
 
+def _archive_headlines(symbol: str, items: list[dict], source: str) -> None:
+    """Write fetched headlines to the point-in-time archive, on fetch.
+
+    Headlines used to flow straight into a score and vanish, so nothing could
+    ask what was in the news about a symbol at a past moment — the news
+    role's blocker. Provider timestamps are kept when parseable; the archive
+    stamps its own observed_at either way. Best-effort: an unwritable archive
+    never blocks scoring.
+    """
+    try:
+        from journal import get_journal
+
+        cleaned = []
+        for item in items:
+            published = item.get("published_at")
+            if isinstance(published, str):
+                try:
+                    published = datetime.fromisoformat(published.replace("Z", "+00:00"))
+                except ValueError:
+                    published = None
+            cleaned.append({"headline": item.get("headline"), "published_at": published})
+        get_journal().record_headlines(symbol, cleaned, source=source)
+    except Exception as exc:
+        logger.warning("Headline archive write failed for %s: %s", symbol, exc)
+
+
 async def _fetch_sentiment(symbol: str) -> SentimentScore:
     now = datetime.now(timezone.utc)
     if symbol in _cache and _cache_expiry[symbol] > now:
@@ -63,12 +89,21 @@ async def _fetch_sentiment(symbol: str) -> SentimentScore:
                     params={"q": symbol, "sortBy": "publishedAt", "pageSize": 5},
                     headers={"x-api-key": settings.newsapi_key},
                 )
-                for item in response.json().get("articles", []):
+                articles = response.json().get("articles", [])
+                for item in articles:
                     texts.append(
                         " ".join(filter(None, [item.get("title"), item.get("description")]))
                     )
                 if response.status_code == 200:
                     sources.append("newsapi")
+                    _archive_headlines(
+                        symbol,
+                        [
+                            {"headline": a.get("title"), "published_at": a.get("publishedAt")}
+                            for a in articles
+                        ],
+                        source="newsapi",
+                    )
             except Exception:
                 pass
         if settings.alphavantage_key:
@@ -81,10 +116,16 @@ async def _fetch_sentiment(symbol: str) -> SentimentScore:
                         "apikey": settings.alphavantage_key,
                     },
                 )
-                for item in response.json().get("feed", [])[:5]:
+                feed = response.json().get("feed", [])[:5]
+                for item in feed:
                     texts.append(" ".join(filter(None, [item.get("title"), item.get("summary")])))
                 if response.status_code == 200:
                     sources.append("alphavantage")
+                    _archive_headlines(
+                        symbol,
+                        [{"headline": f.get("title")} for f in feed],
+                        source="alphavantage",
+                    )
             except Exception:
                 pass
         if settings.etoro_api_key and settings.etoro_user_key:

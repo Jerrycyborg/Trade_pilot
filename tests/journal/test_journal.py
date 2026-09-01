@@ -441,3 +441,39 @@ class TestResearchArchive:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
         archive.record_research("NVDA", sentiment="bullish")
         assert archive.research_as_of("NVDA", cutoff) == []
+
+
+class TestHeadlineArchive:
+    """Headlines used to flow straight into a score and vanish; this is the
+    store, written on fetch, that lets any past moment be asked about."""
+
+    def test_headlines_land_with_their_provenance(self, archive: Journal) -> None:
+        from datetime import datetime, timezone
+
+        stamp = datetime(2026, 8, 31, 14, 0, tzinfo=timezone.utc)
+        archive.record_headlines(
+            "NVDA",
+            [
+                {"headline": "NVDA beats estimates", "published_at": stamp},
+                {"headline": "", "published_at": None},  # blank rows are refused
+                {"headline": "NVDA raises guidance"},
+            ],
+            source="newsapi",
+        )
+        rows = archive.headlines_as_of("NVDA", datetime.now(timezone.utc))
+        assert [r["headline"] for r in rows] == [
+            "NVDA beats estimates", "NVDA raises guidance",
+        ]
+        assert rows[0]["source"] == "newsapi"
+        assert rows[0]["published_at"] == stamp
+        assert rows[1]["published_at"] is None
+        assert rows[0]["observed_at"].tzinfo is not None
+
+    def test_a_headline_fetched_later_is_absent_from_an_earlier_moment(
+        self, archive: Journal
+    ) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        archive.record_headlines("NVDA", [{"headline": "late news"}])
+        assert archive.headlines_as_of("NVDA", cutoff) == []
