@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, HTTPException
+from contracts.auth import verify_internal_key
+from fastapi import Depends, FastAPI, HTTPException
 from market_data import MarketDataSettings
 from market_data.fetcher import DataUnavailableError, get_fetcher
 from market_data.models import OHLCVBar
@@ -82,7 +83,10 @@ def _bars_or_422(request: BacktestRequest) -> list[OHLCVBar]:
 
 
 @app.post("/backtest", response_model=BacktestResult)
-async def backtest(request: BacktestRequest) -> BacktestResult:
+async def backtest(
+    request: BacktestRequest,
+    _: None = Depends(verify_internal_key),
+) -> BacktestResult:
     """Run a backtest for the given symbol, timeframe and cost assumptions."""
     bars = _bars_or_422(request)
     try:
@@ -92,7 +96,10 @@ async def backtest(request: BacktestRequest) -> BacktestResult:
 
 
 @app.post("/backtest/cost-sensitivity", response_model=CostSensitivityResult)
-async def cost_sensitivity(request: BacktestRequest) -> CostSensitivityResult:
+async def cost_sensitivity(
+    request: BacktestRequest,
+    _: None = Depends(verify_internal_key),
+) -> CostSensitivityResult:
     """Re-run across a ladder of spreads to find where the edge disappears."""
     bars = _bars_or_422(request)
     try:
@@ -113,7 +120,10 @@ class ValidationRequest(BacktestRequest):
 
 
 @app.post("/backtest/walk-forward", response_model=WalkForwardResult)
-async def walk_forward_endpoint(request: ValidationRequest) -> WalkForwardResult:
+async def walk_forward_endpoint(
+    request: ValidationRequest,
+    _: None = Depends(verify_internal_key),
+) -> WalkForwardResult:
     """Choose parameters on past data, judge them on the data that followed.
 
     Read `sharpe_degradation` and `deflated_sharpe_ratio` before anything else.
@@ -138,6 +148,7 @@ async def walk_forward_endpoint(request: ValidationRequest) -> WalkForwardResult
 @app.post("/backtest/parameter-sensitivity", response_model=ParameterSensitivityResult)
 async def parameter_sensitivity_endpoint(
     request: ValidationRequest,
+    _: None = Depends(verify_internal_key),
 ) -> ParameterSensitivityResult:
     """Score the whole grid and report the shape of the surface.
 
@@ -186,7 +197,10 @@ class PortfolioRequest(BacktestRequest):
 
 
 @app.post("/backtest/portfolio", response_model=PortfolioResult)
-async def portfolio_endpoint(request: PortfolioRequest) -> PortfolioResult:
+async def portfolio_endpoint(
+    request: PortfolioRequest,
+    _: None = Depends(verify_internal_key),
+) -> PortfolioResult:
     """Simulate each sleeve, combine them, and report whether combining helped.
 
     Read `max_correlation` and `diversification_ratio` before the return. Two
