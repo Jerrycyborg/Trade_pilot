@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from contracts import SentimentScore
+from contracts.cors import cors_origins
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from contracts.cors import cors_origins
 
 from .config import settings
 

@@ -5,9 +5,9 @@ from collections import deque
 import httpx
 from contracts import NotificationEvent
 from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contracts.cors import cors_origins
 
 from .config import settings
 

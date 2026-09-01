@@ -20,9 +20,9 @@ from contracts import (
 )
 from contracts.auth import verify_internal_key
 from contracts.sanitize import sanitize_symbol
+from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from contracts.cors import cors_origins
 from lifecycle.routing import assert_not_live
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError

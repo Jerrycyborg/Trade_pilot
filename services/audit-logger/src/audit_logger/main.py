@@ -6,9 +6,9 @@ from uuid import uuid4
 
 from contracts import AuditEvent, AuditLogResponse
 from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from contracts.cors import cors_origins
 from sqlalchemy import select
 
 from .database import Base, SessionLocal, engine

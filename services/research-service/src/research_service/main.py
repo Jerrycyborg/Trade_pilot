@@ -8,9 +8,9 @@ import logging
 from contracts import ResearchReport
 from contracts.auth import verify_internal_key
 from contracts.sanitize import sanitize_symbol
+from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from contracts.cors import cors_origins
 from pydantic import BaseModel
 
 from .cache import ResearchCache, _to_report

@@ -24,9 +24,9 @@ from contracts.execution import (
 )
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
+from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from contracts.cors import cors_origins
 from lifecycle import DEFAULT_LIVE_STRATEGY
 from lifecycle.health import run_health_sweep
 from lifecycle.service import LifecycleService, get_lifecycle_service
