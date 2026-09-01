@@ -102,6 +102,28 @@ class BrokerRouter:
     def live_adapter_available(self) -> bool:
         return self._live_adapter() is not None
 
+    def operating_state(self, account_id: str = "default") -> str:
+        """STARTING/RECONCILING/EXIT_ONLY/READY for operator health checks."""
+        store = self._resolve_store()
+        if store is None:
+            return "STARTING" if self._store_factory is not None else "PAPER_ONLY"
+        try:
+            if not store.live_mode_enabled(account_id):
+                return "READY"
+            halt = store.reconciliation_state("live", "live", account_id)
+        except Exception:
+            return "EXIT_ONLY"
+        if halt.last_checked_at is None:
+            return "RECONCILING"
+        if halt.halted:
+            return "EXIT_ONLY"
+        checked = halt.last_checked_at
+        checked = checked if checked.tzinfo else checked.replace(tzinfo=timezone.utc)
+        max_age = max(30, int(os.getenv("RECONCILE_MAX_AGE_SECONDS", "600")))
+        if (datetime.now(timezone.utc) - checked).total_seconds() > max_age:
+            return "EXIT_ONLY"
+        return "READY"
+
     def _live_mode_enabled(self, account_id: str) -> bool:
         if self._store is None:
             return False

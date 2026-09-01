@@ -1523,44 +1523,62 @@ def _realized_pnl(record, exit_price: float | None) -> float | None:
 
 
 async def _run_reconciliation() -> None:
-    """Scheduled ledger-vs-broker check, independent of the trading cycle.
-
-    Runs on its own timer so a break is noticed even when no signals are being
-    produced — a position that appears at the broker outside the loop is exactly
-    the case worth catching.
-    """
+    """Persist the broker-vs-ledger latch in the shared lifecycle authority."""
     result = await _reconciler().check()
-    if result.breaks:
+    store = _lifecycle().store
+    if store is not None:
+        try:
+            live = store.live_mode_enabled(settings.account_id)
+            environment = "live" if live else "paper"
+            durable = store.record_reconciliation(
+                broker=environment,
+                environment=environment,
+                ok=result.ok,
+                breaks=len(result.breaks),
+                error=result.error or "",
+                dependency_available=result.error is None,
+                account_id=settings.account_id,
+                now=result.checked_at,
+            )
+            result.consecutive_breaks = durable.consecutive_breaks
+            result.halted = durable.halted
+        except Exception as exc:
+            logger.exception("Could not persist reconciliation state: %s", exc)
+
+    if result.breaks or result.error:
         await _audit(
             AuditEvent(
                 event_type="reconciliation.break",
                 decision="ALERT",
-                reasoning="; ".join(b.describe() for b in result.breaks[:5]),
+                reasoning=(
+                    "; ".join(b.describe() for b in result.breaks[:5])
+                    or f"dependency_unavailable: {result.error}"
+                ),
                 metadata=result.to_dict(),
             )
         )
         _journal().record_decision(
             stage="reconcile",
             outcome="rejected" if result.halted else "skipped",
-            reason=f"{len(result.breaks)} position break(s)",
+            reason=(
+                f"{len(result.breaks)} position break(s)"
+                if result.breaks
+                else f"dependency unavailable: {result.error}"
+            ),
             inputs=result.to_dict(),
         )
 
 
-def _clear_risk_records(symbol: str) -> None:
-    """Both risk records for a position that just closed, whoever closed it.
-
-    Found by the post-fix orchestrator drill: the stop fired, closed the
-    position, and removed its own record — while the take-profit record for
-    the same dead position stayed on file. An orphaned record triggers on
-    price alone: it books phantom P&L into the monthly loss/profit ceilings,
-    burns a PDT day-trade slot, and sends a close for a position that no
-    longer exists. remove() tolerates a record already gone, so clearing both
-    is safe from every exit path.
-    """
+def _clear_risk_records(record: object) -> None:
+    """Remove only the sibling protection for the position that closed."""
     for monitor in (state.stop_loss_monitor, state.take_profit_monitor):
         if monitor is not None:
-            monitor.remove(symbol)
+            monitor.remove(
+                str(getattr(record, "symbol", "")),
+                strategy_id=str(getattr(record, "strategy_id", "") or ""),
+                account_id=str(getattr(record, "account_id", "default") or "default"),
+                position_id=str(getattr(record, "position_id", "") or ""),
+            )
 
 
 async def _run_stop_loss_check() -> None:
@@ -1573,13 +1591,18 @@ async def _run_stop_loss_check() -> None:
     if not triggered:
         return
     logger.info("StopLossMonitor triggered exits for: %s", triggered)
-    for symbol in triggered:
-        _clear_risk_records(symbol)
+    for key in triggered:
+        record = tracked.get(key)
+        if record is None:
+            logger.error("Triggered stop record %s disappeared before attribution", key)
+            continue
+        symbol = record.symbol.upper()
+        _clear_risk_records(record)
         # Attribute the actual loss. Adding a flat constant per stop meant the
         # monthly limit tripped after a fixed number of stops rather than at a
         # real drawdown — and intraday fires stops far more often.
         _day_trades().record_close(symbol)
-        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        realized = _realized_pnl(record, prices.get_price(symbol))
         if realized is None:
             logger.warning(
                 "Stop-loss on %s: position size unknown, loss not attributed to the monthly limit",
@@ -1610,11 +1633,16 @@ async def _run_take_profit_check() -> None:
     prices = _price_source()
     tracked = state.take_profit_monitor.records()
     triggered = await state.take_profit_monitor.check_all(prices)
-    for symbol in triggered:
-        _clear_risk_records(symbol)
+    for key in triggered:
+        record = tracked.get(key)
+        if record is None:
+            logger.error("Triggered target record %s disappeared before attribution", key)
+            continue
+        symbol = record.symbol.upper()
+        _clear_risk_records(record)
         # Book the gain actually achieved, not the target that was aimed at.
         _day_trades().record_close(symbol)
-        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        realized = _realized_pnl(record, prices.get_price(symbol))
         if realized is None:
             logger.warning(
                 "Take-profit on %s: position size unknown, gain not attributed to the "

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from uuid import uuid4
 
 from contracts import (
@@ -61,8 +62,14 @@ app.add_middleware(
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "execution-service"}
+def health() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "service": "execution-service",
+        "operating_state": router.operating_state(
+            os.getenv("TRADING_ACCOUNT_ID", "default")
+        ),
+    }
 
 
 @app.post("/v1/orders", response_model=ExecutionOrderResponse)

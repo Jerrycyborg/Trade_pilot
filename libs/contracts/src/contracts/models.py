@@ -288,8 +288,8 @@ class ExecutionOrderRequest(BaseModel):
 
     strategy_id: str = Field(default="ema_rsi_macd", min_length=1, max_length=128)
     """Required for live routing; the paper default keeps legacy simulations
-    readable while execution rejects an implicit identity on a live route. Execution routes on (strategy, symbol,
-    account); silently defaulting this field can route an order against a
+    readable while execution rejects an implicit identity on a live route.
+    Execution routes on (strategy, symbol, account); silently defaulting this field can route an order against a
     different sleeve than the one policy evaluated."""
 
     account_id: str = Field(default="default", min_length=1, max_length=128)

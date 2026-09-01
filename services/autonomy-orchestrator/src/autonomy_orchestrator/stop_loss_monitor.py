@@ -33,10 +33,12 @@ def load_records(path: Path | None, model: type[BaseModel], label: str) -> dict:
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return {
-            str(symbol).upper(): model.model_validate(row)
-            for symbol, row in dict(payload.get("records", {})).items()
-        }
+        records: dict[str, BaseModel] = {}
+        for stored_key, row in dict(payload.get("records", {})).items():
+            record = model.model_validate(row)
+            key = str(stored_key)
+            records[key if key.startswith("[") else key.upper()] = record
+        return records
     except Exception as exc:
         logger.error(
             "%s: state file %s unreadable (%s) — starting with no tracked "
@@ -92,18 +94,29 @@ class StopLossRecord(BaseModel):
     """The sleeve whose position this stop watches. Carried into the close
     request so the exit fill is journalled under the same scope the entry
     was — otherwise the position ledger never sees the exit."""
+    account_id: str = "default"
     created_at: datetime
 
 
-class StopLossMonitor:
-    """Client-side stop-loss polling monitor.
+def risk_record_key(record: BaseModel) -> str:
+    """Stable identity for one protected position."""
+    strategy = str(getattr(record, "strategy_id", "") or "")
+    symbol = str(getattr(record, "symbol", "")).upper()
+    if not strategy:
+        return symbol
+    return json.dumps(
+        [
+            str(getattr(record, "account_id", "default") or "default"),
+            strategy,
+            symbol,
+            str(getattr(record, "position_id", "") or ""),
+        ],
+        separators=(",", ":"),
+    )
 
-    Records persist to `state_path` when one is given: they used to live only
-    in this dict, so every orchestrator restart silently orphaned the stops of
-    every open position — the position survived in the broker, the thing
-    watching it did not. Found by the first orchestrator drill, which left a
-    pre-restart lot unwatched while a fresh lot's stop fired correctly.
-    """
+
+class StopLossMonitor:
+    """Durable stop protection keyed by account, sleeve, symbol and position."""
 
     def __init__(
         self, broker_url: str, internal_key: str, state_path: Path | str | None = None
@@ -116,95 +129,126 @@ class StopLossMonitor:
         )
         if self._stops:
             logger.info(
-                "StopLossMonitor: restored %d tracked stop(s) from %s: %s",
-                len(self._stops), self._state_path, sorted(self._stops),
+                "StopLossMonitor: restored %d tracked stop(s) from %s",
+                len(self._stops),
+                self._state_path,
             )
 
     def register(self, record: StopLossRecord) -> None:
-        """Add or overwrite stop for a symbol."""
-        self._stops[record.symbol.upper()] = record
+        key = risk_record_key(record)
+        self._stops[key] = record
         save_records(self._state_path, self._stops, "StopLossMonitor")
         logger.info(
-            "StopLossMonitor: registered stop for %s at %.4f (entry=%.4f)",
+            "StopLossMonitor: registered %s/%s/%s at %.4f",
+            record.account_id,
+            record.strategy_id or "legacy",
             record.symbol,
             record.stop_price,
-            record.entry_price,
         )
 
-    def get(self, symbol: str) -> StopLossRecord | None:
-        return self._stops.get(symbol.upper())
+    def get(
+        self,
+        symbol: str,
+        *,
+        strategy_id: str = "",
+        account_id: str = "default",
+        position_id: str = "",
+    ) -> StopLossRecord | None:
+        if strategy_id:
+            probe = StopLossRecord(
+                symbol=symbol,
+                entry_price=1.0,
+                stop_price=1.0,
+                position_id=position_id,
+                strategy_id=strategy_id,
+                account_id=account_id,
+                created_at=datetime.min,
+            )
+            return self._stops.get(risk_record_key(probe))
+        matches = [r for r in self._stops.values() if r.symbol.upper() == symbol.upper()]
+        return matches[0] if len(matches) == 1 else None
 
-    def remove(self, symbol: str) -> None:
-        self._stops.pop(symbol.upper(), None)
+    def remove(
+        self,
+        symbol: str,
+        *,
+        strategy_id: str = "",
+        account_id: str = "default",
+        position_id: str = "",
+    ) -> None:
+        if strategy_id:
+            probe = StopLossRecord(
+                symbol=symbol,
+                entry_price=1.0,
+                stop_price=1.0,
+                position_id=position_id,
+                strategy_id=strategy_id,
+                account_id=account_id,
+                created_at=datetime.min,
+            )
+            self._stops.pop(risk_record_key(probe), None)
+        else:
+            for key, record in list(self._stops.items()):
+                if record.symbol.upper() == symbol.upper():
+                    self._stops.pop(key, None)
+        save_records(self._state_path, self._stops, "StopLossMonitor")
+
+    def remove_key(self, key: str) -> None:
+        self._stops.pop(key, None)
         save_records(self._state_path, self._stops, "StopLossMonitor")
 
     def records(self) -> dict[str, StopLossRecord]:
-        """Snapshot of tracked stops. check_all() removes them as they fire, so
-        callers that need a fired record must take this first."""
         return dict(self._stops)
 
     async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
-        """
-        Read the current price for each tracked position. If it is at or below
-        the stop, close the position at the broker and return the symbol.
-        """
         triggered: list[str] = []
-        for symbol, record in list(self._stops.items()):
+        for key, record in list(self._stops.items()):
+            symbol = record.symbol.upper()
             try:
                 price = price_source.get_price(symbol)
                 if price is None:
-                    # A stop we cannot evaluate is a risk we cannot see.
-                    logger.warning("StopLossMonitor: no price for %s — stop not evaluated", symbol)
+                    logger.warning("StopLossMonitor: no price for %s", symbol)
                     continue
-                # A short's stop sits above its entry and fires on a rise.
-                # Testing only `price <= stop` leaves every short stop inert.
                 is_short = record.side.upper() == "SELL"
                 breached = (
                     float(price) >= record.stop_price
                     if is_short
                     else float(price) <= record.stop_price
                 )
-                if breached:
-                    logger.warning(
-                        "StopLossMonitor: stop triggered for %s %s (price=%.4f, stop=%.4f)",
-                        record.side,
+                if not breached:
+                    continue
+                logger.warning(
+                    "StopLossMonitor: stop triggered for %s %s "
+                    "(price=%.4f, stop=%.4f)",
+                    record.side,
+                    symbol,
+                    price,
+                    record.stop_price,
+                )
+                if await self._trigger_exit(record):
+                    triggered.append(key)
+                    self.remove_key(key)
+                else:
+                    logger.error(
+                        "StopLossMonitor: exit for %s failed; stop retained",
                         symbol,
-                        price,
-                        record.stop_price,
                     )
-                    if await self._trigger_exit(record):
-                        triggered.append(symbol)
-                        self.remove(symbol)
-                    else:
-                        # The close failed. Reporting it as triggered would book
-                        # a day trade and a realised loss for a position that is
-                        # still open, and dropping the stop would leave that
-                        # position with nothing watching it. Keep it tracked and
-                        # retry on the next check.
-                        logger.error(
-                            "StopLossMonitor: exit for %s failed — position still "
-                            "open, stop retained", symbol,
-                        )
             except Exception as exc:
                 logger.error("StopLossMonitor: error checking %s: %s", symbol, exc)
         return triggered
 
     async def _trigger_exit(self, record: StopLossRecord) -> bool:
-        """POST close request. `qty=0.0` means the broker should close the full position.
-
-        Returns whether the broker confirmed the close. Callers must not book a
-        realised loss or a day trade on a close that did not happen.
-        """
-        import os
         from uuid import uuid4
 
-        headers = {"X-Internal-Key": self._internal_key or os.environ.get("INTERNAL_API_KEY", "")}
+        key = self._internal_key or os.environ.get("INTERNAL_API_KEY", "")
+        headers = {"X-Internal-Key": key} if key else {}
         payload = {
             "signal_id": str(uuid4()),
             "symbol": record.symbol,
-            "qty": record.qty,
+            "qty": record.qty or None,
             "position_id": record.position_id,
-            "strategy_id": record.strategy_id,
+            "strategy_id": record.strategy_id or "ema_rsi_macd",
+            "account_id": record.account_id,
         }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -218,6 +262,8 @@ class StopLossMonitor:
                 return True
         except Exception as exc:
             logger.error(
-                "StopLossMonitor: failed to trigger exit for %s: %s", record.symbol, exc
+                "StopLossMonitor: failed to trigger exit for %s: %s",
+                record.symbol,
+                exc,
             )
             return False

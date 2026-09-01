@@ -10,7 +10,7 @@ from typing import Protocol
 import httpx
 from pydantic import BaseModel
 
-from .stop_loss_monitor import load_records, save_records
+from .stop_loss_monitor import load_records, risk_record_key, save_records
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +34,12 @@ class TakeProfitRecord(BaseModel):
     strategy_id: str = ""
     """The sleeve whose position this target watches — see StopLossRecord."""
     target_gain_usd: float = 20.0
+    account_id: str = "default"
     created_at: datetime
 
 
 class TakeProfitMonitor:
-    """Mirrors StopLossMonitor, restart durability included: a target that
-    lives only in process memory dies with the process while its position
-    does not."""
+    """Durable targets keyed by account, sleeve, symbol and position."""
 
     def __init__(
         self, broker_url: str, internal_key: str, state_path: Path | str | None = None
@@ -51,73 +50,103 @@ class TakeProfitMonitor:
         self._records: dict[str, TakeProfitRecord] = load_records(
             self._state_path, TakeProfitRecord, "TakeProfitMonitor"
         )
-        if self._records:
-            logger.info(
-                "TakeProfitMonitor: restored %d tracked target(s) from %s: %s",
-                len(self._records), self._state_path, sorted(self._records),
-            )
 
     def register(self, record: TakeProfitRecord) -> None:
-        self._records[record.symbol.upper()] = record
+        self._records[risk_record_key(record)] = record
         save_records(self._state_path, self._records, "TakeProfitMonitor")
 
-    def get(self, symbol: str) -> TakeProfitRecord | None:
-        return self._records.get(symbol.upper())
+    def get(
+        self,
+        symbol: str,
+        *,
+        strategy_id: str = "",
+        account_id: str = "default",
+        position_id: str = "",
+    ) -> TakeProfitRecord | None:
+        if strategy_id:
+            probe = TakeProfitRecord(
+                symbol=symbol,
+                entry_price=1.0,
+                target_price=1.0,
+                position_id=position_id,
+                strategy_id=strategy_id,
+                account_id=account_id,
+                created_at=datetime.min,
+            )
+            return self._records.get(risk_record_key(probe))
+        matches = [r for r in self._records.values() if r.symbol.upper() == symbol.upper()]
+        return matches[0] if len(matches) == 1 else None
 
-    def remove(self, symbol: str) -> None:
-        self._records.pop(symbol.upper(), None)
+    def remove(
+        self,
+        symbol: str,
+        *,
+        strategy_id: str = "",
+        account_id: str = "default",
+        position_id: str = "",
+    ) -> None:
+        if strategy_id:
+            probe = TakeProfitRecord(
+                symbol=symbol,
+                entry_price=1.0,
+                target_price=1.0,
+                position_id=position_id,
+                strategy_id=strategy_id,
+                account_id=account_id,
+                created_at=datetime.min,
+            )
+            self._records.pop(risk_record_key(probe), None)
+        else:
+            for key, record in list(self._records.items()):
+                if record.symbol.upper() == symbol.upper():
+                    self._records.pop(key, None)
+        save_records(self._state_path, self._records, "TakeProfitMonitor")
+
+    def remove_key(self, key: str) -> None:
+        self._records.pop(key, None)
         save_records(self._state_path, self._records, "TakeProfitMonitor")
 
     def records(self) -> dict[str, TakeProfitRecord]:
-        """Snapshot of tracked targets. check_all() removes them as they fire, so
-        callers that need a fired record must take this first."""
         return dict(self._records)
 
     async def check_all(self, price_source: PriceSourceProtocol) -> list[str]:
         triggered: list[str] = []
-        for symbol, record in list(self._records.items()):
+        for key, record in list(self._records.items()):
+            symbol = record.symbol.upper()
             try:
                 price = price_source.get_price(symbol)
                 if price is None:
-                    logger.warning(
-                        "TakeProfitMonitor: no price for %s — target not evaluated", symbol
-                    )
+                    logger.warning("TakeProfitMonitor: no price for %s", symbol)
                     continue
-                # A short takes profit as price falls, not rises.
                 is_short = record.side.upper() == "SELL"
                 reached = (
                     float(price) <= record.target_price
                     if is_short
                     else float(price) >= record.target_price
                 )
-                if reached:
-                    logger.info(
-                        "Take-profit triggered for %s %s: price=%.2f, target=%.2f",
-                        record.side,
-                        symbol,
-                        price,
-                        record.target_price,
-                    )
-                    if await self._trigger_close(record):
-                        self.remove(symbol)
-                        triggered.append(symbol)
+                if reached and await self._trigger_close(record):
+                    self.remove_key(key)
+                    triggered.append(key)
             except Exception as exc:
                 logger.warning("Take-profit check failed for %s: %s", symbol, exc)
         return triggered
 
     async def _trigger_close(self, record: TakeProfitRecord) -> bool:
+        import os
         from uuid import uuid4
 
         payload = {
             "signal_id": str(uuid4()),
             "symbol": record.symbol,
-            "qty": record.qty,
+            "qty": record.qty or None,
             "position_id": record.position_id,
-            "strategy_id": record.strategy_id,
+            "strategy_id": record.strategy_id or "ema_rsi_macd",
+            "account_id": record.account_id,
         }
+        key = self._key or os.environ.get("INTERNAL_API_KEY", "")
+        headers = {"X-Internal-Key": key} if key else {}
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                headers = {"X-Internal-Key": self._key} if self._key else {}
                 resp = await client.post(
                     f"{self._broker_url}/v1/orders/close",
                     json=payload,
@@ -127,5 +156,9 @@ class TakeProfitMonitor:
                 logger.info("Take-profit close submitted for %s", record.symbol)
                 return True
         except Exception as exc:
-            logger.error("Take-profit _trigger_close failed for %s: %s", record.symbol, exc)
+            logger.error(
+                "Take-profit _trigger_close failed for %s: %s",
+                record.symbol,
+                exc,
+            )
             return False
