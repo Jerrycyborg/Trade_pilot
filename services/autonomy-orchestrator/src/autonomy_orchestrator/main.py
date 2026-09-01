@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .config import settings
 from .day_trade_tracker import DayTradeTracker
+from .learning_worker import run_paper_learning_cycles
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
 from .reconciliation import Reconciler
 from .risk_engine import evaluate_risk
@@ -87,6 +88,8 @@ class OrchestratorState:
     day_trades: DayTradeTracker | None = None
     lifecycle: LifecycleService | None = None
     last_health_sweep: dict[str, object] | None = None
+    learning_running: bool = False
+    last_learning_summary: dict[str, object] | None = None
 
 
 state = OrchestratorState()
@@ -191,6 +194,17 @@ def _start_scheduler() -> None:
         coalesce=True,
         max_instances=1,
     )
+    if os.getenv("LEARNING_ENABLED", "false").lower() == "true":
+        scheduler.add_job(
+            _run_learning_cycles,
+            "interval",
+            seconds=max(3600, int(os.getenv("LEARNING_INTERVAL_SECONDS", "86400"))),
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
+            id="paper_learning_cycle",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -230,6 +244,35 @@ async def _run_health_sweep() -> dict[str, object]:
         )
     return state.last_health_sweep
 
+
+async def _run_learning_cycles() -> dict[str, object]:
+    """Run bounded offline learning; never transition or deploy a sleeve."""
+    if state.learning_running:
+        return {"status": "already_running"}
+    state.learning_running = True
+    try:
+        reports = await asyncio.to_thread(
+            run_paper_learning_cycles,
+            _lifecycle().store,
+            _journal(),
+        )
+        summary: dict[str, object] = {
+            "status": "completed",
+            "at": datetime.now(timezone.utc).isoformat(),
+            "cycles": len(reports),
+            "reports": reports,
+        }
+    except Exception as exc:
+        logger.exception("Paper learning cycle failed: %s", exc)
+        summary = {
+            "status": "failed",
+            "at": datetime.now(timezone.utc).isoformat(),
+            "error_type": type(exc).__name__,
+        }
+    finally:
+        state.learning_running = False
+    state.last_learning_summary = summary
+    return summary
 
 
 async def _check_dependency(name: str, url: str) -> dict[str, object]:
@@ -577,6 +620,24 @@ def health_sweep_status() -> dict[str, object]:
 async def health_sweep_now(_: None = Depends(verify_internal_key)) -> dict[str, object]:
     """Run the sweep immediately. Same code path as the scheduled one."""
     return await _run_health_sweep()
+
+
+@app.post("/v1/orchestrator/learning/run")
+async def learning_cycle_now(
+    request: Request,
+    _: None = Depends(verify_internal_key),
+    _rl: None = Depends(rate_limit_write),
+) -> dict[str, object]:
+    """Run the same bounded learner used by the scheduler."""
+    return await _run_learning_cycles()
+
+
+@app.get("/v1/orchestrator/learning/status")
+def learning_cycle_status() -> dict[str, object]:
+    return {
+        "running": state.learning_running,
+        "last_summary": state.last_learning_summary,
+    }
 
 
 @app.get("/v1/orchestrator/day-trades")
