@@ -44,7 +44,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .config import settings
 from .day_trade_tracker import DayTradeTracker
-from .learning_worker import run_paper_learning_cycles
 from .policy_config import is_market_hours, load_policy_config, update_policy_config
 from .reconciliation import Reconciler
 from .risk_engine import evaluate_risk
@@ -251,6 +250,10 @@ async def _run_learning_cycles() -> dict[str, object]:
         return {"status": "already_running"}
     state.learning_running = True
     try:
+        # The backtest stack is intentionally lazy: normal trading startup does
+        # not import numpy/pandas or pay the learner's initialization cost.
+        from .learning_worker import run_paper_learning_cycles
+
         reports = await asyncio.to_thread(
             run_paper_learning_cycles,
             _lifecycle().store,
