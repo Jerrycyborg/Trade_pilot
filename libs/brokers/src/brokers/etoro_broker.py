@@ -23,6 +23,10 @@ class EtoroBroker:
         self._base_url = "https://public-api.etoro.com/api/v1"
         self._instrument_cache: dict[str, int] = {}
 
+    @property
+    def is_live_trading(self) -> bool:
+        return not self._demo
+
     def submit(self, request: ExecutionOrderRequest) -> BrokerResult:
         return self.place_order(
             request,
@@ -57,7 +61,7 @@ class EtoroBroker:
                 f"/trading/execution/{self._execution_prefix()}market-open-orders/by-amount",
                 json=payload,
             )
-            order_id = str(response.get("orderId") or response.get("id") or uuid4())
+            order_id = str(response.get("positionId") or response.get("orderId") or response.get("id") or uuid4())
             status = OrderStatus.ACCEPTED if response else OrderStatus.REJECTED
             return BrokerResult(
                 status=status,
@@ -142,18 +146,25 @@ class EtoroBroker:
         instrument_id: int,
         units: float | None = None,
         symbol: str | None = None,
-    ) -> bool:
-        """Close an open position by positionId. units_to_deduct=None = full close."""
+    ) -> dict[str, object] | bool:
+        """Close an open position by the broker's position id."""
         try:
             payload: dict[str, object] = {"InstrumentId": instrument_id}
             if units is not None:
                 payload["UnitsToDeduct"] = units
-            self._request(
+            response = self._request(
                 "POST",
                 f"/trading/execution/{self._execution_prefix()}market-close-orders/positions/{position_id}",
                 json=payload,
             )
-            return True
+            return {
+                "order_id": str(response.get("orderId") or response.get("id") or uuid4()),
+                "position_id": position_id,
+                "symbol": (symbol or "").upper(),
+                "qty": float(units or 0.0),
+                "side": str(response.get("side") or "").upper(),
+                "fill_price": _extract_fill_price(response),
+            }
         except Exception as exc:
             logger.error("EtoroBroker.close_position failed for %s: %s", position_id, exc)
             return False

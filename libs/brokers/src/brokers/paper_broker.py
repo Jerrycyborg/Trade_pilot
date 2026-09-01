@@ -80,6 +80,10 @@ class PaperState:
 class PaperBroker:
     """Fill simulator with mark-to-market positions and persisted cash accounting."""
 
+    @property
+    def is_live_trading(self) -> bool:
+        return False
+
     def __init__(
         self,
         max_qty: int = _DEFAULT_MAX_QTY,

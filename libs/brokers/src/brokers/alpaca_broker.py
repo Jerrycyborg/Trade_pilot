@@ -25,6 +25,10 @@ class AlpacaBroker:
         self._paper = paper
         self._client = self._build_client()
 
+    @property
+    def is_live_trading(self) -> bool:
+        return not self._paper
+
     def _build_client(self):
         from alpaca.trading.client import TradingClient
 
@@ -83,7 +87,7 @@ class AlpacaBroker:
         external_order_id = str(order.id)
 
         # Poll for fill in paper mode (paper fills quickly)
-        fill_price = self._wait_for_fill(external_order_id)
+        fill_price = self._wait_for_fill(external_order_id) if self._paper else None
         return BrokerResult(
             status=OrderStatus.ACCEPTED,
             external_order_id=external_order_id,
@@ -159,6 +163,32 @@ class AlpacaBroker:
         instrument_id: int,
         units: float | None = None,
         symbol: str | None = None,
-    ) -> bool:
-        logger.warning("AlpacaBroker.close_position is not implemented")
-        return False
+    ) -> dict[str, object] | bool:
+        """Close the broker position by symbol.
+
+        Alpaca positions are symbol-addressed; an execution order id is not a
+        position id. Returning the broker response lets the execution service
+        audit the close without inventing a fill.
+        """
+        if not symbol:
+            raise ValueError("alpaca_close_requires_symbol")
+        try:
+            from alpaca.trading.requests import ClosePositionRequest
+
+            options = ClosePositionRequest(qty=str(units)) if units is not None else None
+            order = self._client.close_position(symbol, close_options=options)
+            return {
+                "order_id": str(getattr(order, "id", position_id)),
+                "position_id": symbol.upper(),
+                "symbol": symbol.upper(),
+                "qty": float(units or getattr(order, "qty", 0.0) or 0.0),
+                "side": str(getattr(getattr(order, "side", ""), "value", "")).upper(),
+                "fill_price": (
+                    float(order.filled_avg_price)
+                    if getattr(order, "filled_avg_price", None) is not None
+                    else None
+                ),
+            }
+        except Exception as exc:
+            logger.error("AlpacaBroker.close_position failed for %s: %s", symbol, exc)
+            return False

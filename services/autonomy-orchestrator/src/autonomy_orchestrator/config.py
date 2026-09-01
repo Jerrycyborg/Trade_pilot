@@ -45,6 +45,7 @@ class OrchestratorSettings:
         default_factory=lambda: os.getenv("NOTIFICATION_SERVICE_URL", "http://localhost:8009")
     )
     internal_api_key: str = field(default_factory=lambda: os.getenv("INTERNAL_API_KEY", ""))
+    account_id: str = field(default_factory=lambda: os.getenv("TRADING_ACCOUNT_ID", "default"))
     monthly_loss_limit_usd: float = field(
         default_factory=lambda: float(os.getenv("MONTHLY_LOSS_LIMIT_USD", "10.0"))
     )

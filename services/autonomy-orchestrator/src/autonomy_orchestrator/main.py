@@ -1119,7 +1119,21 @@ async def _policy_evaluate(
         confidence=signal.confidence,
         size_pct=risk.adjusted_size_pct or signal.size_pct,
         market_context={
-            "data_age_seconds": 10,
+            "data_age_seconds": (
+                max(
+                    0,
+                    int(
+                        (
+                            datetime.now(timezone.utc)
+                            - (
+                                signal.ta_summary.as_of
+                                if signal.ta_summary is not None
+                                else datetime.fromtimestamp(0, tz=timezone.utc)
+                            )
+                        ).total_seconds()
+                    ),
+                )
+            ),
             "market_open": is_market_hours(config),
             "event_blackout_active": event_blackout,
             "liquidity_score": 0.95,
@@ -1222,6 +1236,8 @@ async def _submit_order(
                     "decision_price": current_price,
                     "stop_loss_rate": stop_loss_rate,
                     "take_profit_rate": take_profit_rate,
+                    "strategy_id": _strategy_of(signal),
+                    "account_id": settings.account_id,
                 },
                 headers={
                     "Idempotency-Key": f"orchestrator-{signal.signal_id}",
@@ -1447,10 +1463,11 @@ def _register_stop_loss(
             symbol=symbol,
             entry_price=entry_price,
             stop_price=stop_price,
-            position_id=str(order.get("order_id", symbol)),
+            position_id=str(order.get("external_order_id") or order.get("order_id") or symbol),
             qty=float(order.get("qty", 0.0)),
             side=side,
             strategy_id=strategy_id,
+            account_id=settings.account_id,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -1470,10 +1487,11 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     state.take_profit_monitor.register(
         TakeProfitRecord(
             strategy_id=_strategy_of(signal),
+            account_id=settings.account_id,
             symbol=signal.symbol,
             entry_price=entry_price,
             target_price=target_price,
-            position_id=str(order.get("order_id", signal.symbol)),
+            position_id=str(order.get("external_order_id") or order.get("order_id") or signal.symbol),
             qty=qty,
             side=_side_of(signal.candidate_action),
             target_gain_usd=settings.take_profit_target_usd,

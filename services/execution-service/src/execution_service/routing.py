@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -88,10 +89,12 @@ class BrokerRouter:
         """
         if not self._live_resolved:
             adapter = get_broker(max_qty=1000)
-            # get_broker falls back to PaperBroker when no credentials are
-            # present. That is a simulated adapter, not a live one, and calling
-            # it "live" would let a PAPER sleeve's assertions pass vacuously.
-            self._live = None if isinstance(adapter, PaperBroker) else adapter
+            # Adapter capability is explicit. Alpaca paper and eToro demo use
+            # real APIs but are not real-money venues; treating "not
+            # PaperBroker" as live misclassified both.
+            self._live = (
+                adapter if bool(getattr(adapter, "is_live_trading", False)) else None
+            )
             self._live_resolved = True
         return self._live
 
@@ -173,6 +176,28 @@ class BrokerRouter:
             halt_reason=halt.halt_reason,
             origin=getattr(sleeve, "origin", "human"),
         )
+        if intent is OrderIntent.ENTRY and decision.route is ExecutionRoute.LIVE:
+            # A restart begins EXIT_ONLY until the broker and ledger have been
+            # reconciled recently. An absent row is not a clean reconciliation.
+            max_age = max(30, int(os.getenv("RECONCILE_MAX_AGE_SECONDS", "600")))
+            checked = halt.last_checked_at
+            if checked is None:
+                return RoutedOrder(
+                    RouteDecision(ExecutionRoute.BLOCKED, "live_reconciliation_not_run"),
+                    None,
+                    "none",
+                )
+            checked = checked if checked.tzinfo else checked.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - checked).total_seconds()
+            if age > max_age:
+                return RoutedOrder(
+                    RouteDecision(
+                        ExecutionRoute.BLOCKED,
+                        f"live_reconciliation_stale:{int(age)}s>{max_age}s",
+                    ),
+                    None,
+                    "none",
+                )
         return self._bind(decision)
 
     def _authority_lost(self, intent: OrderIntent, reason: str) -> RoutedOrder:

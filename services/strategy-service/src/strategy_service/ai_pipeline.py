@@ -316,18 +316,17 @@ def _build_deterministic_signal(
             model_version="strategy-rule-v1",
             risk_score=rule_signal.risk_score,
         )
-    # Fallback: hash-based when no TA data available
-    basis = sum(ord(char) for char in symbol.upper())
-    action = "BUY" if basis % 2 == 0 else "SELL"
-    confidence = round(0.6 + (basis % 20) / 100, 2)
-    size_pct = round(0.01 + (basis % 2) * 0.005, 3)
+    # No observations means no signal. A symbol hash is deterministic, but it
+    # is not market evidence; turning it into BUY/SELL makes a feed outage
+    # tradable.
     return SignalCandidate(
         signal_id=str(uuid4()),
         symbol=symbol.upper(),
         ts=datetime.now(timezone.utc),
-        candidate_action=action,
-        confidence=min(confidence, 0.95),
-        size_pct=size_pct,
-        model_version="strategy-m1-deterministic",
-        risk_score="MEDIUM",
+        candidate_action="HOLD",
+        confidence=0.0,
+        size_pct=0.005,
+        model_version="strategy-rule-v1/no-data",
+        risk_score="HIGH",
+        research_summary="market_data_unavailable",
     )
