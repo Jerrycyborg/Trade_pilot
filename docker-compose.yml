@@ -78,9 +78,6 @@ services:
 
   execution-service:
     build:
-    volumes:
-      - journal-data:/var/lib/trade-pilot
-
       context: .
       dockerfile: services/execution-service/Dockerfile
     env_file: [.env.example]
@@ -101,12 +98,11 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
-
-  strategy-service:
-    build:
     volumes:
       - journal-data:/var/lib/trade-pilot
 
+  strategy-service:
+    build:
       context: .
       dockerfile: services/strategy-service/Dockerfile
     env_file: [.env.example]
@@ -116,6 +112,8 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
     ports: ["127.0.0.1:8003:8003"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
   portfolio-service:
     build:
@@ -132,9 +130,6 @@ services:
 
   research-service:
     build:
-    volumes:
-      - journal-data:/var/lib/trade-pilot
-
       context: .
       dockerfile: services/research-service/Dockerfile
     env_file: [.env.example]
@@ -144,6 +139,8 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
     ports: ["127.0.0.1:8005:8005"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
   audit-logger:
     build:
@@ -161,9 +158,6 @@ services:
   # stack could be started and would never place an order.
   autonomy-orchestrator:
     build:
-    volumes:
-      - journal-data:/var/lib/trade-pilot
-
       context: .
       dockerfile: services/autonomy-orchestrator/Dockerfile
     env_file: [.env.example]
@@ -181,6 +175,8 @@ services:
       execution-service: {condition: service_started}
       policy-service: {condition: service_started}
     ports: ["127.0.0.1:8007:8007"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
   sentiment-aggregator:
     build:
@@ -216,9 +212,6 @@ services:
 
   backtest-service:
     build:
-    volumes:
-      - journal-data:/var/lib/trade-pilot
-
       context: .
       dockerfile: services/backtest-service/Dockerfile
     env_file: [.env.example]
@@ -226,6 +219,8 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
     ports: ["127.0.0.1:8011:8011"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
 volumes:
   postgres-data:
