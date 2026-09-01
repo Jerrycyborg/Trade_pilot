@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, inspect, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -148,6 +148,7 @@ class Journal:
                 cursor.close()
 
             Base.metadata.create_all(bind=self._engine)
+            self._migrate_additive_schema()
             self._session_factory = sessionmaker(bind=self._engine, future=True)
             logger.info("Journal open at %s", self._path)
         except Exception as exc:
@@ -155,6 +156,62 @@ class Journal:
             self._enabled = False
             self._engine = None
             self._session_factory = None
+
+    def _migrate_additive_schema(self) -> None:
+        """Add columns introduced after the first SQLite journal release."""
+        if self._engine is None:
+            return
+        additions = {
+            "execution_quality": {
+                "strategy_id": "TEXT NOT NULL DEFAULT ''",
+                "strategy_version": "TEXT NOT NULL DEFAULT ''",
+                "environment": "TEXT NOT NULL DEFAULT 'paper'",
+                "account_id": "TEXT NOT NULL DEFAULT 'default'",
+                "portfolio_id": "TEXT NOT NULL DEFAULT 'default'",
+                "broker": "TEXT NOT NULL DEFAULT ''",
+                "decision_id": "TEXT NOT NULL DEFAULT ''",
+                "order_intent_id": "TEXT NOT NULL DEFAULT ''",
+                "requested_at": "DATETIME",
+                "submitted_at": "DATETIME",
+                "filled_at": "DATETIME",
+                "fees": "REAL NOT NULL DEFAULT 0",
+                "spread_bps": "REAL",
+                "filled_qty": "REAL NOT NULL DEFAULT 0",
+                "cancelled": "INTEGER NOT NULL DEFAULT 0",
+                "rejected": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "bar_observations": {
+                "observed_at": "DATETIME",
+                "payload_hash": "TEXT NOT NULL DEFAULT ''",
+                "revision": "INTEGER NOT NULL DEFAULT 0",
+                "provider_meta": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        }
+        inspector = inspect(self._engine)
+        with self._engine.begin() as connection:
+            for table_name, columns in additions.items():
+                if not inspector.has_table(table_name):
+                    continue
+                existing = {
+                    column["name"] for column in inspector.get_columns(table_name)
+                }
+                for column_name, definition in columns.items():
+                    if column_name in existing:
+                        continue
+                    connection.exec_driver_sql(
+                        f'ALTER TABLE "{table_name}" '
+                        f'ADD COLUMN "{column_name}" {definition}'
+                    )
+                if table_name == "bar_observations":
+                    connection.exec_driver_sql(
+                        "UPDATE bar_observations SET observed_at = recorded_at "
+                        "WHERE observed_at IS NULL"
+                    )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_exec_scope_version "
+                "ON execution_quality "
+                "(strategy_id, strategy_version, symbol, environment, account_id)"
+            )
 
     # ------------------------------------------------------------------
     # Writes
@@ -749,6 +806,7 @@ class Journal:
         symbol: str,
         environment: str,
         account_id: str = "default",
+        strategy_version: str | None = None,
         window_start: datetime | None = None,
         window_end: datetime | None = None,
     ) -> dict[str, Any]:
@@ -774,6 +832,10 @@ class Journal:
                     ExecutionQuality.environment == environment,
                     ExecutionQuality.account_id == account_id,
                 ]
+                if strategy_version is not None:
+                    conditions.append(
+                        ExecutionQuality.strategy_version == strategy_version
+                    )
                 if window_start is not None:
                     conditions.append(ExecutionQuality.recorded_at >= _utc(window_start))
                 if window_end is not None:
@@ -795,7 +857,7 @@ class Journal:
                 "partial_fills": 0,
                 "cancellations": 0,
                 "rejections": 0,
-                "realized_pnl": 0.0,
+                "execution_cash_effect": 0.0,
                 "fees": 0.0,
                 "mean_shortfall_bps": None,
                 "worst_shortfall_bps": None,
@@ -830,7 +892,7 @@ class Journal:
             "partial_fills": len(partials),
             "cancellations": sum(1 for r in rows if r.cancelled),
             "rejections": sum(1 for r in rows if r.rejected),
-            "realized_pnl": round(realized, 4),
+            "execution_cash_effect": round(realized, 4),
             "fees": round(sum(r.fees or 0.0 for r in rows), 4),
             "mean_shortfall_bps": (
                 round(sum(shortfalls) / len(shortfalls), 4) if shortfalls else None
@@ -911,6 +973,7 @@ class Journal:
         self,
         *,
         strategy_id: str | None = None,
+        strategy_version: str | None = None,
         symbol: str | None = None,
         environment: str | None = None,
         account_id: str | None = "default",
@@ -934,6 +997,10 @@ class Journal:
                 conditions = []
                 if strategy_id is not None:
                     conditions.append(ExecutionQuality.strategy_id == strategy_id)
+                if strategy_version is not None:
+                    conditions.append(
+                        ExecutionQuality.strategy_version == strategy_version
+                    )
                 if symbol is not None:
                     conditions.append(ExecutionQuality.symbol == symbol.upper())
                 if environment is not None:

@@ -202,7 +202,8 @@ class TestPaperEvidenceComesFromTheJournal:
             journal.record_execution(
                 symbol="AAPL", side="BUY", qty=10,
                 decision_price=200.0, fill_price=fill,
-                strategy_id="ema_rsi_macd", environment=environment, fees=0.5,
+                strategy_id="ema_rsi_macd", strategy_version="v1",
+                environment=environment, fees=0.5,
             )
 
     def test_live_and_backtest_records_cannot_pad_a_paper_window(
@@ -267,6 +268,64 @@ class TestPaperEvidenceComesFromTheJournal:
         result = evaluate_to_live(evidence)
         assert result.allowed is False
         assert any("gap" in f for f in result.failed)
+
+    def test_realized_pnl_comes_from_closed_round_trips_not_shortfall(
+        self, store, journal
+    ) -> None:
+        from lifecycle.evidence import derive_paper_evidence
+
+        sleeve = self._paper_sleeve(store)
+        for side, decision, fill in (
+            ("BUY", 100.0, 101.0),
+            ("SELL", 110.0, 109.0),
+        ):
+            journal.record_execution(
+                symbol="AAPL",
+                side=side,
+                qty=10,
+                decision_price=decision,
+                fill_price=fill,
+                strategy_id="ema_rsi_macd",
+                strategy_version="v1",
+                environment="paper",
+                fees=1.0,
+            )
+        evidence = derive_paper_evidence(
+            store=store,
+            journal=journal,
+            sleeve=sleeve,
+            window_start=NOW - timedelta(days=30),
+        )
+        assert evidence.metrics["gross_realized_pnl"] == 80.0
+        assert evidence.metrics["realized_pnl"] == 78.0
+        assert evidence.metrics["execution_cash_effect"] == -20.0
+        assert evidence.metrics["closed_round_trips"] == 1
+
+    def test_another_strategy_version_cannot_pad_paper_evidence(
+        self, store, journal
+    ) -> None:
+        from lifecycle.evidence import derive_paper_evidence
+
+        sleeve = self._paper_sleeve(store)
+        self._fills(journal, count=3)
+        for _ in range(50):
+            journal.record_execution(
+                symbol="AAPL",
+                side="BUY",
+                qty=1,
+                decision_price=100.0,
+                fill_price=100.0,
+                strategy_id="ema_rsi_macd",
+                strategy_version="v2",
+                environment="paper",
+            )
+        evidence = derive_paper_evidence(
+            store=store,
+            journal=journal,
+            sleeve=sleeve,
+            window_start=NOW - timedelta(days=30),
+        )
+        assert evidence.metrics["paper_orders"] == 3
 
     def test_measured_costs_come_from_actual_fills(self, store, journal) -> None:
         from lifecycle.evidence import derive_paper_evidence
