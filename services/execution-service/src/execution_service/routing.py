@@ -180,7 +180,7 @@ class BrokerRouter:
             # A restart begins EXIT_ONLY until the broker and ledger have been
             # reconciled recently. An absent row is not a clean reconciliation.
             max_age = max(30, int(os.getenv("RECONCILE_MAX_AGE_SECONDS", "600")))
-            checked = halt.last_checked_at
+            checked = getattr(halt, "last_checked_at", None)
             if checked is None:
                 return RoutedOrder(
                     RouteDecision(ExecutionRoute.BLOCKED, "live_reconciliation_not_run"),

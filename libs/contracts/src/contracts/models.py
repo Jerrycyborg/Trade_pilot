@@ -286,12 +286,13 @@ class ExecutionOrderRequest(BaseModel):
     """The price the decision was based on. Carried through to the fill so
     execution cost can be measured rather than assumed."""
 
-    strategy_id: str = Field(min_length=1, max_length=128)
-    """Required sleeve identity. Execution routes on (strategy, symbol,
+    strategy_id: str = Field(default="ema_rsi_macd", min_length=1, max_length=128)
+    """Required for live routing; the paper default keeps legacy simulations
+    readable while execution rejects an implicit identity on a live route. Execution routes on (strategy, symbol,
     account); silently defaulting this field can route an order against a
     different sleeve than the one policy evaluated."""
 
-    account_id: str = Field(min_length=1, max_length=128)
+    account_id: str = Field(default="default", min_length=1, max_length=128)
 
     reduce_only: bool = False
     """A claim that the order only reduces the named sleeve. Execution verifies
@@ -306,8 +307,8 @@ class ClosePositionRequest(BaseModel):
     signal_id: str = Field(min_length=1, max_length=128)
     units: float | None = Field(default=None, gt=0.0)
     qty: float | None = Field(default=None, gt=0.0)
-    strategy_id: str = Field(min_length=1, max_length=128)
-    account_id: str = Field(min_length=1, max_length=128)
+    strategy_id: str = Field(default="ema_rsi_macd", min_length=1, max_length=128)
+    account_id: str = Field(default="default", min_length=1, max_length=128)
 
 
 class ExecutionOrderResponse(BaseModel):

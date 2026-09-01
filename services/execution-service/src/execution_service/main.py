@@ -99,6 +99,18 @@ def create_order(
         if not routed.places_order:
             return _record_unplaced(session, request, routed, idempotency_key, payload_hash)
 
+        if routed.decision.is_live and not {"strategy_id", "account_id"}.issubset(
+            request.model_fields_set
+        ):
+            return _record_unplaced(
+                session,
+                request,
+                routed,
+                idempotency_key,
+                payload_hash,
+                reason="live_order_requires_explicit_strategy_and_account",
+            )
+
         # Position cap, enforced here and not in the caller: the strategy
         # worker re-signals every cycle, and a persistent signal that re-enters
         # every cycle stacks one sleeve's position without bound (the first
@@ -326,6 +338,13 @@ def close_order(
         raise HTTPException(
             status_code=409,
             detail=f"close_not_routable: {routed.decision.reason}",
+        )
+    if routed.decision.is_live and not {"strategy_id", "account_id"}.issubset(
+        request.model_fields_set
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="live_close_requires_explicit_strategy_and_account",
         )
 
     closer = getattr(routed.adapter, "close_position", None)
