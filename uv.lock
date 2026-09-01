@@ -176,6 +176,9 @@ version = "0.1.0"
 source = { editable = "services/autonomy-orchestrator" }
 dependencies = [
     { name = "apscheduler" },
+    { name = "attribution" },
+    { name = "backtest-service" },
+    { name = "challengers" },
     { name = "contracts" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -184,11 +187,15 @@ dependencies = [
     { name = "market-data" },
     { name = "pyyaml" },
     { name = "uvicorn" },
+    { name = "veto" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "apscheduler", specifier = ">=3.10.0" },
+    { name = "attribution", editable = "libs/attribution" },
+    { name = "backtest-service", editable = "services/backtest-service" },
+    { name = "challengers", editable = "libs/challengers" },
     { name = "contracts", editable = "libs/contracts" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -197,6 +204,7 @@ requires-dist = [
     { name = "market-data", editable = "libs/market_data" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "uvicorn", specifier = ">=0.34.0" },
+    { name = "veto", editable = "libs/veto" },
 ]
 
 [[package]]
