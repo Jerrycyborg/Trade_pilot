@@ -22,6 +22,7 @@ class EtoroBroker:
         self._demo = demo
         self._base_url = "https://public-api.etoro.com/api/v1"
         self._instrument_cache: dict[str, int] = {}
+        self._client = httpx.Client(base_url=self._base_url, timeout=15.0)
 
     @property
     def is_live_trading(self) -> bool:
@@ -230,6 +231,10 @@ class EtoroBroker:
             "x-request-id": str(uuid4()),
         }
 
+    def close(self) -> None:
+        """Release pooled broker connections during an orderly shutdown."""
+        self._client.close()
+
     def _request(
         self,
         method: str,
@@ -238,15 +243,18 @@ class EtoroBroker:
         params: dict[str, object] | None = None,
         json: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        with httpx.Client(base_url=self._base_url, timeout=15.0) as client:
-            response = client.request(
-                method, path, headers=self._headers(), params=params, json=json
-            )
-            response.raise_for_status()
-            if not response.content:
-                return {}
-            payload = response.json()
-            return payload if isinstance(payload, dict) else {"items": payload}
+        response = self._client.request(
+            method,
+            path,
+            headers=self._headers(),
+            params=params,
+            json=json,
+        )
+        response.raise_for_status()
+        if not response.content:
+            return {}
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"items": payload}
 
 
 def _extract_fill_price(payload: dict[str, object]) -> float | None:

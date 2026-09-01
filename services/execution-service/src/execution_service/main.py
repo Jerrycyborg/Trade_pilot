@@ -399,6 +399,7 @@ def close_order(
                 signal_id=request.signal_id,
                 outcome="closed",
                 strategy_id=request.strategy_id,
+                strategy_version=routed.strategy_version,
                 account_id=request.account_id,
                 environment=environment,
                 broker=routed.adapter_name,
@@ -527,6 +528,7 @@ def _record_execution_quality(request, order, broker_result, routed) -> None:
                 or str(getattr(broker_result.status, "value", broker_result.status)).lower()
             ),
             strategy_id=request.strategy_id,
+            strategy_version=routed.strategy_version,
             account_id=request.account_id,
             environment=environment,
             broker=routed.adapter_name,

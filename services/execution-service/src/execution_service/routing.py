@@ -48,6 +48,7 @@ class RoutedOrder:
     decision: RouteDecision
     adapter: object | None
     adapter_name: str
+    strategy_version: str = ""
 
     @property
     def places_order(self) -> bool:
@@ -220,7 +221,10 @@ class BrokerRouter:
                     None,
                     "none",
                 )
-        return self._bind(decision)
+        return self._bind(
+            decision,
+            getattr(sleeve, "strategy_version", ""),
+        )
 
     def _authority_lost(self, intent: OrderIntent, reason: str) -> RoutedOrder:
         """Losing the roster blocks entries and preserves exits.
@@ -237,10 +241,19 @@ class BrokerRouter:
             )
         return RoutedOrder(RouteDecision(ExecutionRoute.BLOCKED, reason), None, "none")
 
-    def _bind(self, decision: RouteDecision) -> RoutedOrder:
+    def _bind(
+        self,
+        decision: RouteDecision,
+        strategy_version: str = "",
+    ) -> RoutedOrder:
         """Attach the adapter the route names, and only that one."""
         if decision.route is ExecutionRoute.SIMULATED:
-            return RoutedOrder(decision, self._simulated, "paper")
+            return RoutedOrder(
+                decision,
+                self._simulated,
+                "paper",
+                strategy_version,
+            )
 
         if decision.route is ExecutionRoute.LIVE:
             adapter = self._live_adapter()
@@ -253,7 +266,12 @@ class BrokerRouter:
                     None,
                     "none",
                 )
-            return RoutedOrder(decision, adapter, type(adapter).__name__)
+            return RoutedOrder(
+                decision,
+                adapter,
+                type(adapter).__name__,
+                strategy_version,
+            )
 
         # SHADOW and BLOCKED place nothing.
         return RoutedOrder(decision, None, "none")
