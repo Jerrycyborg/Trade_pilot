@@ -923,19 +923,29 @@ setInterval(refreshWatchlist, 60_000);
 // Ticker bar
 // ---------------------------------------------------------------------------
 
-// The symbols the server actually trades, fetched once. The ticker used to
-// hard-code its own list, so it showed symbols the deployment had no data for
-// and missed the ones the worker was trading.
+// The symbols the server actually trades, fetched until it answers. The
+// ticker used to hard-code its own list, so it showed symbols the deployment
+// had no data for and missed the ones the worker was trading — and once the
+// fallback was assigned, it looked like an answer, so the watchlist was never
+// asked again for the life of the page. The flag keeps the fallback
+// distinguishable from a real answer, so each tick retries until one lands.
 let tickerSymbols = null;
+let tickerUsingFallback = false;
 
 async function loadTicker() {
   try {
-    if (!tickerSymbols) {
+    if (!tickerSymbols || tickerUsingFallback) {
       try {
         const wl = await readJson("watchlist", `${CONFIG.strategyBaseUrl}/v1/strategy/watchlist`);
-        if (wl && Array.isArray(wl.symbols) && wl.symbols.length) tickerSymbols = wl.symbols;
-      } catch { /* the default below stands until the service answers */ }
-      if (!tickerSymbols) tickerSymbols = ["AAPL", "MSFT", "GOOGL", "BTC/USD", "ETH/USD"];
+        if (wl && Array.isArray(wl.symbols) && wl.symbols.length) {
+          tickerSymbols = wl.symbols;
+          tickerUsingFallback = false;
+        }
+      } catch { /* the fallback below stands until the service answers */ }
+      if (!tickerSymbols) {
+        tickerSymbols = ["AAPL", "MSFT", "GOOGL", "BTC/USD", "ETH/USD"];
+        tickerUsingFallback = true;
+      }
     }
     const syms = tickerSymbols.join(",");
     const quotes = await readJson("quotes", `${CONFIG.strategyBaseUrl}/v1/market/quotes?symbols=${encodeURIComponent(syms)}`);

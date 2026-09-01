@@ -246,6 +246,14 @@ class TestFreshnessAppliesToEveryTier:
         assert cache.peek("AAPL") is not None
 
 
+class _ProviderDownFetcher(StubFetcher):
+    """A provider whose trade endpoint is refusing connections."""
+
+    def latest_price(self, symbol: str):
+        self.latest_calls += 1
+        raise ConnectionError("provider unreachable")
+
+
 @pytest.mark.real_price_source
 class TestFillGradeFreshness:
     """get_fresh_price: the read a fill simulator must use.
@@ -286,6 +294,51 @@ class TestFillGradeFreshness:
             MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
         )
         assert source.get_fresh_price("AAPL") is None
+
+    def test_a_cached_quote_beats_the_last_bar_when_the_provider_is_down(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A provider outage used to send the resolver straight to tier 3 — the
+        last bar's close, a session old on daily cadence — while a live quote
+        from half a minute ago sat in the cache, refused only because it missed
+        the five-second fill tolerance. Fresher always outranks older."""
+        monkeypatch.delenv("MARKET_DATA_TIMEFRAME", raising=False)
+        monkeypatch.delenv("MAX_PRICE_AGE_SECONDS", raising=False)
+        stale_bar = OHLCVBar(
+            symbol="AAPL",
+            timestamp=datetime.now(timezone.utc) - timedelta(hours=6),
+            open=1, high=2, low=0.5, close=100.0, volume=10,
+        )
+        fetcher = _ProviderDownFetcher(bars=[stale_bar])
+        cache = LivePriceCache(max_age_seconds=86400)
+        cache.record(_snapshot(price=220.0, seconds_old=30.0))
+        source = RealtimePriceSource(MarketDataSettings(), cache=cache, fetcher=fetcher)
+
+        assert source.get_fresh_price("AAPL") == 220.0
+        assert fetcher.fetch_calls == 0, "tier 3 must not be consulted past a fresher quote"
+
+    def test_an_older_observation_never_clobbers_a_fresher_cache_entry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The resolver caches whatever it resolved 'either way'. When that was
+        the last bar, it overwrote a fresher live quote already held — so the
+        operator's peek, and every later age check, reported the market as
+        older than we had actually observed it."""
+        monkeypatch.setenv("MAX_PRICE_AGE_SECONDS", "10")
+        stale_bar = OHLCVBar(
+            symbol="AAPL",
+            timestamp=datetime.now(timezone.utc) - timedelta(hours=6),
+            open=1, high=2, low=0.5, close=100.0, volume=10,
+        )
+        fetcher = _ProviderDownFetcher(bars=[stale_bar])
+        cache = LivePriceCache(max_age_seconds=10)
+        cache.record(_snapshot(price=220.0, seconds_old=30.0))
+        source = RealtimePriceSource(MarketDataSettings(), cache=cache, fetcher=fetcher)
+
+        assert source.get_fresh_price("AAPL") is None, "everything on hand is too old"
+        held = cache.peek("AAPL")
+        assert held.price == 220.0, "the fresher observation must survive"
+        assert held.source == "test"
 
     def test_the_paper_broker_prefers_the_fill_grade_read(self) -> None:
         from brokers import PaperBroker

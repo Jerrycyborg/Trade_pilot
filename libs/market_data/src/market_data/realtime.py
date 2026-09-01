@@ -143,14 +143,23 @@ class RealtimePriceSource:
             snapshot = None
 
         if snapshot is None:
+            # Provider down. A cached live quote inside the overall limit is
+            # always fresher than a bar close — on daily cadence the last bar
+            # can be a session old — so serve it before falling to tier 3.
+            cached = self._cache.get(symbol, limit)
+            if cached is not None:
+                return cached
             snapshot = self._from_last_bar(symbol, fetcher)
 
         if snapshot is None:
             return None
 
         # Cache it either way — a stale observation is still the freshest thing
-        # we have, and callers that tolerate age can read it via the cache.
-        self._cache.record(snapshot)
+        # we have, and callers that tolerate age can read it via the cache —
+        # but never let an older observation clobber a fresher one already held.
+        prior = self._cache.peek(symbol)
+        if prior is None or snapshot.timestamp >= prior.timestamp:
+            self._cache.record(snapshot)
 
         age = snapshot.age_seconds()
         accepted = age <= limit

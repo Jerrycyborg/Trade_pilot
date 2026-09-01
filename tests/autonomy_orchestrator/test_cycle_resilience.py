@@ -129,6 +129,53 @@ async def test_the_earnings_posture_survives_a_broken_gate(
 
 
 @pytest.mark.asyncio
+async def test_the_earnings_gate_runs_off_the_cycles_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate reaches yfinance synchronously. Called inline from the async
+    policy pass, a slow calendar froze the whole event loop — the cycle, the
+    stop-loss ticks, everything — for up to a socket timeout per symbol."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from contracts import SignalCandidate
+
+    seen: dict[str, bool] = {}
+
+    def probe(_symbol: str) -> bool:
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True
+        except RuntimeError:
+            seen["on_loop"] = False
+        return False
+
+    monkeypatch.setattr(m, "_earnings_blackout_for", probe)
+    monkeypatch.setattr(
+        m, "settings", replace(m.settings, policy_service_url="http://127.0.0.1:9")
+    )
+    signal = SignalCandidate(
+        signal_id="sig-loop-probe",
+        symbol="NVDA",
+        ts=datetime.now(timezone.utc),
+        candidate_action="BUY",
+        confidence=0.9,
+        size_pct=0.05,
+        model_version="test",
+    )
+    # The dead policy service fails the evaluation closed — expected; the
+    # gate has already been consulted by then, which is what this observes.
+    with pytest.raises(RuntimeError, match="Policy service unreachable"):
+        await m._policy_evaluate(
+            signal,
+            SimpleNamespace(adjusted_size_pct=0.05),
+            {"symbol_allowlist": ["NVDA"]},
+            {"positions": []},
+        )
+    assert seen["on_loop"] is False, "the calendar lookup ran on the event loop"
+
+
+@pytest.mark.asyncio
 async def test_a_garbage_gate_config_is_still_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

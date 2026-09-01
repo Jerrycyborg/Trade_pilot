@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -332,7 +333,7 @@ class TradeWorker:
             candidate_action=signal.candidate_action,
             confidence=signal.confidence,
             size_pct=signal.size_pct,
-            market_context=self._market_context(symbol, bars),
+            market_context=await self._market_context(symbol, bars),
             portfolio_context=portfolio_ctx,
             risk_score=signal.risk_score,
         )
@@ -484,7 +485,7 @@ class TradeWorker:
         except Exception as exc:  # pragma: no cover - journalling is best effort
             logger.debug("Gated decision not journalled: %s", exc)
 
-    def _market_context(self, symbol: str, bars: list) -> MarketContext:
+    async def _market_context(self, symbol: str, bars: list) -> MarketContext:
         """Build the policy's market context from observed data, not assumptions.
 
         The policy service rejects stale data, so reporting a made-up age would
@@ -509,9 +510,13 @@ class TradeWorker:
         # hard-coded False, so the policy service's event_blackout rule — a
         # hard rejection — could never fire on the worker's path, whatever the
         # calendar said. The check reports its own reachability and fails per
-        # EARNINGS_GATE_FAIL_CLOSED, loudly either way.
-        blackout = check_earnings_blackout(
-            symbol, blackout_days=settings.earnings_blackout_days
+        # EARNINGS_GATE_FAIL_CLOSED, loudly either way. It reaches the network
+        # synchronously (yfinance), so it runs on a thread: a cold cache on a
+        # slow calendar must not stall every other coroutine in the worker.
+        blackout = await asyncio.to_thread(
+            check_earnings_blackout,
+            symbol,
+            blackout_days=settings.earnings_blackout_days,
         )
 
         return MarketContext(

@@ -142,7 +142,8 @@ class TestTheWorkerActuallyAsks:
     service's hard event_blackout rejection could never fire on the only path
     that was trading."""
 
-    def test_the_policy_request_carries_the_gates_verdict(
+    @pytest.mark.asyncio
+    async def test_the_policy_request_carries_the_gates_verdict(
         self, monkeypatch: pytest.MonkeyPatch, stub_prices
     ) -> None:
         from strategy_service.earnings_calendar import BlackoutCheck
@@ -155,5 +156,37 @@ class TestTheWorkerActuallyAsks:
                 active=True, checked=True, reason="earnings tomorrow"
             ),
         )
-        context = TradeWorker()._market_context("AAPL", bars=[])
+        context = await TradeWorker()._market_context("AAPL", bars=[])
         assert context.event_blackout_active is True
+
+
+class TestTheGateStaysOffTheEventLoop:
+    """check_earnings_blackout reaches yfinance synchronously. Called inline
+    from the worker's async signal path, a cold cache against a slow calendar
+    stalled every coroutine in the process — heartbeats, health endpoints,
+    other symbols — for up to a socket timeout per symbol."""
+
+    @pytest.mark.asyncio
+    async def test_the_workers_context_consults_the_calendar_on_a_thread(
+        self, monkeypatch: pytest.MonkeyPatch, stub_prices
+    ) -> None:
+        import asyncio
+
+        from strategy_service.earnings_calendar import BlackoutCheck
+        from strategy_service.worker import TradeWorker
+
+        stub_prices.set("NVDA", 200.0)
+        seen: dict[str, bool] = {}
+
+        def probe(_symbol: str, blackout_days: int = 3) -> BlackoutCheck:
+            try:
+                asyncio.get_running_loop()
+                seen["on_loop"] = True
+            except RuntimeError:
+                seen["on_loop"] = False
+            return BlackoutCheck(active=False, checked=True, reason="probe")
+
+        monkeypatch.setattr("strategy_service.worker.check_earnings_blackout", probe)
+        context = await TradeWorker()._market_context("NVDA", bars=[])
+        assert context.event_blackout_active is False
+        assert seen["on_loop"] is False, "the calendar lookup ran on the event loop"

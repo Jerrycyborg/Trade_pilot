@@ -43,25 +43,28 @@ class TestComputeQty:
 
 
 class TestMarketContext:
-    def test_age_comes_from_the_live_price(self, stub_prices) -> None:
+    @pytest.mark.asyncio
+    async def test_age_comes_from_the_live_price(self, stub_prices) -> None:
         stub_prices.set("AAPL", 200.0)
-        context = TradeWorker()._market_context("AAPL", [_bar(minutes_ago=90)])
+        context = await TradeWorker()._market_context("AAPL", [_bar(minutes_ago=90)])
 
         # The live price is current, so the 90-minute-old bar must not set the age.
         assert context.data_age_seconds < 60
 
-    def test_missing_price_reports_stale_rather_than_fresh(self, stub_prices) -> None:
+    @pytest.mark.asyncio
+    async def test_missing_price_reports_stale_rather_than_fresh(self, stub_prices) -> None:
         """Fail closed: an unobservable price must trip the policy's staleness
         rule, not sail through it as if it were seconds old."""
         stub_prices.default_price = None
-        context = TradeWorker()._market_context("AAPL", [])
+        context = await TradeWorker()._market_context("AAPL", [])
 
         assert context.data_age_seconds > 30
 
-    def test_market_open_is_observed_not_assumed(self, stub_prices, monkeypatch) -> None:
+    @pytest.mark.asyncio
+    async def test_market_open_is_observed_not_assumed(self, stub_prices, monkeypatch) -> None:
         monkeypatch.setattr(
             "strategy_service.worker.market_session",
             lambda _settings: type("S", (), {"is_open": False})(),
         )
-        context = TradeWorker()._market_context("AAPL", [_bar()])
+        context = await TradeWorker()._market_context("AAPL", [_bar()])
         assert context.market_open is False

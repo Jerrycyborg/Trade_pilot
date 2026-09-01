@@ -1108,7 +1108,9 @@ async def _portfolio_state() -> dict[str, object]:
 async def _policy_evaluate(
     signal: SignalCandidate, risk, config: dict[str, object], portfolio_state: dict[str, object]
 ) -> dict[str, object]:
-    event_blackout = _earnings_blackout_for(signal.symbol)
+    # The gate reaches yfinance synchronously; on a thread so a slow calendar
+    # cannot stall the cycle's event loop (and with it every risk job).
+    event_blackout = await asyncio.to_thread(_earnings_blackout_for, signal.symbol)
 
     request = PolicyEvaluationRequest(
         signal_id=signal.signal_id,
