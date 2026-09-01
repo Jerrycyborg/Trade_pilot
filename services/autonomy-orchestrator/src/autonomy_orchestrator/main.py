@@ -17,6 +17,7 @@ from contracts import (
     SignalCandidate,
 )
 from contracts.auth import verify_admin_key, verify_internal_key
+from contracts.cors import cors_origins
 from contracts.execution import (
     average_daily_volume,
     marketable_limit_price,
@@ -24,7 +25,6 @@ from contracts.execution import (
 )
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
-from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from lifecycle import DEFAULT_LIVE_STRATEGY

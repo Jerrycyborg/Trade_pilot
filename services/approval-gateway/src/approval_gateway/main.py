@@ -7,9 +7,9 @@ from uuid import uuid4
 import yaml
 from contracts import ApprovalRequest, ApprovalResponse
 from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol, validate_positive_amount
-from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select

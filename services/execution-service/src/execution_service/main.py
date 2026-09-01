@@ -19,8 +19,8 @@ from contracts import (
     OrderStatus,
 )
 from contracts.auth import verify_internal_key
-from contracts.sanitize import sanitize_symbol
 from contracts.cors import cors_origins
+from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from lifecycle.routing import assert_not_live

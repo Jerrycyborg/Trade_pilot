@@ -7,8 +7,8 @@ import logging
 
 from contracts import ResearchReport
 from contracts.auth import verify_internal_key
-from contracts.sanitize import sanitize_symbol
 from contracts.cors import cors_origins
+from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
