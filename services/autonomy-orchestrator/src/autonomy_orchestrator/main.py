@@ -26,6 +26,7 @@ from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from contracts.cors import cors_origins
 from lifecycle import DEFAULT_LIVE_STRATEGY
 from lifecycle.health import run_health_sweep
 from lifecycle.service import LifecycleService, get_lifecycle_service
@@ -337,10 +338,15 @@ async def lifespan(app_: FastAPI):
 app = FastAPI(title="autonomy-orchestrator", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 

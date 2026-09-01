@@ -10,6 +10,7 @@ from contracts import CandidateAction, SignalCandidate, TechnicalSummaryContract
 from contracts.auth import verify_internal_key
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from contracts.cors import cors_origins
 from market_data import MarketDataSettings, build_ta_summary, fetch_bars, get_fetcher
 from market_data.fetcher import DataUnavailableError
 from pydantic import BaseModel
@@ -35,10 +36,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="strategy-service", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 

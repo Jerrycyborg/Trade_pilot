@@ -1,6 +1,7 @@
 """Shared contracts for Trade Pilot services."""
 
 from .auth import verify_admin_key, verify_internal_key
+from .cors import cors_origins
 from .models import (
     AccountInfo,
     ApprovalRequest,
@@ -74,6 +75,7 @@ __all__ = [
     "TechnicalSummaryContract",
     "TokenBucket",
     "WorkerStatus",
+    "cors_origins",
     "load_prompt",
     "rate_limit_write",
     "sanitize_symbol",

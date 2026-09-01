@@ -11,6 +11,7 @@ from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol, validate_positive_amount
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from contracts.cors import cors_origins
 from sqlalchemy import select
 
 from .config import settings
@@ -21,10 +22,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="approval-gateway", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 

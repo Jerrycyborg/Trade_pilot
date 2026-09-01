@@ -10,6 +10,7 @@ from contracts.auth import verify_internal_key
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from contracts.cors import cors_origins
 from pydantic import BaseModel
 
 from .cache import ResearchCache, _to_report
@@ -28,10 +29,15 @@ if not settings.anthropic_api_key:
 app = FastAPI(title="research-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 _cache = ResearchCache()

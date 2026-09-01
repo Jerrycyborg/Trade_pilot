@@ -8,6 +8,7 @@ from contracts import AuditEvent, AuditLogResponse
 from contracts.auth import verify_internal_key
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from contracts.cors import cors_origins
 from sqlalchemy import select
 
 from .database import Base, SessionLocal, engine
@@ -17,10 +18,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="audit-logger", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 
