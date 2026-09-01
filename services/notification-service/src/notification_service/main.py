@@ -5,6 +5,7 @@ from collections import deque
 import httpx
 from contracts import NotificationEvent
 from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,10 +14,15 @@ from .config import settings
 app = FastAPI(title="notification-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 _history: deque[dict[str, object]] = deque(maxlen=50)
@@ -36,10 +42,15 @@ async def notify(
     _history.appendleft(payload)
     if event.tier >= 2:
         _pending_approvals.appendleft(payload)
-    if settings.webhook_url:
+    try:
+        webhook_url = settings.verified_webhook_url
+    except ValueError:
+        payload["webhook_status"] = "misconfigured"
+        webhook_url = ""
+    if webhook_url:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(settings.webhook_url, json=payload)
+                await client.post(webhook_url, json=payload)
         except Exception:
             payload["webhook_status"] = "failed"
     return {"status": "queued", "tier": event.tier}

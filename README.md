@@ -85,7 +85,7 @@ system recorded itself is what earns it.
 | notification-service | 8009 | Webhook notifications (tiered) |
 | approval-gateway | 8010 | Human approval flow (PENDING/APPROVE/REJECT) |
 | backtest-service | 8011 | Backtesting, walk-forward, parameter sensitivity |
-| dashboard | 8080 | Web UI (kill switch, approvals, stats bar) |
+| dashboard | 8080 | Read-only local operational view; mutations use authenticated APIs |
 
 ## Environment Variables
 
@@ -100,6 +100,7 @@ system recorded itself is what earns it.
 | `NEWSAPI_KEY` | No | NewsAPI.org key for sentiment |
 | `ALPHAVANTAGE_KEY` | No | AlphaVantage key for sentiment |
 | `WEBHOOK_URL` | No | Slack/Discord/custom webhook for notifications |
+| `WEBHOOK_ALLOWED_HOSTS` | With webhook | Exact hosts permitted for HTTPS notification egress |
 | `BROKER` | No | `etoro` or `paper` (default paper) |
 | `WORKER_ENABLED` | No | `true` to enable strategy worker polling |
 | `ORCHESTRATOR_INTERVAL_MINUTES` | No | Cycle interval (default 5) |
@@ -108,6 +109,10 @@ system recorded itself is what earns it.
 | `MAX_HOLD_HOURS` | No | Max position hold time in hours (default 48) |
 | `VOLUME_CONFIRM_ENABLED` | No | Require above-avg volume for BUY (default true) |
 | `STRATEGY_WATCHLIST` | No | Comma-separated symbols to trade |
+| `LEARNING_ENABLED` | No | Schedule bounded offline learning for paper sleeves |
+| `LEARNING_INTERVAL_SECONDS` | No | Learning cadence; minimum one hour |
+| `LEARNING_MIN_PAPER_TRADES` | No | Closed paper round trips required before evaluation |
+| `LEARNING_STRATEGY_REGISTRY_PATH` | No | Immutable champion artifact directory |
 
 ### Intraday / real-time
 
@@ -1081,6 +1086,52 @@ broken challenger is skipped; the champion runs first, unconditionally.
 > allow two rows for one sleeve while `get`/`require` return one, breaking the
 > one-state-per-sleeve invariant every gate rests on. So a challenger runs
 > under a derived id, `champion@chal-abc123`, and the constraint stays intact.
+
+## Scheduled Paper Learning
+
+The orchestrator now runs the L3 learner as an operational loop when
+`LEARNING_ENABLED=true` (enabled by the paper-only Compose deployment). It
+selects only human-owned sleeves in `paper`, loads the exact versioned champion
+artifact, reads point-in-time bars and closed paper round trips from the
+journal, runs the independent veto and bounded walk-forward campaign, deflates
+the result for every trial in the campaign, and appends the report and inert
+proposals to PostgreSQL.
+
+The deployed prompts and the `ema_rsi_macd--v1` champion artifact are pinned
+by SHA-256 in Compose. CI recalculates all three digests, so changing a prompt
+or champion without updating its deployment pin fails the build.
+
+The loop has deliberately asymmetric authority:
+
+- It may read paper evidence and append learning records.
+- It cannot register or transition a sleeve, write validation artifacts,
+  change policy, enable live mode, edit code, or call a broker.
+- A proposal can run as a paper challenger only through the existing
+  challenger path.
+- A challenger still needs a named human adoption event and the normal
+  evidence gates before live is even possible.
+
+Register the baseline with the artifact version, promote it to paper using
+stored validation evidence, and the scheduled learner will pick it up:
+
+```bash
+curl -X POST \
+  -H "X-Internal-Key: $INTERNAL_API_KEY" \
+  "http://127.0.0.1:8007/v1/orchestrator/lifecycle/register?strategy=ema_rsi_macd&symbol=AAPL&strategy_version=v1"
+```
+
+Run the bounded cycle immediately or inspect its last result:
+
+```bash
+curl -X POST \
+  -H "X-Internal-Key: $INTERNAL_API_KEY" \
+  http://127.0.0.1:8007/v1/orchestrator/learning/run
+curl http://127.0.0.1:8007/v1/orchestrator/learning/status
+```
+
+An `INSUFFICIENT_PAPER_EVIDENCE`, `VETOED`, or
+`SKIPPED_INVALID_ARTIFACT_OR_EVIDENCE` result is a normal refusal, not a cue
+to lower a gate. No result from this loop is permission to use real money.
 
 ## Pattern Day Trader (PDT) Protection
 

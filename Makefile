@@ -18,37 +18,37 @@ verify-intraday:
 	$(UV) run python scripts/verify_intraday.py
 
 run-research:
-	$(UV) run uvicorn research_service.main:app --host 0.0.0.0 --port 8005
+	$(UV) run uvicorn research_service.main:app --host 127.0.0.1 --port 8005
 
 run-strategy:
-	$(UV) run uvicorn strategy_service.main:app --host 0.0.0.0 --port 8003
+	$(UV) run uvicorn strategy_service.main:app --host 127.0.0.1 --port 8003
 
 run-policy:
-	$(UV) run uvicorn policy_service.main:app --host 0.0.0.0 --port 8001
+	$(UV) run uvicorn policy_service.main:app --host 127.0.0.1 --port 8001
 
 run-execution:
-	$(UV) run uvicorn execution_service.main:app --host 0.0.0.0 --port 8002
+	$(UV) run uvicorn execution_service.main:app --host 127.0.0.1 --port 8002
 
 run-portfolio:
-	$(UV) run uvicorn portfolio_service.main:app --host 0.0.0.0 --port 8004
+	$(UV) run uvicorn portfolio_service.main:app --host 127.0.0.1 --port 8004
 
 run-audit:
-	$(UV) run uvicorn audit_logger.main:app --host 0.0.0.0 --port 8006
+	$(UV) run uvicorn audit_logger.main:app --host 127.0.0.1 --port 8006
 
 run-orchestrator:
-	$(UV) run uvicorn autonomy_orchestrator.main:app --host 0.0.0.0 --port 8007
+	$(UV) run uvicorn autonomy_orchestrator.main:app --host 127.0.0.1 --port 8007
 
 run-sentiment:
-	$(UV) run uvicorn sentiment_aggregator.main:app --host 0.0.0.0 --port 8008
+	$(UV) run uvicorn sentiment_aggregator.main:app --host 127.0.0.1 --port 8008
 
 run-notification:
-	$(UV) run uvicorn notification_service.main:app --host 0.0.0.0 --port 8009
+	$(UV) run uvicorn notification_service.main:app --host 127.0.0.1 --port 8009
 
 run-approval:
-	$(UV) run uvicorn approval_gateway.main:app --host 0.0.0.0 --port 8010
+	$(UV) run uvicorn approval_gateway.main:app --host 127.0.0.1 --port 8010
 
 run-dashboard:
-	python3 -m http.server 8080 --directory apps/dashboard
+	python3 -m http.server 8080 --bind 127.0.0.1 --directory apps/dashboard
 
 run:
 	@echo "Start services individually:"

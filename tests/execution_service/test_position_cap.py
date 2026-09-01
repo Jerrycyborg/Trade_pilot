@@ -115,9 +115,11 @@ def test_a_reduce_only_exit_passes_even_over_the_cap(main) -> None:
     assert exit_.status != OrderStatus.REJECTED
 
 
-def test_an_unknowable_book_refuses_entries_not_exits(main, tmp_path: Path) -> None:
-    """None is not zero. A journal that cannot answer blocks the entry — and
-    only the entry: the exit still reaches the broker."""
+def test_an_unknowable_book_refuses_even_a_claimed_reduce_only_order(
+    main, tmp_path: Path
+) -> None:
+    """The reduce-only flag is a claim, not a broker guarantee. If the ledger
+    cannot verify the position, execution must not risk a reversal."""
     _submit(main, "SELL", 6)  # a real position, journalled
     reset_journal(Journal(path=tmp_path / "dead.db", enabled=False))
     try:
@@ -126,7 +128,8 @@ def test_an_unknowable_book_refuses_entries_not_exits(main, tmp_path: Path) -> N
         assert "position_unknowable" in (entry.rejection_reason or "")
 
         exit_ = _submit(main, "BUY", 6, reduce_only=True)
-        assert exit_.status != OrderStatus.REJECTED
+        assert exit_.status == OrderStatus.REJECTED
+        assert "position_unknowable" in (exit_.rejection_reason or "")
     finally:
         reset_journal(None)
 

@@ -1,0 +1,12 @@
+{
+  "strategy_id": "ema_rsi_macd",
+  "strategy_version": "v1",
+  "timeframe": "1d",
+  "parameters": {
+    "ema_fast": 20,
+    "ema_slow": 50,
+    "rsi_buy_min": 45.0,
+    "rsi_buy_max": 70.0,
+    "macd_hist_min": 0.0
+  }
+}

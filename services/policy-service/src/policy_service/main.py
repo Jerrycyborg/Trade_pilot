@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 
 from contracts import PolicyDecision, PolicyEvaluationRecordResponse, PolicyEvaluationRequest
-from fastapi import FastAPI, Query
+from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
+from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,10 +24,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="policy-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 
@@ -35,7 +42,10 @@ def health() -> dict[str, str]:
 
 
 @app.post("/v1/policy/evaluate", response_model=PolicyDecision)
-def evaluate(request: PolicyEvaluationRequest) -> PolicyDecision:
+def evaluate(
+    request: PolicyEvaluationRequest,
+    _: None = Depends(verify_internal_key),
+) -> PolicyDecision:
     """Evaluate a signal against deterministic policy rules."""
 
     decision, rule_hits = evaluate_policy(request)

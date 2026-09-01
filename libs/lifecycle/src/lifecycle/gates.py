@@ -187,7 +187,7 @@ def evaluate_to_live(
         _check(
             result,
             pnl is not None and pnl >= 0,
-            f"paper execution P&L {pnl} is not negative"
+            f"paper realized P&L after fees {pnl} is not negative"
             if pnl is not None
             else "no paper P&L recorded",
         )

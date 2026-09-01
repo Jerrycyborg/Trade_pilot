@@ -10,7 +10,14 @@ from typing import Optional
 from uuid import uuid4
 
 import httpx
-from contracts import ResearchReport, SentimentScore, SignalCandidate, TechnicalSummaryContract
+from contracts import (
+    ResearchReport,
+    SentimentScore,
+    SignalCandidate,
+    TechnicalSummaryContract,
+    load_prompt,
+    untrusted_block,
+)
 from market_data import MarketDataSettings, build_ta_summary, get_fetcher
 from market_data.fetcher import DataUnavailableError
 
@@ -21,32 +28,13 @@ logger = logging.getLogger(__name__)
 
 _SIZE_BY_RISK = {"LOW": 0.02, "MEDIUM": 0.015, "HIGH": 0.005}
 
-_SYSTEM_PROMPT = """\
-You are a quantitative technical analyst. Based on the provided technical indicators \
-and research context, decide whether to BUY, SELL, or HOLD the given symbol.
-
-Respond with ONLY a valid JSON object — no markdown, no explanation, just JSON:
-{
-  "action": "BUY" | "SELL" | "HOLD",
-  "confidence": <float 0.0-0.95>,
-  "risk_score": "LOW" | "MEDIUM" | "HIGH",
-  "reasoning": "<1-2 sentences>"
-}
-
-Guidelines:
-- confidence: how confident you are in the signal (0.60+ to trade, below 0.60 means HOLD)
-- risk_score LOW: clear trend, low volatility, strong indicator alignment
-- risk_score MEDIUM: mixed signals or moderate uncertainty
-- risk_score HIGH: conflicting signals, high volatility, or concerning news
-- When uncertain, prefer HOLD over LOW confidence BUY/SELL
-"""
-
 
 class AISignalPipeline:
     """Generates trading signals using Claude for TA analysis + research integration."""
 
     def __init__(self) -> None:
         self._market_settings = MarketDataSettings()
+        self._prompt = load_prompt(settings.prompt_id, settings.prompt_sha256)
 
     async def generate(self, symbol: str) -> SignalCandidate:
         """Generate an AI-driven signal for a symbol. Falls back to deterministic on failure."""
@@ -177,7 +165,10 @@ class AISignalPipeline:
             candidate_action=action,
             confidence=round(confidence, 4),
             size_pct=size_pct,
-            model_version=f"strategy-ai-v1/{settings.claude_model}",
+            model_version=(
+                f"strategy-ai-v1/{settings.claude_model}/"
+                f"prompt-{self._prompt.sha256[:12]}"
+            ),
             risk_score=risk_score,
             ta_summary=ta_contract,
             research_summary=research_summary,
@@ -244,12 +235,15 @@ class AISignalPipeline:
         else:
             context_parts.append("\nResearch Context: Unavailable")
 
-        user_message = "\n".join(context_parts)
+        user_message = untrusted_block(
+            "market-and-research-context",
+            "\n".join(context_parts),
+        )
 
         response = await client.messages.create(
             model=settings.claude_model,
             max_tokens=256,
-            system=_SYSTEM_PROMPT,
+            system=self._prompt.content,
             messages=[{"role": "user", "content": user_message}],
         )
 
@@ -316,18 +310,17 @@ def _build_deterministic_signal(
             model_version="strategy-rule-v1",
             risk_score=rule_signal.risk_score,
         )
-    # Fallback: hash-based when no TA data available
-    basis = sum(ord(char) for char in symbol.upper())
-    action = "BUY" if basis % 2 == 0 else "SELL"
-    confidence = round(0.6 + (basis % 20) / 100, 2)
-    size_pct = round(0.01 + (basis % 2) * 0.005, 3)
+    # No observations means no signal. A symbol hash is deterministic, but it
+    # is not market evidence; turning it into BUY/SELL makes a feed outage
+    # tradable.
     return SignalCandidate(
         signal_id=str(uuid4()),
         symbol=symbol.upper(),
         ts=datetime.now(timezone.utc),
-        candidate_action=action,
-        confidence=min(confidence, 0.95),
-        size_pct=size_pct,
-        model_version="strategy-m1-deterministic",
-        risk_score="MEDIUM",
+        candidate_action="HOLD",
+        confidence=0.0,
+        size_pct=0.005,
+        model_version="strategy-rule-v1/no-data",
+        risk_score="HIGH",
+        research_summary="market_data_unavailable",
     )

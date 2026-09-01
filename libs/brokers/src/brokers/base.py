@@ -17,6 +17,9 @@ class BrokerResult:
 
 
 class BaseBroker(Protocol):
+    @property
+    def is_live_trading(self) -> bool: ...
+
     def place_order(
         self,
         request: ExecutionOrderRequest,

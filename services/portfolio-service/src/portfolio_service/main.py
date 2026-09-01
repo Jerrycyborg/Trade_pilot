@@ -12,7 +12,9 @@ from contracts import (
     PortfolioSnapshot,
     PositionRecord,
 )
-from fastapi import FastAPI
+from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, select
 
@@ -29,10 +31,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="portfolio-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 
@@ -88,7 +95,10 @@ def get_snapshot() -> PortfolioSnapshot:
 
 
 @app.post("/v1/portfolio/reconcile", response_model=PortfolioReconcileResponse)
-def reconcile(request: PortfolioReconcileRequest) -> PortfolioReconcileResponse:
+def reconcile(
+    request: PortfolioReconcileRequest,
+    _: None = Depends(verify_internal_key),
+) -> PortfolioReconcileResponse:
     """Derive portfolio state from execution fills only."""
 
     fills = [fill_from_execution(record) for record in list_execution_fills()]

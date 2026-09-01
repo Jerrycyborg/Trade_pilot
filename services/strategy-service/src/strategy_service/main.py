@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+import os
+from datetime import datetime, timezone
+from typing import Literal, Optional
 
 from contracts import CandidateAction, SignalCandidate, TechnicalSummaryContract, WorkerStatus
-from fastapi import FastAPI, HTTPException, Query
+from contracts.auth import verify_admin_key, verify_internal_key
+from contracts.cors import cors_origins
+from contracts.sanitize import sanitize_symbol
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from market_data import MarketDataSettings, build_ta_summary, fetch_bars, get_fetcher
 from market_data.fetcher import DataUnavailableError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from .ai_pipeline import AISignalPipeline, _build_deterministic_signal
@@ -34,10 +39,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="strategy-service", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 
@@ -72,7 +82,10 @@ def _market_snapshot(symbol: str):
 
 
 @app.post("/v1/signals/generate", response_model=SignalCandidate)
-async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
+async def generate_signal(
+    request: SignalGenerationRequest,
+    _: None = Depends(verify_internal_key),
+) -> SignalCandidate:
     """Generate a trading signal. Uses AI pipeline when ANTHROPIC_API_KEY is set."""
     symbols = [
         symbol.strip().upper() for symbol in (request.symbols or []) if symbol and symbol.strip()
@@ -126,7 +139,10 @@ def list_signals(
 
 
 @app.post("/v1/signals/{signal_id}/act")
-def mark_signal_acted(signal_id: str) -> dict[str, object]:
+def mark_signal_acted(
+    signal_id: str,
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
     with SessionLocal() as session:
         row = session.scalar(select(SignalRecord).where(SignalRecord.signal_id == signal_id))
         if not row:
@@ -195,7 +211,9 @@ def get_worker_status() -> WorkerStatus:
 
 
 @app.post("/v1/worker/run")
-async def trigger_worker_run() -> dict:
+async def trigger_worker_run(
+    _: None = Depends(verify_internal_key),
+) -> dict:
     """Manually trigger one worker cycle (useful for operator testing)."""
     from .worker import TradeWorker, worker_state
 
@@ -389,75 +407,151 @@ def get_market_events(symbol: str) -> dict:
 
 
 class ManualTradeRequest(BaseModel):
-    symbol: str
-    side: str  # BUY | SELL
-    qty: int
-    order_type: str = "MARKET"
+    symbol: str = Field(min_length=1, max_length=32)
+    side: Literal["BUY", "SELL"]
+    qty: int = Field(ge=1, le=1_000_000)
+    order_type: Literal["MARKET"] = "MARKET"
+    strategy_id: str = Field(min_length=1, max_length=128)
+    account_id: str = Field(min_length=1, max_length=128)
 
 
 @app.post("/v1/trade/manual")
-async def manual_trade(request: ManualTradeRequest) -> dict:
-    """Submit a manual trade directly through policy → execution pipeline."""
+async def manual_trade(
+    request: ManualTradeRequest,
+    _: None = Depends(verify_admin_key),
+) -> dict:
+    """Submit an operator trade through observed market, portfolio and policy state."""
     from uuid import uuid4
 
     import httpx
 
+    symbol = sanitize_symbol(request.symbol)
     signal_id = f"manual-{uuid4()}"
+    ta, bars = await asyncio.to_thread(_market_snapshot, symbol)
+    if ta is None or not bars:
+        raise HTTPException(status_code=409, detail="Current market data is unavailable")
 
-    # 1. Policy check
-    policy_req = {
-        "signal_id": signal_id,
-        "symbol": request.symbol.upper(),
-        "candidate_action": request.side.upper(),
-        "confidence": 0.80,
-        "size_pct": 0.01,
-        "risk_score": "MEDIUM",
-        "market_context": {
-            "data_age_seconds": 5,
-            "market_open": True,
-            "liquidity_score": 0.95,
-        },
-        "portfolio_context": {
-            "gross_exposure_pct": 0.0,
-            "daily_drawdown_pct": 0.0,
-        },
-    }
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        policy_resp = await client.post(
-            f"{settings.policy_service_url}/v1/policy/evaluate", json=policy_req
+    observed_at = bars[-1].timestamp
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    data_age_seconds = max(
+        0,
+        int((datetime.now(timezone.utc) - observed_at).total_seconds()),
+    )
+    market_open = MarketDataSettings().is_intraday and data_age_seconds <= 120
+    if not market_open:
+        raise HTTPException(
+            status_code=409,
+            detail="Manual entry requires fresh intraday market data",
         )
 
-    policy = policy_resp.json()
-    if policy.get("decision") not in ("APPROVE", "REVIEW"):
-        return {
-            "status": "rejected_by_policy",
-            "decision": policy.get("decision"),
-            "reasons": policy.get("reasons", []),
-        }
-
-    # 2. Place order
-    order_req = {
-        "signal_id": signal_id,
-        "symbol": request.symbol.upper(),
-        "side": request.side.upper(),
-        "qty": request.qty,
-        "order_type": request.order_type.upper(),
-        "time_in_force": "DAY",
+    volumes = [float(bar.volume) for bar in bars[-20:] if float(bar.volume) > 0]
+    average_volume = sum(volumes) / len(volumes) if volumes else 0.0
+    liquidity_score = (
+        min(1.0, float(bars[-1].volume) / average_volume)
+        if average_volume > 0
+        else 0.0
+    )
+    internal_headers = {
+        "X-Internal-Key": os.environ.get("INTERNAL_API_KEY", ""),
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        order_resp = await client.post(
-            f"{settings.execution_service_url}/v1/orders",
-            json=order_req,
-            headers={"Idempotency-Key": signal_id},
-        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            account_resp, portfolio_resp = await asyncio.gather(
+                client.get(f"{settings.execution_service_url}/v1/account"),
+                client.get(f"{settings.portfolio_service_url}/v1/portfolio/snapshot"),
+            )
+            account_resp.raise_for_status()
+            portfolio_resp.raise_for_status()
+            account = account_resp.json()
+            portfolio = portfolio_resp.json()
+
+            equity = float(account.get("equity", 0.0))
+            buying_power = float(account.get("buying_power", 0.0))
+            decision_price = float(bars[-1].close)
+            notional = decision_price * request.qty
+            if equity <= 0 or buying_power < notional:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Account state cannot support the requested notional",
+                )
+
+            policy_req = {
+                "signal_id": signal_id,
+                "symbol": symbol,
+                "candidate_action": request.side,
+                "confidence": 0.80,
+                "size_pct": min(1.0, notional / equity),
+                "risk_score": "MEDIUM",
+                "market_context": {
+                    "data_age_seconds": data_age_seconds,
+                    "market_open": market_open,
+                    "liquidity_score": liquidity_score,
+                },
+                "portfolio_context": {
+                    "gross_exposure_pct": min(
+                        1.0,
+                        abs(float(portfolio.get("gross_exposure", 0.0))) / equity,
+                    ),
+                    "daily_drawdown_pct": min(
+                        1.0,
+                        max(0.0, -float(portfolio.get("realized_pnl", 0.0))) / equity,
+                    ),
+                },
+            }
+            policy_resp = await client.post(
+                f"{settings.policy_service_url}/v1/policy/evaluate",
+                json=policy_req,
+                headers=internal_headers,
+            )
+            policy_resp.raise_for_status()
+            policy = policy_resp.json()
+            if policy.get("decision") == "REVIEW":
+                return {
+                    "status": "requires_approval",
+                    "decision": "REVIEW",
+                    "reasons": policy.get("reasons", []),
+                }
+            if policy.get("decision") != "APPROVE":
+                return {
+                    "status": "rejected_by_policy",
+                    "decision": policy.get("decision"),
+                    "reasons": policy.get("reasons", []),
+                }
+
+            order_resp = await client.post(
+                f"{settings.execution_service_url}/v1/orders",
+                json={
+                    "signal_id": signal_id,
+                    "symbol": symbol,
+                    "side": request.side,
+                    "qty": request.qty,
+                    "order_type": request.order_type,
+                    "time_in_force": "DAY",
+                    "decision_price": decision_price,
+                    "strategy_id": request.strategy_id,
+                    "account_id": request.account_id,
+                },
+                headers={**internal_headers, "Idempotency-Key": signal_id},
+            )
+            order_resp.raise_for_status()
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        logger.error("Manual trade dependency failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="A required trading dependency is unavailable",
+        ) from exc
 
     order = order_resp.json()
     return {
         "status": "submitted",
         "order_id": order.get("order_id"),
         "order_status": order.get("status"),
-        "symbol": request.symbol.upper(),
-        "side": request.side.upper(),
+        "symbol": symbol,
+        "side": request.side,
         "qty": request.qty,
         "policy_decision": policy.get("decision"),
     }

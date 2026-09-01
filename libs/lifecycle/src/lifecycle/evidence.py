@@ -226,11 +226,30 @@ def derive_paper_evidence(
         symbol=sleeve.symbol,
         environment="paper",
         account_id=sleeve.account_id,
+        strategy_version=sleeve.strategy_version,
         window_start=window_start,
         window_end=end,
     )
     if not execution.get("available"):
         problems.append(f"execution records unavailable: {execution.get('reason')}")
+
+    performance: dict[str, Any] = {}
+    try:
+        from attribution import load_round_trips, performance_from_trades
+
+        round_trips = load_round_trips(
+            journal,
+            strategy_id=sleeve.strategy_id,
+            strategy_version=sleeve.strategy_version,
+            symbol=sleeve.symbol,
+            environment="paper",
+            account_id=sleeve.account_id,
+            window_start=window_start,
+            window_end=end,
+        )
+        performance = performance_from_trades(round_trips)
+    except Exception as exc:
+        problems.append(f"paper round-trip P&L unavailable: {exc}")
 
     completeness = journal.completeness(
         symbol=sleeve.symbol,
@@ -283,7 +302,14 @@ def derive_paper_evidence(
         "cancellations": execution.get("cancellations", 0),
         "rejections": execution.get("rejections", 0),
         "fill_rate": execution.get("fill_rate"),
-        "realized_pnl": execution.get("realized_pnl", 0.0),
+        "closed_round_trips": performance.get("trades", 0),
+        "gross_realized_pnl": performance.get("realized_total", 0.0),
+        "realized_pnl": round(
+            float(performance.get("realized_total") or 0.0)
+            - float(execution.get("fees") or 0.0),
+            4,
+        ),
+        "execution_cash_effect": execution.get("execution_cash_effect", 0.0),
         "fees": execution.get("fees", 0.0),
         "measured_shortfall_bps": execution.get("mean_shortfall_bps"),
         "worst_shortfall_bps": execution.get("worst_shortfall_bps"),

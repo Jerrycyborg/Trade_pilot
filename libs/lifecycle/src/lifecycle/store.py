@@ -216,6 +216,9 @@ class PostgresLifecycleStore:
             "reconciliation_state", self._meta, autoload_with=self._engine
         )
         self._journal_health = Table("journal_health", self._meta, autoload_with=self._engine)
+        self._learning_cycle = Table(
+            "learning_cycle", self._meta, autoload_with=self._engine
+        )
 
     # ------------------------------------------------------------------
     # Reads — never cached
@@ -664,6 +667,83 @@ class PostgresLifecycleStore:
                     .returning(self._challenger.c.id)
                 ).scalar()
             )
+
+    def record_learning_cycle(
+        self,
+        *,
+        report: dict[str, Any],
+        account_id: str | None = None,
+    ) -> int:
+        """Append one fail-closed learning-cycle audit record."""
+        if report.get("deployment_authority") is not False:
+            raise LifecycleStoreError("a learning cycle cannot have deployment authority")
+        if report.get("promotion_authority") is not False:
+            raise LifecycleStoreError("a learning cycle cannot have promotion authority")
+        account = account_id or self._settings.account_id
+        content_hash = str(report.get("content_hash") or "")
+        if len(content_hash) != 64:
+            raise LifecycleStoreError("learning cycle requires a content hash")
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(self._learning_cycle.c.id).where(
+                    self._learning_cycle.c.campaign_id == report["campaign_id"]
+                )
+            ).scalar()
+            if existing is not None:
+                return int(existing)
+            return int(
+                conn.execute(
+                    self._learning_cycle.insert()
+                    .values(
+                        campaign_id=report["campaign_id"],
+                        account_id=account,
+                        strategy_id=report["strategy_id"],
+                        symbol=report["symbol"].upper(),
+                        base_version=report["base_version"],
+                        status=report["status"],
+                        as_of=datetime.fromisoformat(report["as_of"]),
+                        report=report,
+                        content_hash=content_hash,
+                        deployment_authority=False,
+                        promotion_authority=False,
+                    )
+                    .returning(self._learning_cycle.c.id)
+                ).scalar_one()
+            )
+
+    def learning_cycles(
+        self,
+        *,
+        strategy_id: str | None = None,
+        symbol: str | None = None,
+        account_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return immutable learning audits newest first."""
+        account = account_id or self._settings.account_id
+        conditions = [self._learning_cycle.c.account_id == account]
+        if strategy_id is not None:
+            conditions.append(self._learning_cycle.c.strategy_id == strategy_id)
+        if symbol is not None:
+            conditions.append(self._learning_cycle.c.symbol == symbol.upper())
+        stmt = (
+            select(self._learning_cycle)
+            .where(*conditions)
+            .order_by(self._learning_cycle.c.as_of.desc())
+            .limit(limit)
+        )
+        with self._engine.connect() as conn:
+            return [
+                {
+                    "id": row.id,
+                    "campaign_id": row.campaign_id,
+                    "status": row.status,
+                    "report": row.report,
+                    "content_hash": row.content_hash,
+                    "created_at": _aware(row.created_at).isoformat(),
+                }
+                for row in conn.execute(stmt)
+            ]
 
     def challenger_proposals(
         self,

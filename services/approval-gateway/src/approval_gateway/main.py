@@ -7,6 +7,7 @@ from uuid import uuid4
 import yaml
 from contracts import ApprovalRequest, ApprovalResponse
 from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol, validate_positive_amount
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -21,10 +22,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="approval-gateway", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 

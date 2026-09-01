@@ -1,6 +1,7 @@
 """Shared contracts for Trade Pilot services."""
 
 from .auth import verify_admin_key, verify_internal_key
+from .cors import cors_origins
 from .models import (
     AccountInfo,
     ApprovalRequest,
@@ -35,6 +36,7 @@ from .models import (
     TechnicalSummaryContract,
     WorkerStatus,
 )
+from .prompts import PromptArtifact, load_prompt, untrusted_block
 from .rate_limit import TokenBucket, rate_limit_write
 from .sanitize import sanitize_symbol, validate_positive_amount
 
@@ -64,6 +66,7 @@ __all__ = [
     "PortfolioSnapshot",
     "PortfolioContext",
     "PositionRecord",
+    "PromptArtifact",
     "ResearchReport",
     "RiskAssessment",
     "RiskScore",
@@ -72,8 +75,11 @@ __all__ = [
     "TechnicalSummaryContract",
     "TokenBucket",
     "WorkerStatus",
+    "cors_origins",
+    "load_prompt",
     "rate_limit_write",
     "sanitize_symbol",
+    "untrusted_block",
     "validate_positive_amount",
     "verify_admin_key",
     "verify_internal_key",

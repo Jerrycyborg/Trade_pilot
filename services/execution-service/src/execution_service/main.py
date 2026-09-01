@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from uuid import uuid4
 
 from contracts import (
@@ -18,6 +19,7 @@ from contracts import (
     OrderStatus,
 )
 from contracts.auth import verify_internal_key
+from contracts.cors import cors_origins
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +27,7 @@ from lifecycle.routing import assert_not_live
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .broker import broker, close_position, resolve_instrument_id  # noqa: F401
+from .broker import broker, resolve_instrument_id  # noqa: F401
 from .config import settings as config_settings
 from .database import Base, SessionLocal, engine
 from .logging_utils import log_event
@@ -53,16 +55,27 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="execution-service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "execution-service"}
+def health() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "service": "execution-service",
+        "operating_state": router.operating_state(
+            os.getenv("TRADING_ACCOUNT_ID", "default")
+        ),
+    }
 
 
 @app.post("/v1/orders", response_model=ExecutionOrderResponse)
@@ -98,6 +111,18 @@ def create_order(
         )
         if not routed.places_order:
             return _record_unplaced(session, request, routed, idempotency_key, payload_hash)
+
+        if routed.decision.is_live and not {"strategy_id", "account_id"}.issubset(
+            request.model_fields_set
+        ):
+            return _record_unplaced(
+                session,
+                request,
+                routed,
+                idempotency_key,
+                payload_hash,
+                reason="live_order_requires_explicit_strategy_and_account",
+            )
 
         # Position cap, enforced here and not in the caller: the strategy
         # worker re-signals every cycle, and a persistent signal that re-enters
@@ -204,8 +229,6 @@ def _position_cap_refusal(request, routed) -> str | None:
     entries rather than treating the missing book as empty. Exits are exempt
     either way, so this can never trap a position behind its own guard.
     """
-    if request.reduce_only:
-        return None
     from journal import get_journal
 
     environment = "live" if routed.decision.is_live else "paper"
@@ -218,11 +241,29 @@ def _position_cap_refusal(request, routed) -> str | None:
     if net is None:
         return (
             "position_unknowable: the journal cannot say what this sleeve "
-            "already holds, so an entry that could stack is refused"
+            "already holds, so the order is refused"
         )
     side = str(request.side).upper()
     signed = float(request.qty) if side == "BUY" else -float(request.qty)
     new_net = net + signed
+
+    if request.reduce_only:
+        if abs(net) <= 1e-9:
+            return "reduce_only_no_position"
+        if net * signed >= 0:
+            return (
+                f"reduce_only_wrong_side: holding {net:+g}, order {signed:+g} "
+                "would increase exposure"
+            )
+        if abs(signed) > abs(net) + 1e-9:
+            return (
+                f"reduce_only_exceeds_position: holding {net:+g}, order "
+                f"{signed:+g} could reverse the position"
+            )
+        if abs(new_net) > abs(net) + 1e-9:
+            return "reduce_only_invariant_failed"
+        return None
+
     cap = float(config_settings.max_position_qty)
     if abs(new_net) > cap and abs(new_net) > abs(net):
         return (
@@ -293,13 +334,77 @@ def _record_unplaced(
 def close_order(
     request: ClosePositionRequest, _: None = Depends(verify_internal_key)
 ) -> dict[str, object]:
+    """Close through the server-side route for the named sleeve.
+
+    This endpoint used a process-global broker and hardcoded every journal row
+    to paper. A stop for one sleeve could therefore close a different venue,
+    while a real close was recorded as simulated.
+    """
     request.symbol = sanitize_symbol(request.symbol)
-    units = None if request.qty == 0 else request.qty
+    routed = router.route(
+        strategy_id=request.strategy_id,
+        symbol=request.symbol,
+        account_id=request.account_id,
+        reduce_only=True,
+    )
+    if not routed.places_order or routed.adapter is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"close_not_routable: {routed.decision.reason}",
+        )
+    if routed.decision.is_live and not {"strategy_id", "account_id"}.issubset(
+        request.model_fields_set
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="live_close_requires_explicit_strategy_and_account",
+        )
+
+    closer = getattr(routed.adapter, "close_position", None)
+    if closer is None:
+        raise HTTPException(status_code=501, detail="broker_does_not_support_position_close")
+
+    units = request.units if request.units is not None else request.qty
+    if bool(getattr(routed.adapter, "requires_position_id_match", False)):
+        position_reader = getattr(routed.adapter, "get_positions", None)
+        if not callable(position_reader):
+            raise HTTPException(
+                status_code=501,
+                detail="broker_cannot_verify_position_identity",
+            )
+        candidates = [
+            position
+            for position in position_reader()
+            if position.symbol.upper() == request.symbol
+            and position.position_id == request.position_id
+        ]
+        if not candidates:
+            raise HTTPException(
+                status_code=409,
+                detail="position_id_does_not_match_symbol",
+            )
+        if units is not None and float(units) > abs(float(candidates[0].qty)):
+            raise HTTPException(
+                status_code=422,
+                detail="close_units_exceed_broker_position",
+            )
+
+    instrument_id = 0
+    resolver = getattr(routed.adapter, "resolve_instrument_id", None) or getattr(
+        routed.adapter, "_resolve_instrument_id", None
+    )
+    if callable(resolver):
+        try:
+            instrument_id = int(resolver(request.symbol))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     try:
-        closed = close_position(
+        closed = closer(
             position_id=request.position_id,
+            instrument_id=instrument_id,
+            units=units,
             symbol=request.symbol,
-            units=request.units if request.units is not None else units,
         )
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
@@ -308,37 +413,42 @@ def close_order(
 
     if not closed:
         raise HTTPException(status_code=502, detail="position_close_failed")
-    # A close is a fill like any other order's, and this endpoint is the one
-    # the stop-loss and take-profit monitors and the orchestrator's exit pass
-    # use — leaving it out of the journal meant the position ledger recorded
-    # entries only: after the first stop fired, net_position stayed at the
-    # entry forever, the worker's "already positioned" gate wedged, and the
-    # server-side cap drifted. Best-effort, like every quality record.
-    if isinstance(closed, dict) and closed.get("fill_price"):
+
+    environment = "live" if routed.decision.is_live else "paper"
+    fill_confirmed = bool(
+        isinstance(closed, dict)
+        and closed.get("fill_price")
+        and closed.get("side")
+        and float(closed.get("qty") or units or 0.0) > 0
+    )
+    if fill_confirmed:
         try:
             from journal import get_journal
 
             get_journal().record_execution(
                 symbol=request.symbol,
-                side=str(closed.get("side", "")),
-                qty=float(closed.get("qty") or 0.0),
+                side=str(closed["side"]),
+                qty=float(closed.get("qty") or units or 0.0),
                 decision_price=None,
                 fill_price=float(closed["fill_price"]),
-                order_id=str(closed.get("order_id") or ""),
+                order_id=str(closed.get("order_id") or request.position_id),
                 signal_id=request.signal_id,
                 outcome="closed",
                 strategy_id=request.strategy_id,
+                strategy_version=routed.strategy_version,
                 account_id=request.account_id,
-                environment="paper",
-                broker="paper",
+                environment=environment,
+                broker=routed.adapter_name,
             )
         except Exception as exc:
             logger.error("Close fill not journalled for %s: %s", request.symbol, exc)
     return {
-        "status": "closed",
+        "status": "closed" if fill_confirmed else "close_submitted",
         "symbol": request.symbol,
         "position_id": request.position_id,
         "signal_id": request.signal_id,
+        "environment": environment,
+        "broker": routed.adapter_name,
     }
 
 
@@ -454,6 +564,7 @@ def _record_execution_quality(request, order, broker_result, routed) -> None:
                 or str(getattr(broker_result.status, "value", broker_result.status)).lower()
             ),
             strategy_id=request.strategy_id,
+            strategy_version=routed.strategy_version,
             account_id=request.account_id,
             environment=environment,
             broker=routed.adapter_name,
@@ -543,6 +654,7 @@ def _hash_payload(request: ExecutionOrderRequest) -> str:
 def _to_response(order: OrderRecord) -> ExecutionOrderResponse:
     return ExecutionOrderResponse(
         order_id=order.order_id,
+        external_order_id=order.external_order_id,
         signal_id=order.signal_id,
         symbol=order.symbol,
         side=order.side,

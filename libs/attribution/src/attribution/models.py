@@ -48,6 +48,7 @@ class RoundTrip:
     entry: Leg
     exit: Leg
     qty: float
+    strategy_version: str = ""
 
     @property
     def direction(self) -> int:
@@ -130,6 +131,7 @@ class Attribution:
     def to_dict(self) -> dict[str, Any]:
         return {
             "strategy_id": self.round_trip.strategy_id,
+            "strategy_version": self.round_trip.strategy_version,
             "symbol": self.round_trip.symbol,
             "environment": self.round_trip.environment,
             "direction": "long" if self.round_trip.direction > 0 else "short",

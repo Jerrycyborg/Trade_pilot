@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -82,6 +82,9 @@ class BrokerPosition(BaseModel):
 
     symbol: str
     qty: float
+    position_id: str | None = None
+    """Broker-native position identity when the venue exposes one."""
+
     market_value: float = 0.0
     average_price: float = 0.0
     unrealized_pnl: float = 0.0
@@ -270,60 +273,52 @@ class PolicyEvaluationRecordResponse(BaseModel):
 class ExecutionOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    signal_id: str
-    symbol: str
+    signal_id: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=32)
     side: str
-    qty: int = Field(gt=0)
-    order_type: str
-    time_in_force: str = "DAY"
-    stop_loss_rate: float | None = None
-    take_profit_rate: float | None = None
-    limit_price: float | None = None
+    qty: int = Field(gt=0, le=1_000_000)
+    order_type: Literal["MARKET", "LIMIT"]
+    time_in_force: Literal["DAY", "GTC", "IOC"] = "DAY"
+    stop_loss_rate: float | None = Field(default=None, gt=0.0)
+    take_profit_rate: float | None = Field(default=None, gt=0.0)
+    limit_price: float | None = Field(default=None, gt=0.0)
     """Set for LIMIT orders. With time_in_force=IOC this caps the price paid
     without leaving a working order behind."""
 
-    decision_price: float | None = None
+    decision_price: float | None = Field(default=None, gt=0.0)
     """The price the decision was based on. Carried through to the fill so
     execution cost can be measured rather than assumed."""
 
-    strategy_id: str = "ema_rsi_macd"
-    """Which rule produced this order. execution-service looks the sleeve up on
-    (strategy_id, symbol, account) to decide the broker route, so a wrong value
-    here is gated against the wrong sleeve — it is not a free-text label."""
+    strategy_id: str = Field(default="ema_rsi_macd", min_length=1, max_length=128)
+    """Required for live routing; the paper default keeps legacy simulations
+    readable while execution rejects an implicit identity on a live route.
+    Execution routes on (strategy, symbol, account); silently defaulting this
+    field can route an order against a different sleeve than policy evaluated."""
 
-    account_id: str = "default"
+    account_id: str = Field(default="default", min_length=1, max_length=128)
 
     reduce_only: bool = False
-    """True when this order can only decrease exposure — a stop, a take-profit,
-    or any exit. Reduce-only orders are never blocked by a halt: refusing to
-    let a position close turns a bookkeeping problem into a financial one.
-
-    Note what is deliberately absent: there is no broker or environment field.
-    The venue is resolved server-side from the sleeve's lifecycle state and the
-    operator's live-mode switch. A caller that could name its own broker could
-    route a candidate sleeve's order to a live venue."""
+    """A claim that the order only reduces the named sleeve. Execution verifies
+    the claim against its durable fill ledger before contacting any adapter."""
 
 
 class ClosePositionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str
-    position_id: str
-    signal_id: str
-    units: float | None = None
-    qty: float | None = Field(default=None, ge=0.0)
-    strategy_id: str = ""
-    """Which sleeve's position this closes. Execution journals the exit fill
-    under this scope; without it the position ledger recorded entries only,
-    and every stop-loss or take-profit exit left a phantom position behind."""
-
-    account_id: str = "default"
+    symbol: str = Field(min_length=1, max_length=32)
+    position_id: str = Field(min_length=1, max_length=128)
+    signal_id: str = Field(min_length=1, max_length=128)
+    units: float | None = Field(default=None, gt=0.0)
+    qty: float | None = Field(default=None, gt=0.0)
+    strategy_id: str = Field(default="ema_rsi_macd", min_length=1, max_length=128)
+    account_id: str = Field(default="default", min_length=1, max_length=128)
 
 
 class ExecutionOrderResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_id: str
+    external_order_id: Optional[str] = None
     signal_id: str
     symbol: str
     side: str

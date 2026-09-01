@@ -135,6 +135,9 @@ class TradeWorker:
                 await client.post(
                     f"{settings.research_service_url}/v1/research/report",
                     json={"symbols": symbols},
+                    headers={
+                        "X-Internal-Key": os.environ.get("INTERNAL_API_KEY", ""),
+                    },
                 )
         except Exception as exc:
             logger.debug("Research cache warm failed (non-fatal): %s", exc)
@@ -723,6 +726,9 @@ class TradeWorker:
                 resp = await client.post(
                     f"{settings.policy_service_url}/v1/policy/evaluate",
                     json=req.model_dump(mode="json"),
+                    headers={
+                        "X-Internal-Key": os.environ.get("INTERNAL_API_KEY", ""),
+                    },
                 )
                 if resp.status_code == 200:
                     return resp.json()

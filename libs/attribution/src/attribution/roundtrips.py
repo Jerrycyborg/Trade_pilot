@@ -54,7 +54,9 @@ def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
     close whose opening fill predates the archive window looks like a fresh
     opening in the opposite direction, so windows should start flat.
     """
-    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[
+        tuple[str, str, str, str, str], list[dict[str, Any]]
+    ] = defaultdict(list)
     for row in rows:
         if not row.get("filled"):
             continue
@@ -63,6 +65,7 @@ def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
         groups[
             (
                 str(row.get("strategy_id") or ""),
+                str(row.get("strategy_version") or ""),
                 str(row.get("symbol") or "").upper(),
                 str(row.get("environment") or ""),
                 str(row.get("account_id") or ""),
@@ -70,7 +73,13 @@ def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
         ].append(row)
 
     trips: list[RoundTrip] = []
-    for (strategy_id, symbol, environment, account_id), scoped in groups.items():
+    for (
+        strategy_id,
+        strategy_version,
+        symbol,
+        environment,
+        account_id,
+    ), scoped in groups.items():
         scoped.sort(key=lambda r: r["recorded_at"])
         # All open lots in a scope share one direction at any moment: an
         # opposing fill nets against them FIFO before anything new opens.
@@ -95,6 +104,7 @@ def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
                         symbol=symbol,
                         environment=environment,
                         account_id=account_id,
+                        strategy_version=strategy_version,
                         entry=entry,
                         exit=leg,
                         qty=matched,
@@ -123,6 +133,7 @@ def load_round_trips(
     journal: Any,
     *,
     strategy_id: str | None = None,
+    strategy_version: str | None = None,
     symbol: str | None = None,
     environment: str | None = None,
     account_id: str = "default",
@@ -137,6 +148,7 @@ def load_round_trips(
     """
     rows = journal.execution_rows(
         strategy_id=strategy_id,
+        strategy_version=strategy_version,
         symbol=symbol,
         environment=environment,
         account_id=account_id,

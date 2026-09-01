@@ -16,12 +16,21 @@ logger = logging.getLogger(__name__)
 class EtoroBroker:
     """Broker adapter using the public eToro API."""
 
+    # eToro closes by an opaque position id. The execution boundary must prove
+    # that id belongs to the requested symbol before sending a close.
+    requires_position_id_match = True
+
     def __init__(self, api_key: str, user_key: str, demo: bool = True) -> None:
         self._api_key = api_key
         self._user_key = user_key
         self._demo = demo
         self._base_url = "https://public-api.etoro.com/api/v1"
         self._instrument_cache: dict[str, int] = {}
+        self._client = httpx.Client(base_url=self._base_url, timeout=15.0)
+
+    @property
+    def is_live_trading(self) -> bool:
+        return not self._demo
 
     def submit(self, request: ExecutionOrderRequest) -> BrokerResult:
         return self.place_order(
@@ -57,7 +66,12 @@ class EtoroBroker:
                 f"/trading/execution/{self._execution_prefix()}market-open-orders/by-amount",
                 json=payload,
             )
-            order_id = str(response.get("orderId") or response.get("id") or uuid4())
+            order_id = str(
+                response.get("positionId")
+                or response.get("orderId")
+                or response.get("id")
+                or uuid4()
+            )
             status = OrderStatus.ACCEPTED if response else OrderStatus.REJECTED
             return BrokerResult(
                 status=status,
@@ -92,6 +106,13 @@ class EtoroBroker:
                 BrokerPosition(
                     symbol=str(item.get("internalSymbolFull") or item.get("symbol") or "").upper(),
                     qty=float(item.get("amount") or item.get("qty") or 0.0),
+                    position_id=str(
+                        item.get("positionId")
+                        or item.get("PositionId")
+                        or item.get("id")
+                        or ""
+                    )
+                    or None,
                     market_value=float(item.get("marketValue") or item.get("market_value") or 0.0),
                     average_price=float(
                         item.get("averageOpen") or item.get("average_price") or 0.0
@@ -142,18 +163,25 @@ class EtoroBroker:
         instrument_id: int,
         units: float | None = None,
         symbol: str | None = None,
-    ) -> bool:
-        """Close an open position by positionId. units_to_deduct=None = full close."""
+    ) -> dict[str, object] | bool:
+        """Close an open position by the broker's position id."""
         try:
             payload: dict[str, object] = {"InstrumentId": instrument_id}
             if units is not None:
                 payload["UnitsToDeduct"] = units
-            self._request(
+            response = self._request(
                 "POST",
                 f"/trading/execution/{self._execution_prefix()}market-close-orders/positions/{position_id}",
                 json=payload,
             )
-            return True
+            return {
+                "order_id": str(response.get("orderId") or response.get("id") or uuid4()),
+                "position_id": position_id,
+                "symbol": (symbol or "").upper(),
+                "qty": float(units or 0.0),
+                "side": str(response.get("side") or "").upper(),
+                "fill_price": _extract_fill_price(response),
+            }
         except Exception as exc:
             logger.error("EtoroBroker.close_position failed for %s: %s", position_id, exc)
             return False
@@ -214,6 +242,10 @@ class EtoroBroker:
             "x-request-id": str(uuid4()),
         }
 
+    def close(self) -> None:
+        """Release pooled broker connections during an orderly shutdown."""
+        self._client.close()
+
     def _request(
         self,
         method: str,
@@ -222,15 +254,18 @@ class EtoroBroker:
         params: dict[str, object] | None = None,
         json: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        with httpx.Client(base_url=self._base_url, timeout=15.0) as client:
-            response = client.request(
-                method, path, headers=self._headers(), params=params, json=json
-            )
-            response.raise_for_status()
-            if not response.content:
-                return {}
-            payload = response.json()
-            return payload if isinstance(payload, dict) else {"items": payload}
+        response = self._client.request(
+            method,
+            path,
+            headers=self._headers(),
+            params=params,
+            json=json,
+        )
+        response.raise_for_status()
+        if not response.content:
+            return {}
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"items": payload}
 
 
 def _extract_fill_price(payload: dict[str, object]) -> float | None:

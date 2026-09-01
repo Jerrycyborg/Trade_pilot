@@ -123,7 +123,10 @@ class LifecycleService:
         try:
             if sleeve.state == "live" and not self._store.live_mode_enabled(account_id):
                 return GateAnswer(False, "live_mode_disabled_by_operator")
-            halt = self._store.reconciliation_state("live", "live", account_id)
+            environment = "live" if sleeve.state == "live" else "paper"
+            halt = self._store.reconciliation_state(
+                environment, environment, account_id
+            )
         except Exception as exc:
             return GateAnswer(False, f"lifecycle_unavailable: {exc}", available=False)
 

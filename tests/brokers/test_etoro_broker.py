@@ -68,3 +68,25 @@ def test_etoro_broker_place_order_passes_stop_loss_take_profit(monkeypatch) -> N
     assert captured["TakeProfitRate"] == 106.0
     assert "IsNoStopLoss" not in captured
     assert "IsNoTakeProfit" not in captured
+
+
+def test_etoro_positions_preserve_broker_position_identity(monkeypatch) -> None:
+    broker = EtoroBroker(api_key="pub", user_key="user", demo=True)
+
+    def fake_request(method: str, path: str, **kwargs):
+        assert method == "GET"
+        assert path.endswith("portfolio")
+        return {
+            "positions": [
+                {
+                    "positionId": "position-7",
+                    "internalSymbolFull": "AAPL",
+                    "amount": 2,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(broker, "_request", fake_request)
+    positions = broker.get_positions()
+    assert len(positions) == 1
+    assert positions[0].position_id == "position-7"

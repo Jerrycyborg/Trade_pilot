@@ -17,6 +17,7 @@ from contracts import (
     SignalCandidate,
 )
 from contracts.auth import verify_admin_key, verify_internal_key
+from contracts.cors import cors_origins
 from contracts.execution import (
     average_daily_volume,
     marketable_limit_price,
@@ -24,7 +25,7 @@ from contracts.execution import (
 )
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from lifecycle import DEFAULT_LIVE_STRATEGY
 from lifecycle.health import run_health_sweep
@@ -86,6 +87,8 @@ class OrchestratorState:
     day_trades: DayTradeTracker | None = None
     lifecycle: LifecycleService | None = None
     last_health_sweep: dict[str, object] | None = None
+    learning_running: bool = False
+    last_learning_summary: dict[str, object] | None = None
 
 
 state = OrchestratorState()
@@ -190,6 +193,17 @@ def _start_scheduler() -> None:
         coalesce=True,
         max_instances=1,
     )
+    if os.getenv("LEARNING_ENABLED", "false").lower() == "true":
+        scheduler.add_job(
+            _run_learning_cycles,
+            "interval",
+            seconds=max(3600, int(os.getenv("LEARNING_INTERVAL_SECONDS", "86400"))),
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
+            id="paper_learning_cycle",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -229,6 +243,39 @@ async def _run_health_sweep() -> dict[str, object]:
         )
     return state.last_health_sweep
 
+
+async def _run_learning_cycles() -> dict[str, object]:
+    """Run bounded offline learning; never transition or deploy a sleeve."""
+    if state.learning_running:
+        return {"status": "already_running"}
+    state.learning_running = True
+    try:
+        # The backtest stack is intentionally lazy: normal trading startup does
+        # not import numpy/pandas or pay the learner's initialization cost.
+        from .learning_worker import run_paper_learning_cycles
+
+        reports = await asyncio.to_thread(
+            run_paper_learning_cycles,
+            _lifecycle().store,
+            _journal(),
+        )
+        summary: dict[str, object] = {
+            "status": "completed",
+            "at": datetime.now(timezone.utc).isoformat(),
+            "cycles": len(reports),
+            "reports": reports,
+        }
+    except Exception as exc:
+        logger.exception("Paper learning cycle failed: %s", exc)
+        summary = {
+            "status": "failed",
+            "at": datetime.now(timezone.utc).isoformat(),
+            "error_type": type(exc).__name__,
+        }
+    finally:
+        state.learning_running = False
+    state.last_learning_summary = summary
+    return summary
 
 
 async def _check_dependency(name: str, url: str) -> dict[str, object]:
@@ -337,10 +384,15 @@ async def lifespan(app_: FastAPI):
 app = FastAPI(title="autonomy-orchestrator", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 
@@ -573,6 +625,24 @@ async def health_sweep_now(_: None = Depends(verify_internal_key)) -> dict[str, 
     return await _run_health_sweep()
 
 
+@app.post("/v1/orchestrator/learning/run")
+async def learning_cycle_now(
+    request: Request,
+    _: None = Depends(verify_internal_key),
+    _rl: None = Depends(rate_limit_write),
+) -> dict[str, object]:
+    """Run the same bounded learner used by the scheduler."""
+    return await _run_learning_cycles()
+
+
+@app.get("/v1/orchestrator/learning/status")
+def learning_cycle_status() -> dict[str, object]:
+    return {
+        "running": state.learning_running,
+        "last_summary": state.last_learning_summary,
+    }
+
+
 @app.get("/v1/orchestrator/day-trades")
 def day_trade_status() -> dict[str, object]:
     """Day-trade budget under the US pattern-day-trader rule."""
@@ -594,42 +664,11 @@ def status() -> dict[str, object]:
 
 
 @app.get("/v1/orchestrator/client-config")
-async def client_config(request: Request) -> dict[str, str]:
-    """Dashboard client configuration.
-
-    This used to return INTERNAL_API_KEY and ADMIN_API_KEY to any caller whose
-    source address looked local. Behind a reverse proxy — nginx, or
-    scripts/serve_dashboard.py — every request appears to come from localhost,
-    so anyone who could reach the dashboard could read the admin key and toggle
-    the kill switch or live mode.
-
-    Keys are now injected by the proxy on the server side and are not returned
-    here. Set EXPOSE_CLIENT_KEYS=true only if you run an older proxy that
-    cannot inject them, and understand that it hands the admin key to every
-    visitor of the dashboard.
-    """
-    import os
-
-    if os.getenv("EXPOSE_CLIENT_KEYS", "false").lower() != "true":
-        return {"keysInjectedByProxy": "true"}
-
-    client_host = getattr(request.client, "host", "")
-    allowed = (
-        client_host in ("127.0.0.1", "::1", "localhost")
-        or client_host.startswith("192.168.")
-        or client_host.startswith("10.")
-        or client_host.startswith("172.")
-    )
-    if not allowed:
-        raise HTTPException(status_code=403, detail="not allowed")
-    logger.warning(
-        "EXPOSE_CLIENT_KEYS=true — serving API keys to %s. Anyone who can reach "
-        "the dashboard can read the admin key.",
-        client_host,
-    )
+def client_config() -> dict[str, str]:
+    """Return only non-secret dashboard capability metadata."""
     return {
-        "internalKey": os.getenv("INTERNAL_API_KEY", ""),
-        "adminKey": os.getenv("ADMIN_API_KEY", ""),
+        "browserReceivesSecrets": "false",
+        "mutationsRequireAuthenticatedOperator": "true",
     }
 
 
@@ -639,7 +678,9 @@ def last_cycle() -> dict[str, object]:
 
 
 @app.post("/v1/orchestrator/cycle/trigger")
-async def trigger_cycle(x_internal_key: str = Header(...)) -> dict[str, object]:
+async def trigger_cycle(
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
     """Manually trigger a cycle (bypasses market hours gate — for testing)."""
     from .policy_config import load_policy_config
 
@@ -1119,7 +1160,21 @@ async def _policy_evaluate(
         confidence=signal.confidence,
         size_pct=risk.adjusted_size_pct or signal.size_pct,
         market_context={
-            "data_age_seconds": 10,
+            "data_age_seconds": (
+                max(
+                    0,
+                    int(
+                        (
+                            datetime.now(timezone.utc)
+                            - (
+                                signal.ta_summary.as_of
+                                if signal.ta_summary is not None
+                                else datetime.fromtimestamp(0, tz=timezone.utc)
+                            )
+                        ).total_seconds()
+                    ),
+                )
+            ),
             "market_open": is_market_hours(config),
             "event_blackout_active": event_blackout,
             "liquidity_score": 0.95,
@@ -1222,6 +1277,8 @@ async def _submit_order(
                     "decision_price": current_price,
                     "stop_loss_rate": stop_loss_rate,
                     "take_profit_rate": take_profit_rate,
+                    "strategy_id": _strategy_of(signal),
+                    "account_id": settings.account_id,
                 },
                 headers={
                     "Idempotency-Key": f"orchestrator-{signal.signal_id}",
@@ -1447,10 +1504,11 @@ def _register_stop_loss(
             symbol=symbol,
             entry_price=entry_price,
             stop_price=stop_price,
-            position_id=str(order.get("order_id", symbol)),
+            position_id=str(order.get("external_order_id") or order.get("order_id") or symbol),
             qty=float(order.get("qty", 0.0)),
             side=side,
             strategy_id=strategy_id,
+            account_id=settings.account_id,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -1470,10 +1528,13 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     state.take_profit_monitor.register(
         TakeProfitRecord(
             strategy_id=_strategy_of(signal),
+            account_id=settings.account_id,
             symbol=signal.symbol,
             entry_price=entry_price,
             target_price=target_price,
-            position_id=str(order.get("order_id", signal.symbol)),
+            position_id=str(
+                order.get("external_order_id") or order.get("order_id") or signal.symbol
+            ),
             qty=qty,
             side=_side_of(signal.candidate_action),
             target_gain_usd=settings.take_profit_target_usd,
@@ -1503,44 +1564,62 @@ def _realized_pnl(record, exit_price: float | None) -> float | None:
 
 
 async def _run_reconciliation() -> None:
-    """Scheduled ledger-vs-broker check, independent of the trading cycle.
-
-    Runs on its own timer so a break is noticed even when no signals are being
-    produced — a position that appears at the broker outside the loop is exactly
-    the case worth catching.
-    """
+    """Persist the broker-vs-ledger latch in the shared lifecycle authority."""
     result = await _reconciler().check()
-    if result.breaks:
+    store = _lifecycle().store
+    if store is not None:
+        try:
+            live = store.live_mode_enabled(settings.account_id)
+            environment = "live" if live else "paper"
+            durable = store.record_reconciliation(
+                broker=environment,
+                environment=environment,
+                ok=result.ok,
+                breaks=len(result.breaks),
+                error=result.error or "",
+                dependency_available=result.error is None,
+                account_id=settings.account_id,
+                now=result.checked_at,
+            )
+            result.consecutive_breaks = durable.consecutive_breaks
+            result.halted = durable.halted
+        except Exception as exc:
+            logger.exception("Could not persist reconciliation state: %s", exc)
+
+    if result.breaks or result.error:
         await _audit(
             AuditEvent(
                 event_type="reconciliation.break",
                 decision="ALERT",
-                reasoning="; ".join(b.describe() for b in result.breaks[:5]),
+                reasoning=(
+                    "; ".join(b.describe() for b in result.breaks[:5])
+                    or f"dependency_unavailable: {result.error}"
+                ),
                 metadata=result.to_dict(),
             )
         )
         _journal().record_decision(
             stage="reconcile",
             outcome="rejected" if result.halted else "skipped",
-            reason=f"{len(result.breaks)} position break(s)",
+            reason=(
+                f"{len(result.breaks)} position break(s)"
+                if result.breaks
+                else f"dependency unavailable: {result.error}"
+            ),
             inputs=result.to_dict(),
         )
 
 
-def _clear_risk_records(symbol: str) -> None:
-    """Both risk records for a position that just closed, whoever closed it.
-
-    Found by the post-fix orchestrator drill: the stop fired, closed the
-    position, and removed its own record — while the take-profit record for
-    the same dead position stayed on file. An orphaned record triggers on
-    price alone: it books phantom P&L into the monthly loss/profit ceilings,
-    burns a PDT day-trade slot, and sends a close for a position that no
-    longer exists. remove() tolerates a record already gone, so clearing both
-    is safe from every exit path.
-    """
+def _clear_risk_records(record: object) -> None:
+    """Remove only the sibling protection for the position that closed."""
     for monitor in (state.stop_loss_monitor, state.take_profit_monitor):
         if monitor is not None:
-            monitor.remove(symbol)
+            monitor.remove(
+                str(getattr(record, "symbol", "")),
+                strategy_id=str(getattr(record, "strategy_id", "") or ""),
+                account_id=str(getattr(record, "account_id", "default") or "default"),
+                position_id=str(getattr(record, "position_id", "") or ""),
+            )
 
 
 async def _run_stop_loss_check() -> None:
@@ -1553,13 +1632,18 @@ async def _run_stop_loss_check() -> None:
     if not triggered:
         return
     logger.info("StopLossMonitor triggered exits for: %s", triggered)
-    for symbol in triggered:
-        _clear_risk_records(symbol)
+    for key in triggered:
+        record = tracked.get(key)
+        if record is None:
+            logger.error("Triggered stop record %s disappeared before attribution", key)
+            continue
+        symbol = record.symbol.upper()
+        _clear_risk_records(record)
         # Attribute the actual loss. Adding a flat constant per stop meant the
         # monthly limit tripped after a fixed number of stops rather than at a
         # real drawdown — and intraday fires stops far more often.
         _day_trades().record_close(symbol)
-        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        realized = _realized_pnl(record, prices.get_price(symbol))
         if realized is None:
             logger.warning(
                 "Stop-loss on %s: position size unknown, loss not attributed to the monthly limit",
@@ -1590,11 +1674,16 @@ async def _run_take_profit_check() -> None:
     prices = _price_source()
     tracked = state.take_profit_monitor.records()
     triggered = await state.take_profit_monitor.check_all(prices)
-    for symbol in triggered:
-        _clear_risk_records(symbol)
+    for key in triggered:
+        record = tracked.get(key)
+        if record is None:
+            logger.error("Triggered target record %s disappeared before attribution", key)
+            continue
+        symbol = record.symbol.upper()
+        _clear_risk_records(record)
         # Book the gain actually achieved, not the target that was aimed at.
         _day_trades().record_close(symbol)
-        realized = _realized_pnl(tracked.get(symbol), prices.get_price(symbol))
+        realized = _realized_pnl(record, prices.get_price(symbol))
         if realized is None:
             logger.warning(
                 "Take-profit on %s: position size unknown, gain not attributed to the "

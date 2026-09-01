@@ -507,3 +507,35 @@ class TestAsOfQueriesKeepTheNewest:
             archive.record_research("NVDA", sentiment=sentiment)
         rows = archive.research_as_of("NVDA", datetime.now(timezone.utc), limit=2)
         assert [r["sentiment"] for r in rows] == ["neutral", "bullish"]
+
+
+def test_existing_execution_table_gets_additive_scope_columns(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE execution_quality ("
+            "id INTEGER PRIMARY KEY, order_id TEXT NOT NULL DEFAULT '', "
+            "signal_id TEXT NOT NULL DEFAULT '', symbol TEXT NOT NULL, "
+            "side TEXT NOT NULL, qty REAL NOT NULL DEFAULT 0, "
+            "order_type TEXT NOT NULL DEFAULT 'MARKET', limit_price REAL, "
+            "decision_price REAL, fill_price REAL, shortfall_bps REAL, "
+            "filled INTEGER NOT NULL DEFAULT 1, outcome TEXT NOT NULL DEFAULT 'filled', "
+            "decision_ts DATETIME NOT NULL, recorded_at DATETIME NOT NULL)"
+        )
+
+    journal = Journal(path=path)
+    journal.record_execution(
+        symbol="AAPL",
+        side="BUY",
+        qty=1,
+        decision_price=100.0,
+        fill_price=100.1,
+        strategy_id="ema_rsi_macd",
+        strategy_version="v1",
+        environment="paper",
+    )
+    rows = journal.execution_rows(strategy_version="v1")
+    assert len(rows) == 1
+    assert rows[0]["strategy_id"] == "ema_rsi_macd"

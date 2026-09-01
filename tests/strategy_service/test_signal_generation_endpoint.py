@@ -66,4 +66,6 @@ class TestGenerateEndpointReadsTheMarket:
         signal = await m.generate_signal(
             m.SignalGenerationRequest(symbol="NVDA", use_ai=False)
         )
-        assert signal.model_version == "strategy-m1-deterministic"
+        assert signal.model_version == "strategy-rule-v1/no-data"
+        assert signal.candidate_action.value == "HOLD"
+        assert signal.confidence == 0.0

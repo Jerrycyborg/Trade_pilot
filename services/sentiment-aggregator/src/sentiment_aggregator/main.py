@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from contracts import SentimentScore
+from contracts.cors import cors_origins
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,10 +21,15 @@ _cache_expiry: dict[str, datetime] = {}
 app = FastAPI(title="sentiment-aggregator", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "X-Internal-Key",
+        "X-Admin-Key",
+        "Idempotency-Key",
+    ],
 )
 
 

@@ -13,23 +13,37 @@ x-common-env: &common-env
   # The shared lifecycle authority. Every service that can place or gate an
   # order reads the roster from here, so they cannot disagree about what is
   # permitted to trade.
-  LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+  LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
   TRADING_ACCOUNT_ID: default
   # Paper only. The route is enforced server-side by execution-service; this is
   # belt and braces for anything that still reads the environment.
   BROKER: paper
-  INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-internal-key}
-  ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key}
+  ALPACA_PAPER: "true"
+  APP_ENV: production
+  ALLOW_INSECURE_DEV_AUTH: "false"
+  INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+  ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY is required}
+  PROMPT_REGISTRY_PATH: /app/config/prompts
+  RESEARCH_PROMPT_SHA256: af48b3b97e0f7ef550d49b19e9280262140fca56d524a8d02506202173b5587b
+  STRATEGY_PROMPT_SHA256: 55bcc291b4324a60b4548a32c35019affbead82c0d8bd602a993de27fa8a603c
+  LEARNING_ENABLED: "true"
+  LEARNING_STRATEGY_REGISTRY_PATH: /app/config/strategies
+  LEARNING_STRATEGY_SHA256: bc90c2ecf0a1d753e3ac77adca93f8263f239f8cb4be1108eed2efd84062e25f
+  JOURNAL_PATH: /var/lib/trade-pilot/journal.db
+  PAPER_STATE_PATH: /var/lib/trade-pilot/paper-broker-state.json
+  PDT_STATE_PATH: /var/lib/trade-pilot/day-trade-state.json
+  STOP_LOSS_STATE_PATH: /var/lib/trade-pilot/stop-loss-state.json
+  TAKE_PROFIT_STATE_PATH: /var/lib/trade-pilot/take-profit-state.json
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     environment:
       POSTGRES_DB: trading_stack
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -48,7 +62,7 @@ services:
       context: .
       dockerfile: services/policy-service/Dockerfile
     environment:
-      LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     command: ["uv", "run", "python", "tools/migrate.py", "up"]
     depends_on:
       postgres:
@@ -62,10 +76,10 @@ services:
     env_file: [.env.example]
     environment:
       <<: *common-env
-      POLICY_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      POLICY_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8001:8001"]
+    ports: ["127.0.0.1:8001:8001"]
 
   execution-service:
     build:
@@ -74,10 +88,10 @@ services:
     env_file: [.env.example]
     environment:
       <<: *common-env
-      EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8002:8002"]
+    ports: ["127.0.0.1:8002:8002"]
     healthcheck:
       # `compose up --wait` waits for *healthy*, and without this it waits only
       # for *running* — which for a uvicorn container means the process has
@@ -89,6 +103,8 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
   strategy-service:
     build:
@@ -97,10 +113,12 @@ services:
     env_file: [.env.example]
     environment:
       <<: *common-env
-      STRATEGY_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      STRATEGY_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8003:8003"]
+    ports: ["127.0.0.1:8003:8003"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
   portfolio-service:
     build:
@@ -109,11 +127,11 @@ services:
     env_file: [.env.example]
     environment:
       <<: *common-env
-      PORTFOLIO_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
-      PORTFOLIO_EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      PORTFOLIO_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
+      PORTFOLIO_EXECUTION_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8004:8004"]
+    ports: ["127.0.0.1:8004:8004"]
 
   research-service:
     build:
@@ -122,10 +140,12 @@ services:
     env_file: [.env.example]
     environment:
       <<: *common-env
-      RESEARCH_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      RESEARCH_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8005:8005"]
+    ports: ["127.0.0.1:8005:8005"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
   audit-logger:
     build:
@@ -134,10 +154,10 @@ services:
     env_file: [.env.example]
     environment:
       <<: *common-env
-      AUDIT_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      AUDIT_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8006:8006"]
+    ports: ["127.0.0.1:8006:8006"]
 
   # The main loop. Absent from this file before, which meant the documented
   # stack could be started and would never place an order.
@@ -159,7 +179,9 @@ services:
       migrate: {condition: service_completed_successfully}
       execution-service: {condition: service_started}
       policy-service: {condition: service_started}
-    ports: ["8007:8007"]
+    ports: ["127.0.0.1:8007:8007"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
   sentiment-aggregator:
     build:
@@ -169,7 +191,7 @@ services:
     environment: *common-env
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8008:8008"]
+    ports: ["127.0.0.1:8008:8008"]
 
   notification-service:
     build:
@@ -179,7 +201,7 @@ services:
     environment: *common-env
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8009:8009"]
+    ports: ["127.0.0.1:8009:8009"]
 
   approval-gateway:
     build:
@@ -188,10 +210,10 @@ services:
     env_file: [.env.example]
     environment:
       <<: *common-env
-      APPROVAL_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/trading_stack
+      APPROVAL_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8010:8010"]
+    ports: ["127.0.0.1:8010:8010"]
 
   backtest-service:
     build:
@@ -201,7 +223,10 @@ services:
     environment: *common-env
     depends_on:
       migrate: {condition: service_completed_successfully}
-    ports: ["8011:8011"]
+    ports: ["127.0.0.1:8011:8011"]
+    volumes:
+      - journal-data:/var/lib/trade-pilot
 
 volumes:
   postgres-data:
+  journal-data:
