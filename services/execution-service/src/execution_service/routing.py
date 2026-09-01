@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
 from collections.abc import Callable
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 from brokers import PaperBroker, get_broker

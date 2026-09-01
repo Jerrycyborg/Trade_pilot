@@ -25,7 +25,7 @@ from lifecycle.routing import assert_not_live
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .broker import broker  # noqa: F401
+from .broker import broker, resolve_instrument_id  # noqa: F401
 from .config import settings as config_settings
 from .database import Base, SessionLocal, engine
 from .logging_utils import log_event

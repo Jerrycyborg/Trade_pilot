@@ -116,7 +116,7 @@ jobs:
             -H "Idempotency-Key: ci-$RANDOM" \
             -H "X-Internal-Key: ${INTERNAL_API_KEY}" \
             -d '{"signal_id":"ci-1","symbol":"AAPL","side":"BUY","qty":1,
-                 "order_type":"MARKET","strategy_id":"ema_rsi_macd"}')
+                 "order_type":"MARKET","strategy_id":"ema_rsi_macd","account_id":"default"}')
           echo "HTTP $code"; cat /tmp/body.json; echo
           test "$code" = "200"
           grep -q "sleeve_not_registered" /tmp/body.json

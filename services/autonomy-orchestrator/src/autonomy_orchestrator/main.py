@@ -1491,7 +1491,9 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
             symbol=signal.symbol,
             entry_price=entry_price,
             target_price=target_price,
-            position_id=str(order.get("external_order_id") or order.get("order_id") or signal.symbol),
+            position_id=str(
+                order.get("external_order_id") or order.get("order_id") or signal.symbol
+            ),
             qty=qty,
             side=_side_of(signal.candidate_action),
             target_gain_usd=settings.take_profit_target_usd,

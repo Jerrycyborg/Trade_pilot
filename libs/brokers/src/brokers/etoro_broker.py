@@ -61,7 +61,12 @@ class EtoroBroker:
                 f"/trading/execution/{self._execution_prefix()}market-open-orders/by-amount",
                 json=payload,
             )
-            order_id = str(response.get("positionId") or response.get("orderId") or response.get("id") or uuid4())
+            order_id = str(
+                response.get("positionId")
+                or response.get("orderId")
+                or response.get("id")
+                or uuid4()
+            )
             status = OrderStatus.ACCEPTED if response else OrderStatus.REJECTED
             return BrokerResult(
                 status=status,
