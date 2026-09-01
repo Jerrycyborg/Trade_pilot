@@ -18,6 +18,12 @@ class StrategySettings:
     claude_model: str = field(
         default_factory=lambda: os.getenv("STRATEGY_CLAUDE_MODEL", "claude-haiku-4-5-20251001")
     )
+    prompt_id: str = field(
+        default_factory=lambda: os.getenv("STRATEGY_PROMPT_ID", "strategy-system-v1")
+    )
+    prompt_sha256: str = field(
+        default_factory=lambda: os.getenv("STRATEGY_PROMPT_SHA256", "")
+    )
     fallback_to_deterministic: bool = field(
         default_factory=lambda: (
             os.getenv("STRATEGY_FALLBACK_DETERMINISTIC", "true").lower() == "true"

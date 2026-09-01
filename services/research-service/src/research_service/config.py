@@ -22,6 +22,12 @@ class ResearchSettings:
     claude_model: str = field(
         default_factory=lambda: os.getenv("RESEARCH_CLAUDE_MODEL", "claude-opus-4-6")
     )
+    prompt_id: str = field(
+        default_factory=lambda: os.getenv("RESEARCH_PROMPT_ID", "research-system-v1")
+    )
+    prompt_sha256: str = field(
+        default_factory=lambda: os.getenv("RESEARCH_PROMPT_SHA256", "")
+    )
     max_symbols_per_request: int = field(
         default_factory=lambda: int(os.getenv("RESEARCH_MAX_SYMBOLS", "10"))
     )
