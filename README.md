@@ -137,6 +137,27 @@ system recorded itself is what earns it.
 | `LIMIT_TOLERANCE_BPS` | `10` | How far through the touch the limit is priced |
 | `MAX_ADV_PARTICIPATION` | `0.01` | Cap an order at this share of average daily volume (0 disables) |
 
+### Guards and archives (hardening)
+
+Added by the live-paper-run hardening (`docs/hardening/LIVE-PAPER-RUN-2026-08-31.md`
+has the findings each of these closes):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EXECUTION_MAX_POSITION_QTY` | `EXECUTION_MAX_QTY` (1000) | Per-sleeve position cap, enforced server-side in execution-service from its own fill journal. Reduce-only orders are exempt; an unreadable journal refuses entries (unknowable is not flat) |
+| `EARNINGS_GATE_FAIL_CLOSED` | `false` | `true` treats an unanswerable earnings calendar as a blackout (entries refused); the default fails open and warns. Any other value is refused on the first call |
+| `STOP_LOSS_STATE_PATH` | `./stop-loss-state.json` | Tracked stops persist here and are restored on orchestrator restart |
+| `TAKE_PROFIT_STATE_PATH` | `./take-profit-state.json` | Same, for take-profit targets |
+| `LOG_LEVEL` | `INFO` | Orchestrator log level. Below this the risk monitors' registrations are invisible |
+| `MARKET_DATA_PROVIDER=file` + `MARKET_DATA_FILE_DIR` | — | File-drop market data for egress-restricted or replay deployments: `<SYM>_1d.json` / `<SYM>_<N>m.json` bars, `quotes.json` quotes (`ts` or `timestamp` key); fail-closed on missing or undated data |
+| `VETO_MIN_ARCHIVED_BARS`, `VETO_MAX_STALE_MINUTES`, `VETO_WINDOW_HOURS`, `VETO_EXPECTED_INTERVAL_MINUTES` | intraday-tuned | The risk veto's data-sufficiency thresholds. Defaults suit 15m bars; a daily-cadence archive needs these raised, and `scripts/specialist_report.py --timeframe 1d` to read the right slice |
+
+Paper fills price through `get_fresh_price` — the provider is consulted unless
+the cache is seconds old, so a fill can never price from a snapshot the ticker
+would tolerate but the market has left. The point-in-time journal also archives
+every computed sentiment score, generated research report and fetched headline
+(append-only), which is what backs all five specialist roles.
+
 ## Getting eToro API Keys
 
 1. Log into your eToro account at etoro.com
