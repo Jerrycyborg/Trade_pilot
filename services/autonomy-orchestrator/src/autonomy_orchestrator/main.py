@@ -24,7 +24,7 @@ from contracts.execution import (
 )
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from lifecycle import DEFAULT_LIVE_STRATEGY
 from lifecycle.health import run_health_sweep
@@ -594,42 +594,11 @@ def status() -> dict[str, object]:
 
 
 @app.get("/v1/orchestrator/client-config")
-async def client_config(request: Request) -> dict[str, str]:
-    """Dashboard client configuration.
-
-    This used to return INTERNAL_API_KEY and ADMIN_API_KEY to any caller whose
-    source address looked local. Behind a reverse proxy — nginx, or
-    scripts/serve_dashboard.py — every request appears to come from localhost,
-    so anyone who could reach the dashboard could read the admin key and toggle
-    the kill switch or live mode.
-
-    Keys are now injected by the proxy on the server side and are not returned
-    here. Set EXPOSE_CLIENT_KEYS=true only if you run an older proxy that
-    cannot inject them, and understand that it hands the admin key to every
-    visitor of the dashboard.
-    """
-    import os
-
-    if os.getenv("EXPOSE_CLIENT_KEYS", "false").lower() != "true":
-        return {"keysInjectedByProxy": "true"}
-
-    client_host = getattr(request.client, "host", "")
-    allowed = (
-        client_host in ("127.0.0.1", "::1", "localhost")
-        or client_host.startswith("192.168.")
-        or client_host.startswith("10.")
-        or client_host.startswith("172.")
-    )
-    if not allowed:
-        raise HTTPException(status_code=403, detail="not allowed")
-    logger.warning(
-        "EXPOSE_CLIENT_KEYS=true — serving API keys to %s. Anyone who can reach "
-        "the dashboard can read the admin key.",
-        client_host,
-    )
+def client_config() -> dict[str, str]:
+    """Return only non-secret dashboard capability metadata."""
     return {
-        "internalKey": os.getenv("INTERNAL_API_KEY", ""),
-        "adminKey": os.getenv("ADMIN_API_KEY", ""),
+        "browserReceivesSecrets": "false",
+        "mutationsRequireAuthenticatedOperator": "true",
     }
 
 
@@ -639,7 +608,9 @@ def last_cycle() -> dict[str, object]:
 
 
 @app.post("/v1/orchestrator/cycle/trigger")
-async def trigger_cycle(x_internal_key: str = Header(...)) -> dict[str, object]:
+async def trigger_cycle(
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
     """Manually trigger a cycle (bypasses market hours gate — for testing)."""
     from .policy_config import load_policy_config
 

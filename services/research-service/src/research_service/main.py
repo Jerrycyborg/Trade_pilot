@@ -6,7 +6,9 @@ import asyncio
 import logging
 
 from contracts import ResearchReport
-from fastapi import FastAPI, HTTPException, Query
+from contracts.auth import verify_internal_key
+from contracts.sanitize import sanitize_symbol
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -41,9 +43,15 @@ class ResearchRequest(BaseModel):
 
 
 @app.post("/v1/research/report", response_model=list[ResearchReport])
-async def get_research_reports(request: ResearchRequest) -> list[ResearchReport]:
+async def get_research_reports(
+    request: ResearchRequest,
+    _: None = Depends(verify_internal_key),
+) -> list[ResearchReport]:
     """Research one or more symbols. Returns cached results when available."""
-    symbols = request.symbols[: settings.max_symbols_per_request]
+    symbols = [
+        sanitize_symbol(symbol)
+        for symbol in request.symbols[: settings.max_symbols_per_request]
+    ]
     results: list[ResearchReport] = []
 
     async def research_one(symbol: str) -> ResearchReport:

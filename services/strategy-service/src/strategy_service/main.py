@@ -7,7 +7,8 @@ import logging
 from typing import Optional
 
 from contracts import CandidateAction, SignalCandidate, TechnicalSummaryContract, WorkerStatus
-from fastapi import FastAPI, HTTPException, Query
+from contracts.auth import verify_internal_key
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from market_data import MarketDataSettings, build_ta_summary, fetch_bars, get_fetcher
 from market_data.fetcher import DataUnavailableError
@@ -72,7 +73,10 @@ def _market_snapshot(symbol: str):
 
 
 @app.post("/v1/signals/generate", response_model=SignalCandidate)
-async def generate_signal(request: SignalGenerationRequest) -> SignalCandidate:
+async def generate_signal(
+    request: SignalGenerationRequest,
+    _: None = Depends(verify_internal_key),
+) -> SignalCandidate:
     """Generate a trading signal. Uses AI pipeline when ANTHROPIC_API_KEY is set."""
     symbols = [
         symbol.strip().upper() for symbol in (request.symbols or []) if symbol and symbol.strip()
@@ -126,7 +130,10 @@ def list_signals(
 
 
 @app.post("/v1/signals/{signal_id}/act")
-def mark_signal_acted(signal_id: str) -> dict[str, object]:
+def mark_signal_acted(
+    signal_id: str,
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
     with SessionLocal() as session:
         row = session.scalar(select(SignalRecord).where(SignalRecord.signal_id == signal_id))
         if not row:
@@ -195,7 +202,9 @@ def get_worker_status() -> WorkerStatus:
 
 
 @app.post("/v1/worker/run")
-async def trigger_worker_run() -> dict:
+async def trigger_worker_run(
+    _: None = Depends(verify_internal_key),
+) -> dict:
     """Manually trigger one worker cycle (useful for operator testing)."""
     from .worker import TradeWorker, worker_state
 
@@ -396,7 +405,10 @@ class ManualTradeRequest(BaseModel):
 
 
 @app.post("/v1/trade/manual")
-async def manual_trade(request: ManualTradeRequest) -> dict:
+async def manual_trade(
+    request: ManualTradeRequest,
+    _: None = Depends(verify_internal_key),
+) -> dict:
     """Submit a manual trade directly through policy → execution pipeline."""
     from uuid import uuid4
 
