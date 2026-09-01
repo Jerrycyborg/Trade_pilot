@@ -82,6 +82,9 @@ class BrokerPosition(BaseModel):
 
     symbol: str
     qty: float
+    position_id: str | None = None
+    """Broker-native position identity when the venue exposes one."""
+
     market_value: float = 0.0
     average_price: float = 0.0
     unrealized_pnl: float = 0.0

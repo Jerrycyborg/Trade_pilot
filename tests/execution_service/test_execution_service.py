@@ -165,7 +165,7 @@ def test_close_order_endpoint_uses_the_resolved_adapter(monkeypatch) -> None:
             account_id="default",
         ),
     )
-    assert response["status"] == "closed"
+    assert response["status"] == "close_submitted"
     assert captured == {
         "position_id": "pos-1",
         "instrument_id": 0,

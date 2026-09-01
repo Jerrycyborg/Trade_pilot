@@ -364,6 +364,31 @@ def close_order(
     if closer is None:
         raise HTTPException(status_code=501, detail="broker_does_not_support_position_close")
 
+    units = request.units if request.units is not None else request.qty
+    if bool(getattr(routed.adapter, "requires_position_id_match", False)):
+        position_reader = getattr(routed.adapter, "get_positions", None)
+        if not callable(position_reader):
+            raise HTTPException(
+                status_code=501,
+                detail="broker_cannot_verify_position_identity",
+            )
+        candidates = [
+            position
+            for position in position_reader()
+            if position.symbol.upper() == request.symbol
+            and position.position_id == request.position_id
+        ]
+        if not candidates:
+            raise HTTPException(
+                status_code=409,
+                detail="position_id_does_not_match_symbol",
+            )
+        if units is not None and float(units) > abs(float(candidates[0].qty)):
+            raise HTTPException(
+                status_code=422,
+                detail="close_units_exceed_broker_position",
+            )
+
     instrument_id = 0
     resolver = getattr(routed.adapter, "resolve_instrument_id", None) or getattr(
         routed.adapter, "_resolve_instrument_id", None
@@ -374,7 +399,6 @@ def close_order(
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    units = request.units if request.units is not None else request.qty
     try:
         closed = closer(
             position_id=request.position_id,
@@ -391,7 +415,13 @@ def close_order(
         raise HTTPException(status_code=502, detail="position_close_failed")
 
     environment = "live" if routed.decision.is_live else "paper"
-    if isinstance(closed, dict) and closed.get("fill_price") and closed.get("side"):
+    fill_confirmed = bool(
+        isinstance(closed, dict)
+        and closed.get("fill_price")
+        and closed.get("side")
+        and float(closed.get("qty") or units or 0.0) > 0
+    )
+    if fill_confirmed:
         try:
             from journal import get_journal
 
@@ -413,7 +443,7 @@ def close_order(
         except Exception as exc:
             logger.error("Close fill not journalled for %s: %s", request.symbol, exc)
     return {
-        "status": "closed",
+        "status": "closed" if fill_confirmed else "close_submitted",
         "symbol": request.symbol,
         "position_id": request.position_id,
         "signal_id": request.signal_id,

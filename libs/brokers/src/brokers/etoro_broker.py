@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 class EtoroBroker:
     """Broker adapter using the public eToro API."""
 
+    # eToro closes by an opaque position id. The execution boundary must prove
+    # that id belongs to the requested symbol before sending a close.
+    requires_position_id_match = True
+
     def __init__(self, api_key: str, user_key: str, demo: bool = True) -> None:
         self._api_key = api_key
         self._user_key = user_key
@@ -102,6 +106,13 @@ class EtoroBroker:
                 BrokerPosition(
                     symbol=str(item.get("internalSymbolFull") or item.get("symbol") or "").upper(),
                     qty=float(item.get("amount") or item.get("qty") or 0.0),
+                    position_id=str(
+                        item.get("positionId")
+                        or item.get("PositionId")
+                        or item.get("id")
+                        or ""
+                    )
+                    or None,
                     market_value=float(item.get("marketValue") or item.get("market_value") or 0.0),
                     average_price=float(
                         item.get("averageOpen") or item.get("average_price") or 0.0
