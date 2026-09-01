@@ -24,8 +24,11 @@ x-common-env: &common-env
   INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
   ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY is required}
   PROMPT_REGISTRY_PATH: /app/config/prompts
+  RESEARCH_PROMPT_SHA256: af48b3b97e0f7ef550d49b19e9280262140fca56d524a8d02506202173b5587b
+  STRATEGY_PROMPT_SHA256: 55bcc291b4324a60b4548a32c35019affbead82c0d8bd602a993de27fa8a603c
   LEARNING_ENABLED: "true"
   LEARNING_STRATEGY_REGISTRY_PATH: /app/config/strategies
+  LEARNING_STRATEGY_SHA256: bc90c2ecf0a1d753e3ac77adca93f8263f239f8cb4be1108eed2efd84062e25f
   JOURNAL_PATH: /var/lib/trade-pilot/journal.db
   PAPER_STATE_PATH: /var/lib/trade-pilot/paper-broker-state.json
   PDT_STATE_PATH: /var/lib/trade-pilot/day-trade-state.json
