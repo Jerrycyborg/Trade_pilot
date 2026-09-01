@@ -308,6 +308,32 @@ def close_order(
 
     if not closed:
         raise HTTPException(status_code=502, detail="position_close_failed")
+    # A close is a fill like any other order's, and this endpoint is the one
+    # the stop-loss and take-profit monitors and the orchestrator's exit pass
+    # use — leaving it out of the journal meant the position ledger recorded
+    # entries only: after the first stop fired, net_position stayed at the
+    # entry forever, the worker's "already positioned" gate wedged, and the
+    # server-side cap drifted. Best-effort, like every quality record.
+    if isinstance(closed, dict) and closed.get("fill_price"):
+        try:
+            from journal import get_journal
+
+            get_journal().record_execution(
+                symbol=request.symbol,
+                side=str(closed.get("side", "")),
+                qty=float(closed.get("qty") or 0.0),
+                decision_price=None,
+                fill_price=float(closed["fill_price"]),
+                order_id=str(closed.get("order_id") or ""),
+                signal_id=request.signal_id,
+                outcome="closed",
+                strategy_id=request.strategy_id,
+                account_id=request.account_id,
+                environment="paper",
+                broker="paper",
+            )
+        except Exception as exc:
+            logger.error("Close fill not journalled for %s: %s", request.symbol, exc)
     return {
         "status": "closed",
         "symbol": request.symbol,

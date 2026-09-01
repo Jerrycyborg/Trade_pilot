@@ -322,8 +322,10 @@ class PaperBroker:
         instrument_id: int | str = 0,
         units: float | None = None,
         symbol: str | None = None,
-    ) -> bool:
+    ) -> dict | bool:
         """Flatten (or partially reduce) a position.
+
+        Returns the close fill's details (truthy) on success, False otherwise.
 
         Callers identify a position inconsistently: the monitors register the
         broker's order id, while a manual close passes the symbol. Prefer an
@@ -355,22 +357,26 @@ class PaperBroker:
                 self._apply_sell(symbol, qty, price)
             else:
                 self._apply_buy(symbol, qty, price)
-            self._state.orders.append(
-                {
-                    "order_id": str(uuid4()),
-                    "signal_id": f"close-{symbol}",
-                    "symbol": symbol,
-                    "side": side,
-                    "qty": qty,
-                    "fill_price": price,
-                    "notional": round(price * qty, 2),
-                    "submitted_at": datetime.now(timezone.utc).isoformat(),
-                    "close": True,
-                }
-            )
+            close_record = {
+                "order_id": str(uuid4()),
+                "signal_id": f"close-{symbol}",
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "fill_price": price,
+                "notional": round(price * qty, 2),
+                "submitted_at": datetime.now(timezone.utc).isoformat(),
+                "close": True,
+            }
+            self._state.orders.append(close_record)
             self._save_state()
         logger.info("PaperBroker: closed %.4f %s @ %.4f", qty, symbol, price)
-        return True
+        # The fill details, not a bare True: a close is a fill like any other,
+        # and a caller that cannot see its side/qty/price cannot journal it —
+        # which left every stop-loss and take-profit exit invisible to the
+        # position ledger the entry gates enforce against. Still truthy, so
+        # callers that only test success are unchanged.
+        return close_record
 
     # ------------------------------------------------------------------
     # Account / positions

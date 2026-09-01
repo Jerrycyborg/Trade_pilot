@@ -22,7 +22,7 @@ def resolve_instrument_id(symbol: str) -> int:
     return int(resolver(symbol))
 
 
-def close_position(position_id: str, symbol: str, units: float | None = None) -> bool:
+def close_position(position_id: str, symbol: str, units: float | None = None) -> dict | bool:
     """Close a position at the configured broker.
 
     Only eToro addresses positions by instrument id. Resolving one
@@ -39,13 +39,15 @@ def close_position(position_id: str, symbol: str, units: float | None = None) ->
     if _broker_resolves_instruments():
         instrument_id = resolve_instrument_id(symbol)
 
-    return bool(
-        closer(
-            position_id=position_id,
-            instrument_id=instrument_id,
-            units=units,
-            symbol=symbol,
-        )
+    # The raw result, not bool(): the paper broker returns the close fill's
+    # details, and coercing them away left every stop-loss and take-profit
+    # exit unjournalled — the position ledger recorded entries only. Adapters
+    # that return a bare True/False still satisfy every truthiness check.
+    return closer(
+        position_id=position_id,
+        instrument_id=instrument_id,
+        units=units,
+        symbol=symbol,
     )
 
 

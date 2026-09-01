@@ -31,6 +31,8 @@ class TakeProfitRecord(BaseModel):
     side: str = "BUY"
     """Direction the position was opened in. P&L on a short inverts, so booking
     it long-only turns a losing short into a recorded profit."""
+    strategy_id: str = ""
+    """The sleeve whose position this target watches — see StopLossRecord."""
     target_gain_usd: float = 20.0
     created_at: datetime
 
@@ -108,6 +110,7 @@ class TakeProfitMonitor:
             "symbol": record.symbol,
             "qty": record.qty,
             "position_id": record.position_id,
+            "strategy_id": record.strategy_id,
         }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:

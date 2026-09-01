@@ -158,7 +158,7 @@ class TestClosePosition:
         broker.place_order(_order(qty=10))
         prices.book["AAPL"] = 220.0
 
-        assert broker.close_position("AAPL") is True
+        assert broker.close_position("AAPL")  # truthy: the close fill details
         assert broker.get_positions() == []
         assert broker.realized_pnl() == 200.0
         assert broker.get_account().cash == 10_200.0
@@ -167,7 +167,7 @@ class TestClosePosition:
         self, broker: PaperBroker, prices: Prices
     ) -> None:
         broker.place_order(_order(qty=10))
-        assert broker.close_position("AAPL", units=4) is True
+        assert broker.close_position("AAPL", units=4)  # truthy: the close fill details
         assert broker.get_positions()[0].qty == 6
 
     def test_closing_an_absent_position_reports_failure(self, broker: PaperBroker) -> None:

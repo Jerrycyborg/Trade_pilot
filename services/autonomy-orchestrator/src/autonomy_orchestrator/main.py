@@ -950,7 +950,9 @@ async def run_cycle() -> dict[str, object]:
                     correlation_id=signal.signal_id,
                 )
                 _register_stop_loss(
-                    signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
+                    signal.symbol, order, price_bars,
+                    side=_side_of(signal.candidate_action),
+                    strategy_id=_strategy_of(signal),
                 )
                 _register_take_profit(signal, order)
                 weekly_spend += float(order.get("amount_usd", 0.0))
@@ -1393,6 +1395,7 @@ def _register_stop_loss(
     order: dict[str, object],
     price_bars: list[Any] | None,
     side: str = "BUY",
+    strategy_id: str = "",
 ) -> None:
     if state.stop_loss_monitor is None:
         return
@@ -1425,6 +1428,7 @@ def _register_stop_loss(
             position_id=str(order.get("order_id", symbol)),
             qty=float(order.get("qty", 0.0)),
             side=side,
+            strategy_id=strategy_id,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -1443,6 +1447,7 @@ def _register_take_profit(signal: SignalCandidate, order: dict[str, object]) -> 
     target_price = entry_price - gain_per_share if is_short else entry_price + gain_per_share
     state.take_profit_monitor.register(
         TakeProfitRecord(
+            strategy_id=_strategy_of(signal),
             symbol=signal.symbol,
             entry_price=entry_price,
             target_price=target_price,
@@ -1741,7 +1746,9 @@ async def _process_approvals() -> None:
             continue
         _day_trades().record_open(signal.symbol)
         _register_stop_loss(
-            signal.symbol, order, price_bars, side=_side_of(signal.candidate_action)
+            signal.symbol, order, price_bars,
+            side=_side_of(signal.candidate_action),
+            strategy_id=_strategy_of(signal),
         )
         _register_take_profit(signal, order)
         weekly_spend += float(order.get("amount_usd", 0.0))
@@ -1842,6 +1849,7 @@ async def _process_exit_signals() -> int:
                         "symbol": signal.symbol,
                         "position_id": position_id,
                         "signal_id": signal.signal_id,
+                        "strategy_id": _strategy_of(signal),
                     },
                     headers=_internal_headers(),
                 )

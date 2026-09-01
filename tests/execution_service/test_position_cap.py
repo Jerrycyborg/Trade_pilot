@@ -154,3 +154,41 @@ def test_the_service_trades_and_reports_from_one_paper_book(
 
     assert isinstance(module.broker, PaperBroker)
     assert module.router._simulated is module.broker
+
+
+def test_a_close_returns_the_ledger_to_flat(main, monkeypatch: pytest.MonkeyPatch) -> None:
+    """/v1/orders/close is the exit path the stop-loss and take-profit
+    monitors and the orchestrator's exit pass use — and it used to close at
+    the broker without journalling the fill, so the position ledger recorded
+    entries only. After the first stop fired, net_position stayed at the
+    entry forever: the worker's already-positioned gate wedged, the cap
+    drifted toward permanent refusal, and an opposite 'entry' passed both
+    gates against a phantom position."""
+    from contracts import ClosePositionRequest
+    from journal import get_journal
+
+    entry = _submit(main, "SELL", 6)
+    assert entry.status != OrderStatus.REJECTED
+    net = get_journal().net_position(
+        strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
+    )
+    assert net == -6.0
+
+    # The service wrapper binds its own module-global broker; point it at the
+    # fixture's book so the close operates on the position just opened.
+    import execution_service.broker as broker_module
+
+    monkeypatch.setattr(broker_module, "broker", main.broker)
+    result = main.close_order(
+        ClosePositionRequest(
+            symbol="NVDA",
+            position_id="NVDA",
+            signal_id="stop-loss-drill",
+            strategy_id="ema_rsi_macd",
+        )
+    )
+    assert result["status"] == "closed"
+    net_after = get_journal().net_position(
+        strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
+    )
+    assert net_after == 0.0, "the exit fill must land in the same ledger the entry did"

@@ -311,7 +311,7 @@ class TestClosePathReachesTheBroker:
         )
         module = self._close_module(broker, monkeypatch)
 
-        assert module.close_position(position_id=SYMBOL, symbol=SYMBOL) is True
+        assert module.close_position(position_id=SYMBOL, symbol=SYMBOL)  # truthy fill details
         assert broker.get_positions() == []
 
     def test_close_by_broker_order_id_still_finds_the_position(
@@ -325,12 +325,9 @@ class TestClosePathReachesTheBroker:
         )
         module = self._close_module(broker, monkeypatch)
 
-        assert (
-            module.close_position(
-                position_id=result.external_order_id, symbol=SYMBOL
-            )
-            is True
-        )
+        assert module.close_position(
+            position_id=result.external_order_id, symbol=SYMBOL
+        )  # truthy: the close fill details
         assert broker.get_positions() == []
 
     def test_partial_close_reduces_the_position(
@@ -343,7 +340,7 @@ class TestClosePathReachesTheBroker:
         )
         module = self._close_module(broker, monkeypatch)
 
-        assert module.close_position(position_id=SYMBOL, symbol=SYMBOL, units=4) is True
+        assert module.close_position(position_id=SYMBOL, symbol=SYMBOL, units=4)
         assert broker.get_positions()[0].qty == 6
 
     def test_close_without_a_position_reports_failure(

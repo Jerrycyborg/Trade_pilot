@@ -81,6 +81,10 @@ class StopLossRecord(BaseModel):
     side: str = "BUY"
     """Direction the position was opened in. P&L on a short inverts, so booking
     it long-only turns a losing short into a recorded profit."""
+    strategy_id: str = ""
+    """The sleeve whose position this stop watches. Carried into the close
+    request so the exit fill is journalled under the same scope the entry
+    was — otherwise the position ledger never sees the exit."""
     created_at: datetime
 
 
@@ -193,6 +197,7 @@ class StopLossMonitor:
             "symbol": record.symbol,
             "qty": record.qty,
             "position_id": record.position_id,
+            "strategy_id": record.strategy_id,
         }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:

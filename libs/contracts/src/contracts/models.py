@@ -312,6 +312,12 @@ class ClosePositionRequest(BaseModel):
     signal_id: str
     units: float | None = None
     qty: float | None = Field(default=None, ge=0.0)
+    strategy_id: str = ""
+    """Which sleeve's position this closes. Execution journals the exit fill
+    under this scope; without it the position ledger recorded entries only,
+    and every stop-loss or take-profit exit left a phantom position behind."""
+
+    account_id: str = "default"
 
 
 class ExecutionOrderResponse(BaseModel):
