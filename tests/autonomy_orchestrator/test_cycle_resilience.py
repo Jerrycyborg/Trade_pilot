@@ -73,6 +73,26 @@ async def test_only_the_configured_entry_owner_gets_a_trading_job(
         m.state.scheduler = None
 
 
+def test_intraday_protective_checks_default_to_two_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
+    monkeypatch.delenv("STOP_LOSS_CHECK_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("STOP_LOSS_CHECK_INTERVAL_MINUTES", raising=False)
+    monkeypatch.setattr(m.state, "market_settings", None)
+
+    assert m._risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES") == 2
+
+
+def test_protective_check_seconds_override_legacy_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STOP_LOSS_CHECK_INTERVAL_SECONDS", "3")
+    monkeypatch.setenv("STOP_LOSS_CHECK_INTERVAL_MINUTES", "1")
+
+    assert m._risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES") == 3
+
+
 def test_invalid_trading_loop_owner_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

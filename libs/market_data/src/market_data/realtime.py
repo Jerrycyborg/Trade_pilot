@@ -84,6 +84,15 @@ class LivePriceCache:
         with self._lock:
             return sorted(self._prices)
 
+    def newest(self) -> PriceSnapshot | None:
+        """Freshest cached observation across all subscribed symbols."""
+        with self._lock:
+            return max(
+                self._prices.values(),
+                key=lambda snapshot: snapshot.timestamp,
+                default=None,
+            )
+
     def clear(self) -> None:
         with self._lock:
             self._prices.clear()
@@ -169,7 +178,10 @@ class RealtimePriceSource:
         if not accepted:
             logger.warning(
                 "Refusing stale price for %s: %.0fs old via %s, limit is %.0fs",
-                symbol, age, snapshot.source, limit,
+                symbol,
+                age,
+                snapshot.source,
+                limit,
             )
             return None
         return snapshot
@@ -212,9 +224,7 @@ class RealtimePriceSource:
         snapshot = self.get_snapshot(symbol)
         return snapshot.age_seconds() if snapshot else None
 
-    def _from_last_bar(
-        self, symbol: str, fetcher: OHLCVFetcherProtocol
-    ) -> PriceSnapshot | None:
+    def _from_last_bar(self, symbol: str, fetcher: OHLCVFetcherProtocol) -> PriceSnapshot | None:
         try:
             if self._settings.is_intraday:
                 bars = fetcher.fetch_intraday(
@@ -263,12 +273,16 @@ class StreamManager:
         return self._task is not None and not self._task.done()
 
     def status(self) -> dict[str, object]:
+        latest = self._cache.newest()
         return {
             "enabled": self._settings.can_stream,
             "running": self.running,
             "symbols": self._symbols,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "cached_symbols": len(self._cache.symbols()),
+            "latest_price_at": latest.timestamp.isoformat() if latest else None,
+            "latest_price_age_seconds": round(latest.age_seconds(), 3) if latest else None,
+            "latest_price_source": latest.source if latest else None,
         }
 
     async def start(self) -> bool:
@@ -293,6 +307,7 @@ class StreamManager:
             settings=self._settings,
             symbols=self._symbols,
             on_bar=self._on_bar,
+            on_price=self._on_price,
         )
         self._task = asyncio.create_task(self._stream.start())
         self._started_at = datetime.now(timezone.utc)
@@ -313,3 +328,6 @@ class StreamManager:
 
     async def _on_bar(self, bar: OHLCVBar) -> None:
         self._cache.record_bar(bar)
+
+    async def _on_price(self, snapshot: PriceSnapshot) -> None:
+        self._cache.record(snapshot)

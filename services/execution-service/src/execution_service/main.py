@@ -39,15 +39,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # One router per process. Reads shared lifecycle state on every order; the
-# route is never cached, so a demotion takes effect on the next order.
-# The router simulates on THIS process's paper adapter when the configured
-# broker is one — a second instance over the same state file gave the process
-# two books: fills landed on the router's, reads answered from this one.
-from brokers import PaperBroker as _PaperBroker  # noqa: E402
-
+# route is never cached, so a demotion takes effect on the next order. Any
+# configured non-live adapter is the paper venue: the internal simulator,
+# Alpaca Paper, or another broker sandbox. Previously only PaperBroker was
+# accepted here, so BROKER=alpaca with ALPACA_PAPER=true was silently discarded
+# and orders went to the JSON simulator instead of the broker-hosted paper book.
+configured_paper_adapter = broker if not bool(getattr(broker, "is_live_trading", False)) else None
 router = build_router(
     max_qty=config_settings.max_qty,
-    simulated=broker if isinstance(broker, _PaperBroker) else None,
+    simulated=configured_paper_adapter,
 )
 
 

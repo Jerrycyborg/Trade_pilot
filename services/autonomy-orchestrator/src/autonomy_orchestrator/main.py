@@ -121,14 +121,19 @@ def _trading_loop_owner() -> str:
 def _risk_check_interval_seconds(env_var: str) -> int:
     """How often to re-check stops/targets.
 
-    An exit check is only as timely as its interval: a 5-minute poll on a
-    15-minute intraday strategy means a stop can overshoot by 5 minutes of
-    price movement. Intraday runs therefore default to 60 seconds.
+    Seconds are the primary intraday control; the legacy minutes setting is
+    still accepted. A minute-scale stop poll is not an intraday protection
+    mechanism, so streaming intraday deployments default to two seconds.
+    Broker-native protective orders remain the required live-money design.
     """
-    explicit = os.getenv(env_var)
-    if explicit:
-        return max(10, int(float(explicit) * 60))
-    return 60 if _market_settings().is_intraday else 300
+    seconds_var = env_var.removesuffix("_MINUTES") + "_SECONDS"
+    explicit_seconds = os.getenv(seconds_var, "").strip()
+    if explicit_seconds:
+        return max(1, int(float(explicit_seconds)))
+    explicit_minutes = os.getenv(env_var, "").strip()
+    if explicit_minutes:
+        return max(1, int(float(explicit_minutes) * 60))
+    return 2 if _market_settings().is_intraday else 300
 
 
 def _start_scheduler() -> None:

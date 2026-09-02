@@ -15,10 +15,32 @@ x-common-env: &common-env
   # permitted to trade.
   LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/trading_stack
   TRADING_ACCOUNT_ID: default
-  # Paper only. The route is enforced server-side by execution-service; this is
-  # belt and braces for anything that still reads the environment.
-  BROKER: paper
+  # Compose may select the internal simulator or a broker-hosted paper venue.
+  # ALPACA_PAPER is deliberately forced true here: this stack is incapable of
+  # turning BROKER=alpaca into a real-money client through environment changes.
+  BROKER: ${BROKER:-paper}
   ALPACA_PAPER: "true"
+  ALPACA_API_KEY: ${ALPACA_API_KEY:-}
+  ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY:-}
+  ALPACA_FEED: ${ALPACA_FEED:-iex}
+
+  # Explicit pass-through. Compose reads .env for interpolation but env_file
+  # points at the public template; without these mappings, setting intraday
+  # values in .env changed Compose itself and never changed any container.
+  TRADING_LOOP_OWNER: ${TRADING_LOOP_OWNER:-orchestrator}
+  MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-yahoo}
+  MARKET_DATA_TIMEFRAME: ${MARKET_DATA_TIMEFRAME:-daily}
+  INTRADAY_MINUTES: ${INTRADAY_MINUTES:-15}
+  INTRADAY_LOOKBACK_DAYS: ${INTRADAY_LOOKBACK_DAYS:-5}
+  STREAMING_ENABLED: ${STREAMING_ENABLED:-false}
+  STREAM_SYMBOLS: ${STREAM_SYMBOLS:-}
+  STREAM_SYMBOL_LIMIT: ${STREAM_SYMBOL_LIMIT:-30}
+  ORCHESTRATOR_INTERVAL_SECONDS: ${ORCHESTRATOR_INTERVAL_SECONDS:-300}
+  STOP_LOSS_CHECK_INTERVAL_SECONDS: ${STOP_LOSS_CHECK_INTERVAL_SECONDS:-}
+  TAKE_PROFIT_CHECK_INTERVAL_SECONDS: ${TAKE_PROFIT_CHECK_INTERVAL_SECONDS:-}
+  INTRADAY_EXECUTION_PRICE_MAX_AGE_SECONDS: ${INTRADAY_EXECUTION_PRICE_MAX_AGE_SECONDS:-5}
+  INTRADAY_USE_AI: ${INTRADAY_USE_AI:-false}
+  POLICY_MAX_DATA_AGE_SECONDS: ${POLICY_MAX_DATA_AGE_SECONDS:-30}
   APP_ENV: production
   ALLOW_INSECURE_DEV_AUTH: "false"
   INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
