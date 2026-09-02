@@ -20,6 +20,7 @@ import pytest
 from attribution import (
     attribute,
     build_report,
+    load_round_trips,
     pair_round_trips,
     perfect_exit,
     run_counterfactuals,
@@ -126,9 +127,7 @@ class TestPairing:
         reported "no closed round trips" over an archive that held one, so L0
         coverage over a real run read as empty. Direction comes from netting,
         not from the side label."""
-        trips = pair_round_trips(
-            [_row("SELL", 110.0, 110.0, 0), _row("BUY", 100.0, 100.0, 60)]
-        )
+        trips = pair_round_trips([_row("SELL", 110.0, 110.0, 0), _row("BUY", 100.0, 100.0, 60)])
         assert len(trips) == 1
         trip = trips[0]
         assert trip.direction == -1
@@ -233,7 +232,10 @@ class TestCounterfactualsUseWhatWasKnowable:
         return [
             {
                 "bar_ts": NOW + timedelta(minutes=15 * (i + 1)),
-                "open": c, "high": c + 1, "low": c - 1, "close": c,
+                "open": c,
+                "high": c + 1,
+                "low": c - 1,
+                "close": c,
             }
             for i, c in enumerate(closes)
         ]
@@ -254,8 +256,13 @@ class TestCounterfactualsUseWhatWasKnowable:
         stop fills at its own price — the gapped case is the next test."""
         trip = _trip(100.0, 100.0, 105.0, 105.0)
         dipped = [
-            {"bar_ts": NOW + timedelta(minutes=15), "open": 101.0,
-             "high": 101.5, "low": 96.0, "close": 99.0}
+            {
+                "bar_ts": NOW + timedelta(minutes=15),
+                "open": 101.0,
+                "high": 101.5,
+                "low": 96.0,
+                "close": 99.0,
+            }
         ]
         result = stop_at(trip, dipped, distance=2.0)
         assert result.per_share == pytest.approx(-2.0)
@@ -263,8 +270,15 @@ class TestCounterfactualsUseWhatWasKnowable:
     def test_a_gap_through_the_stop_fills_worse_not_better(self) -> None:
         """Being generous here would make every alternative stop look good."""
         trip = _trip(100.0, 100.0, 105.0, 105.0)
-        gapped = [{"bar_ts": NOW + timedelta(minutes=15), "open": 90.0,
-                   "high": 91.0, "low": 89.0, "close": 90.0}]
+        gapped = [
+            {
+                "bar_ts": NOW + timedelta(minutes=15),
+                "open": 90.0,
+                "high": 91.0,
+                "low": 89.0,
+                "close": 90.0,
+            }
+        ]
         result = stop_at(trip, gapped, distance=2.0)
         assert result.per_share == pytest.approx(-10.0), "filled at the open, not the stop"
 
@@ -319,12 +333,22 @@ class TestTheCoverageReport:
     def test_environments_are_counted_separately(self, journal) -> None:
         for env in ("paper", "live"):
             journal.record_execution(
-                symbol="AAPL", side="BUY", qty=10, decision_price=100.0,
-                fill_price=100.0, strategy_id="ema_rsi_macd", environment=env,
+                symbol="AAPL",
+                side="BUY",
+                qty=10,
+                decision_price=100.0,
+                fill_price=100.0,
+                strategy_id="ema_rsi_macd",
+                environment=env,
             )
             journal.record_execution(
-                symbol="AAPL", side="SELL", qty=10, decision_price=110.0,
-                fill_price=110.0, strategy_id="ema_rsi_macd", environment=env,
+                symbol="AAPL",
+                side="SELL",
+                qty=10,
+                decision_price=110.0,
+                fill_price=110.0,
+                strategy_id="ema_rsi_macd",
+                environment=env,
             )
         coverage = build_report(journal, with_counterfactuals=False)["coverage"]
         assert coverage["environments"] == {"paper": 1, "live": 1}
@@ -446,9 +470,9 @@ class TestRegimeIsClassifiedNotGuessed:
         calm = self._series([100.0] * 40, spread=0.05)
         wild = self._series([100.0] * 40, spread=5.0)
 
-        assert classify(calm, calm[-1]["bar_ts"]).atr_pct < classify(
-            wild, wild[-1]["bar_ts"]
-        ).atr_pct
+        assert (
+            classify(calm, calm[-1]["bar_ts"]).atr_pct < classify(wild, wild[-1]["bar_ts"]).atr_pct
+        )
 
     def test_an_agitated_tail_reads_as_agitated(self) -> None:
         from attribution import classify
@@ -479,7 +503,11 @@ class TestRegimeReachesTheReport:
             [
                 SimpleNamespace(
                     timestamp=end - timedelta(minutes=15 * (len(closes) - i)),
-                    open=c, high=c + 0.5, low=c - 0.5, close=c, volume=1000.0,
+                    open=c,
+                    high=c + 0.5,
+                    low=c - 0.5,
+                    close=c,
+                    volume=1000.0,
                 )
                 for i, c in enumerate(closes)
             ],
@@ -492,12 +520,22 @@ class TestRegimeReachesTheReport:
         filter rather than at the rule."""
         self._bars(journal, [100.0 + i for i in range(60)])
         journal.record_execution(
-            symbol="AAPL", side="BUY", qty=10, decision_price=140.0, fill_price=140.0,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="BUY",
+            qty=10,
+            decision_price=140.0,
+            fill_price=140.0,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
         journal.record_execution(
-            symbol="AAPL", side="SELL", qty=10, decision_price=155.0, fill_price=155.0,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="SELL",
+            qty=10,
+            decision_price=155.0,
+            fill_price=155.0,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
 
         report = build_report(journal, with_counterfactuals=False)
@@ -512,12 +550,22 @@ class TestRegimeReachesTheReport:
         """Not a residual bucket that resembles a real regime. "We could not
         tell" has to be visible as its own row or it gets read as a finding."""
         journal.record_execution(
-            symbol="AAPL", side="BUY", qty=10, decision_price=100.0, fill_price=100.0,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="BUY",
+            qty=10,
+            decision_price=100.0,
+            fill_price=100.0,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
         journal.record_execution(
-            symbol="AAPL", side="SELL", qty=10, decision_price=110.0, fill_price=110.0,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="SELL",
+            qty=10,
+            decision_price=110.0,
+            fill_price=110.0,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
 
         report = build_report(journal, with_counterfactuals=False)
@@ -543,12 +591,22 @@ class TestRegimeReachesTheReport:
         journal.bars_as_of = _spy  # type: ignore[method-assign]
 
         journal.record_execution(
-            symbol="AAPL", side="BUY", qty=10, decision_price=100.0, fill_price=100.0,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="BUY",
+            qty=10,
+            decision_price=100.0,
+            fill_price=100.0,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
         journal.record_execution(
-            symbol="AAPL", side="SELL", qty=10, decision_price=110.0, fill_price=110.0,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="SELL",
+            qty=10,
+            decision_price=110.0,
+            fill_price=110.0,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
 
         report = build_report(journal, with_counterfactuals=False)
@@ -565,12 +623,22 @@ class TestRegimeReachesTheReport:
         components have to add up whatever anyone thinks about ADX."""
         self._bars(journal, [100.0 + i for i in range(60)])
         journal.record_execution(
-            symbol="AAPL", side="BUY", qty=10, decision_price=140.0, fill_price=140.4,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="BUY",
+            qty=10,
+            decision_price=140.0,
+            fill_price=140.4,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
         journal.record_execution(
-            symbol="AAPL", side="SELL", qty=10, decision_price=155.0, fill_price=154.6,
-            strategy_id="ema_rsi_macd", environment="paper",
+            symbol="AAPL",
+            side="SELL",
+            qty=10,
+            decision_price=155.0,
+            fill_price=154.6,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
         )
 
         report = build_report(journal, with_counterfactuals=False)
@@ -600,11 +668,13 @@ class TestAnnualisationMakesTheComparisonPossible:
             at = NOW + timedelta(days=spacing_days * i)
             trips.append(
                 RoundTrip(
-                    strategy_id="ema_rsi_macd", symbol="AAPL", environment="live",
-                    account_id="default", qty=1.0,
+                    strategy_id="ema_rsi_macd",
+                    symbol="AAPL",
+                    environment="live",
+                    account_id="default",
+                    qty=1.0,
                     entry=Leg("BUY", 1.0, 100.0, 100.0, at),
-                    exit=Leg("SELL", 1.0, 100.0 + value, 100.0 + value,
-                             at + timedelta(minutes=30)),
+                    exit=Leg("SELL", 1.0, 100.0 + value, 100.0 + value, at + timedelta(minutes=30)),
                 )
             )
         return trips
@@ -633,9 +703,7 @@ class TestAnnualisationMakesTheComparisonPossible:
 
         assert slow["sharpe"] == pytest.approx(fast["sharpe"])
         assert fast["sharpe_annualised"] > slow["sharpe_annualised"]
-        assert fast["sharpe_annualised"] == pytest.approx(
-            slow["sharpe_annualised"] * 2.0, rel=1e-3
-        )
+        assert fast["sharpe_annualised"] == pytest.approx(slow["sharpe_annualised"] * 2.0, rel=1e-3)
 
     def test_a_short_record_reports_no_annualised_figure(self) -> None:
         """Annualising three days of intraday activity is extrapolation, and a
@@ -663,9 +731,85 @@ class TestAnnualisationMakesTheComparisonPossible:
         at 200 trades and by a third at four."""
         from attribution import performance_from_trades
 
-        result = performance_from_trades(self._trips([1.0, -0.5, 1.0, -0.5, 1.0] * 2,
-                                                     spacing_days=2.0))
+        result = performance_from_trades(
+            self._trips([1.0, -0.5, 1.0, -0.5, 1.0] * 2, spacing_days=2.0)
+        )
         n = result["trades"]
         assert result["trades_per_year"] == pytest.approx(
             (n - 1) * 365.25 / result["span_days"], rel=1e-3
         )  # the reported value is rounded to two places
+
+
+class TestBoundedRecentAttribution:
+    @staticmethod
+    def _record(
+        journal,
+        side: str,
+        qty: float,
+        price: float,
+        order_id: str,
+    ) -> None:
+        journal.record_execution(
+            symbol="AAPL",
+            side=side,
+            qty=qty,
+            decision_price=price,
+            fill_price=price,
+            order_id=order_id,
+            strategy_id="ema_rsi_macd",
+            strategy_version="v1",
+            environment="paper",
+        )
+
+    def _recent(self, journal, limit: int):
+        return load_round_trips(
+            journal,
+            strategy_id="ema_rsi_macd",
+            strategy_version="v1",
+            symbol="AAPL",
+            environment="paper",
+            limit=limit,
+            most_recent=True,
+        )
+
+    def test_newest_row_limit_returns_the_newest_complete_trips(
+        self,
+        journal,
+    ) -> None:
+        for index, (entry, exit_) in enumerate(((100.0, 101.0), (102.0, 104.0), (105.0, 108.0))):
+            self._record(journal, "BUY", 1, entry, f"entry-{index}")
+            self._record(journal, "SELL", 1, exit_, f"exit-{index}")
+
+        trips = self._recent(journal, limit=4)
+
+        assert [trip.entry.fill_price for trip in trips] == [102.0, 105.0]
+
+    def test_window_starting_on_a_prior_close_drops_only_that_carry_in(
+        self,
+        journal,
+    ) -> None:
+        for index, (entry, exit_) in enumerate(((100.0, 101.0), (102.0, 104.0), (105.0, 108.0))):
+            self._record(journal, "BUY", 1, entry, f"entry-{index}")
+            self._record(journal, "SELL", 1, exit_, f"exit-{index}")
+
+        trips = self._recent(journal, limit=3)
+
+        assert len(trips) == 1
+        assert trips[0].entry.fill_price == 105.0
+        assert trips[0].exit.fill_price == 108.0
+
+    def test_fill_crossing_flat_keeps_the_new_position_remainder(
+        self,
+        journal,
+    ) -> None:
+        self._record(journal, "BUY", 2, 100.0, "carry-in")
+        self._record(journal, "SELL", 3, 110.0, "flip-short")
+        self._record(journal, "BUY", 1, 105.0, "close-short")
+
+        trips = self._recent(journal, limit=2)
+
+        assert len(trips) == 1
+        assert trips[0].direction == -1
+        assert trips[0].qty == 1
+        assert trips[0].entry.fill_price == 110.0
+        assert trips[0].exit.fill_price == 105.0

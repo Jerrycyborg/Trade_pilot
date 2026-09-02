@@ -39,7 +39,10 @@ def _iter_manifest_files(manifest: dict[str, object]) -> list[Path]:
 
 
 def _should_skip(path: Path) -> bool:
-    return any(part.startswith(".") for part in path.relative_to(ROOT).parts)
+    relative = path.relative_to(ROOT)
+    return any(
+        part.startswith(".") or part == "__pycache__" for part in relative.parts
+    ) or path.suffix in {".pyc", ".pyo"}
 
 
 def _sha256(path: Path) -> str:

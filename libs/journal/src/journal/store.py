@@ -192,15 +192,12 @@ class Journal:
             for table_name, columns in additions.items():
                 if not inspector.has_table(table_name):
                     continue
-                existing = {
-                    column["name"] for column in inspector.get_columns(table_name)
-                }
+                existing = {column["name"] for column in inspector.get_columns(table_name)}
                 for column_name, definition in columns.items():
                     if column_name in existing:
                         continue
                     connection.exec_driver_sql(
-                        f'ALTER TABLE "{table_name}" '
-                        f'ADD COLUMN "{column_name}" {definition}'
+                        f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {definition}'
                     )
                 if table_name == "bar_observations":
                     connection.exec_driver_sql(
@@ -387,9 +384,7 @@ class Journal:
             for r in series
         ]
 
-    def bar_revisions(
-        self, symbol: str, timeframe: str, bar_ts: datetime
-    ) -> list[dict[str, Any]]:
+    def bar_revisions(self, symbol: str, timeframe: str, bar_ts: datetime) -> list[dict[str, Any]]:
         """Every version of one bar, oldest first. The audit trail for a revision."""
         if not self.enabled:
             return []
@@ -735,6 +730,7 @@ class Journal:
         filled_qty: float | None = None,
         cancelled: bool = False,
         rejected: bool = False,
+        deduplicate: bool = False,
     ) -> float | None:
         """Record what an order cost. Returns the shortfall in bps, if computable.
 
@@ -757,43 +753,39 @@ class Journal:
         )
         if not self.enabled:
             return shortfall
-        self._insert(
-            ExecutionQuality,
-            {
-                "order_id": order_id,
-                "signal_id": signal_id,
-                "symbol": symbol.upper(),
-                "side": side.upper(),
-                "qty": float(qty or 0.0),
-                "order_type": order_type.upper(),
-                "limit_price": limit_price,
-                "decision_price": decision_price,
-                "fill_price": fill_price,
-                "shortfall_bps": shortfall,
-                "filled": 1 if filled else 0,
-                "outcome": outcome,
-                "decision_ts": _utc(decision_ts),
-                "strategy_id": strategy_id,
-                "strategy_version": strategy_version,
-                "environment": environment,
-                "account_id": account_id,
-                "portfolio_id": portfolio_id,
-                "broker": broker,
-                "decision_id": decision_id,
-                "order_intent_id": order_intent_id,
-                "requested_at": requested_at,
-                "submitted_at": submitted_at,
-                "filled_at": filled_at,
-                "fees": float(fees or 0.0),
-                "spread_bps": spread_bps,
-                "filled_qty": float(
-                    filled_qty if filled_qty is not None else (qty if filled else 0.0)
-                ),
-                "cancelled": 1 if cancelled else 0,
-                "rejected": 1 if rejected else 0,
-                "recorded_at": datetime.now(timezone.utc),
-            },
-        )
+        row = {
+            "order_id": order_id,
+            "signal_id": signal_id,
+            "symbol": symbol.upper(),
+            "side": side.upper(),
+            "qty": float(qty or 0.0),
+            "order_type": order_type.upper(),
+            "limit_price": limit_price,
+            "decision_price": decision_price,
+            "fill_price": fill_price,
+            "shortfall_bps": shortfall,
+            "filled": 1 if filled else 0,
+            "outcome": outcome,
+            "decision_ts": _utc(decision_ts),
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "environment": environment,
+            "account_id": account_id,
+            "portfolio_id": portfolio_id,
+            "broker": broker,
+            "decision_id": decision_id,
+            "order_intent_id": order_intent_id,
+            "requested_at": requested_at,
+            "submitted_at": submitted_at,
+            "filled_at": filled_at,
+            "fees": float(fees or 0.0),
+            "spread_bps": spread_bps,
+            "filled_qty": float(filled_qty if filled_qty is not None else (qty if filled else 0.0)),
+            "cancelled": 1 if cancelled else 0,
+            "rejected": 1 if rejected else 0,
+            "recorded_at": datetime.now(timezone.utc),
+        }
+        self._insert_execution(row, deduplicate=deduplicate)
         return shortfall
 
     # ------------------------------------------------------------------
@@ -833,17 +825,13 @@ class Journal:
                     ExecutionQuality.account_id == account_id,
                 ]
                 if strategy_version is not None:
-                    conditions.append(
-                        ExecutionQuality.strategy_version == strategy_version
-                    )
+                    conditions.append(ExecutionQuality.strategy_version == strategy_version)
                 if window_start is not None:
                     conditions.append(ExecutionQuality.recorded_at >= _utc(window_start))
                 if window_end is not None:
                     conditions.append(ExecutionQuality.recorded_at <= _utc(window_end))
 
-                rows = session.scalars(
-                    select(ExecutionQuality).where(*conditions)
-                ).all()
+                rows = session.scalars(select(ExecutionQuality).where(*conditions)).all()
         except Exception as exc:
             logger.warning("Scoped execution read failed: %s", exc)
             return {"available": False, "reason": str(exc)}
@@ -868,9 +856,7 @@ class Journal:
 
         fills = [r for r in rows if r.filled]
         shortfalls = [r.shortfall_bps for r in rows if r.shortfall_bps is not None]
-        partials = [
-            r for r in fills if r.filled_qty and r.qty and r.filled_qty < r.qty
-        ]
+        partials = [r for r in fills if r.filled_qty and r.qty and r.filled_qty < r.qty]
         stamps = [_read_utc(r.recorded_at) for r in rows]
 
         # Signed cash effect of each fill against its decision price. Not a
@@ -880,8 +866,8 @@ class Journal:
         for r in fills:
             if r.decision_price and r.fill_price:
                 direction = 1.0 if r.side.upper() == "SELL" else -1.0
-                realized += direction * (r.fill_price - r.decision_price) * (
-                    r.filled_qty or r.qty or 0.0
+                realized += (
+                    direction * (r.fill_price - r.decision_price) * (r.filled_qty or r.qty or 0.0)
                 )
 
         return {
@@ -933,6 +919,8 @@ class Journal:
         symbol: str,
         environment: str,
         account_id: str = "default",
+        strategy_version: str | None = None,
+        before: datetime | None = None,
     ) -> float | None:
         """Signed net filled quantity for one sleeve scope, or None if unknowable.
 
@@ -946,18 +934,23 @@ class Journal:
             return None
         try:
             with self._session_factory() as session:  # type: ignore[misc]
+                conditions = [
+                    ExecutionQuality.strategy_id == strategy_id,
+                    ExecutionQuality.symbol == symbol.upper(),
+                    ExecutionQuality.environment == environment,
+                    ExecutionQuality.account_id == account_id,
+                    ExecutionQuality.filled == 1,
+                ]
+                if strategy_version is not None:
+                    conditions.append(ExecutionQuality.strategy_version == strategy_version)
+                if before is not None:
+                    conditions.append(ExecutionQuality.recorded_at < _utc(before))
                 rows = session.execute(
                     select(
                         ExecutionQuality.side,
                         func.coalesce(func.sum(ExecutionQuality.filled_qty), 0.0),
                     )
-                    .where(
-                        ExecutionQuality.strategy_id == strategy_id,
-                        ExecutionQuality.symbol == symbol.upper(),
-                        ExecutionQuality.environment == environment,
-                        ExecutionQuality.account_id == account_id,
-                        ExecutionQuality.filled == 1,
-                    )
+                    .where(*conditions)
                     .group_by(ExecutionQuality.side)
                 ).all()
         except Exception as exc:
@@ -980,6 +973,7 @@ class Journal:
         window_start: datetime | None = None,
         window_end: datetime | None = None,
         limit: int = 5000,
+        most_recent: bool = False,
     ) -> list[dict[str, Any]]:
         """Raw execution records, for callers that need the individual orders.
 
@@ -998,9 +992,7 @@ class Journal:
                 if strategy_id is not None:
                     conditions.append(ExecutionQuality.strategy_id == strategy_id)
                 if strategy_version is not None:
-                    conditions.append(
-                        ExecutionQuality.strategy_version == strategy_version
-                    )
+                    conditions.append(ExecutionQuality.strategy_version == strategy_version)
                 if symbol is not None:
                     conditions.append(ExecutionQuality.symbol == symbol.upper())
                 if environment is not None:
@@ -1012,12 +1004,22 @@ class Journal:
                 if window_end is not None:
                     conditions.append(ExecutionQuality.recorded_at <= _utc(window_end))
 
-                rows = session.scalars(
-                    select(ExecutionQuality)
-                    .where(*conditions)
-                    .order_by(ExecutionQuality.recorded_at)
-                    .limit(limit)
-                ).all()
+                order = (
+                    ExecutionQuality.recorded_at.desc()
+                    if most_recent
+                    else ExecutionQuality.recorded_at
+                )
+                tie_breaker = ExecutionQuality.id.desc() if most_recent else ExecutionQuality.id
+                rows = list(
+                    session.scalars(
+                        select(ExecutionQuality)
+                        .where(*conditions)
+                        .order_by(order, tie_breaker)
+                        .limit(limit)
+                    ).all()
+                )
+                if most_recent:
+                    rows.reverse()
 
                 return [
                     {
@@ -1091,9 +1093,7 @@ class Journal:
             return {"available": False, "reason": str(exc)}
 
         actual = len(stamps)
-        span_minutes = (
-            _utc(window_end) - _utc(window_start)
-        ).total_seconds() / 60.0
+        span_minutes = (_utc(window_end) - _utc(window_start)).total_seconds() / 60.0
         # Reported, not used to decide completeness. It assumes the market is
         # open for every minute of the window, so any span crossing an
         # overnight close or a weekend looks catastrophically short. Halting on
@@ -1160,22 +1160,21 @@ class Journal:
             from sqlalchemy import func
 
             with self._session_factory() as session:  # type: ignore[misc]
-                total = session.scalar(
-                    select(func.count()).select_from(ExecutionQuality)
-                ) or 0
-                fills = session.scalar(
-                    select(func.count())
-                    .select_from(ExecutionQuality)
-                    .where(ExecutionQuality.filled == 1)
-                ) or 0
+                total = session.scalar(select(func.count()).select_from(ExecutionQuality)) or 0
+                fills = (
+                    session.scalar(
+                        select(func.count())
+                        .select_from(ExecutionQuality)
+                        .where(ExecutionQuality.filled == 1)
+                    )
+                    or 0
+                )
                 mean_bps = session.scalar(
                     select(func.avg(ExecutionQuality.shortfall_bps)).where(
                         ExecutionQuality.shortfall_bps.is_not(None)
                     )
                 )
-                worst = session.scalar(
-                    select(func.max(ExecutionQuality.shortfall_bps))
-                )
+                worst = session.scalar(select(func.max(ExecutionQuality.shortfall_bps)))
                 rows = session.scalars(
                     select(ExecutionQuality)
                     .order_by(ExecutionQuality.recorded_at.desc())
@@ -1200,7 +1199,6 @@ class Journal:
         except Exception as exc:
             logger.warning("Execution quality read failed: %s", exc)
             return {"enabled": True, "error": str(exc)}
-
 
     def decisions_as_of(
         self,
@@ -1233,10 +1231,7 @@ class Journal:
                 if window_start is not None:
                     conditions.append(Decision.ts >= _utc(window_start))
                 rows = session.scalars(
-                    select(Decision)
-                    .where(*conditions)
-                    .order_by(Decision.ts)
-                    .limit(limit)
+                    select(Decision).where(*conditions).order_by(Decision.ts).limit(limit)
                 ).all()
                 return [
                     {
@@ -1295,9 +1290,7 @@ class Journal:
                 bars = session.scalar(select(func.count()).select_from(BarObservation)) or 0
                 prices = session.scalar(select(func.count()).select_from(PriceObservation)) or 0
                 decisions = session.scalar(select(func.count()).select_from(Decision)) or 0
-                symbols = session.scalars(
-                    select(BarObservation.symbol).distinct()
-                ).all()
+                symbols = session.scalars(select(BarObservation.symbol).distinct()).all()
                 earliest = session.scalar(select(func.min(BarObservation.bar_ts)))
                 latest = session.scalar(select(func.max(BarObservation.bar_ts)))
             return {
@@ -1308,9 +1301,7 @@ class Journal:
                 "price_observations": prices,
                 "decisions": decisions,
                 "symbols": sorted(symbols),
-                "coverage_from": (
-                    _read_utc(earliest).isoformat() if earliest else None
-                ),
+                "coverage_from": (_read_utc(earliest).isoformat() if earliest else None),
                 "coverage_to": _read_utc(latest).isoformat() if latest else None,
             }
         except Exception as exc:
@@ -1320,6 +1311,30 @@ class Journal:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def _insert_execution(
+        self,
+        row: dict[str, object],
+        *,
+        deduplicate: bool,
+    ) -> None:
+        """Insert one execution, optionally once per broker order identity."""
+        if not self.enabled:
+            return
+        try:
+            with self._lock, self._session_factory() as session:  # type: ignore[misc]
+                if deduplicate and row.get("order_id"):
+                    existing = session.scalar(
+                        select(ExecutionQuality.id)
+                        .where(ExecutionQuality.order_id == row["order_id"])
+                        .limit(1)
+                    )
+                    if existing is not None:
+                        return
+                session.add(ExecutionQuality(**row))
+                session.commit()
+        except Exception as exc:
+            logger.warning("Journal write failed (ExecutionQuality): %s", exc)
+
     def _insert(self, model: type, row: dict) -> None:
         if not self.enabled:
             return

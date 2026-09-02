@@ -1,4 +1,5 @@
 """Input sanitisation helpers."""
+
 from __future__ import annotations
 
 import re
@@ -9,7 +10,10 @@ from fastapi import HTTPException
 def sanitize_symbol(s: str) -> str:
     """Uppercase, strip whitespace, validate symbol format."""
     cleaned = s.strip().upper()
-    if not re.match(r"^[A-Z0-9./]{1,20}$", cleaned):
+    if len(cleaned) > 20 or not re.fullmatch(
+        r"[A-Z0-9]+(?:[.-][A-Z0-9]+)*(?:/[A-Z0-9]+(?:[.-][A-Z0-9]+)*)?",
+        cleaned,
+    ):
         raise HTTPException(status_code=422, detail=f"Invalid symbol format: {s!r}")
     return cleaned
 

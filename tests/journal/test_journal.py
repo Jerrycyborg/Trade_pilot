@@ -52,21 +52,33 @@ class TestBarArchive:
     def test_only_the_new_bars_are_added_on_overlap(self, archive: Journal) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         first = [
-            OHLCVBar(symbol="AAPL", timestamp=now - timedelta(minutes=15 * i),
-                     open=1, high=2, low=0.5, close=1.5, volume=1)
+            OHLCVBar(
+                symbol="AAPL",
+                timestamp=now - timedelta(minutes=15 * i),
+                open=1,
+                high=2,
+                low=0.5,
+                close=1.5,
+                volume=1,
+            )
             for i in range(5)
         ]
         overlapping = [
-            OHLCVBar(symbol="AAPL", timestamp=now - timedelta(minutes=15 * i),
-                     open=1, high=2, low=0.5, close=1.5, volume=1)
+            OHLCVBar(
+                symbol="AAPL",
+                timestamp=now - timedelta(minutes=15 * i),
+                open=1,
+                high=2,
+                low=0.5,
+                close=1.5,
+                volume=1,
+            )
             for i in range(3, 8)
         ]
         archive.record_bars("AAPL", "15m", first)
         assert archive.record_bars("AAPL", "15m", overlapping) == 3
 
-    def test_the_same_bar_at_two_timeframes_is_two_records(
-        self, archive: Journal
-    ) -> None:
+    def test_the_same_bar_at_two_timeframes_is_two_records(self, archive: Journal) -> None:
         bars = _bars(3)
         archive.record_bars("AAPL", "15m", bars)
         assert archive.record_bars("AAPL", "1m", bars) == 3
@@ -81,13 +93,12 @@ class TestBarArchive:
 
 
 class TestPriceObservations:
-    def test_staleness_is_derived_from_the_two_timestamps(
-        self, archive: Journal
-    ) -> None:
+    def test_staleness_is_derived_from_the_two_timestamps(self, archive: Journal) -> None:
         """price_ts is when the market printed it; observed_at is when we saw
         it. The gap between them is the whole point of the archive."""
         archive.record_price(
-            "AAPL", 200.0,
+            "AAPL",
+            200.0,
             price_ts=datetime.now(timezone.utc) - timedelta(seconds=45),
             source="alpaca_trade",
         )
@@ -100,9 +111,7 @@ class TestPriceObservations:
         archive.record_price("AAPL", 180.0, source="last_bar", accepted=False)
         assert archive.stats()["price_observations"] == 2
 
-    def test_repeated_observations_are_not_deduplicated(
-        self, archive: Journal
-    ) -> None:
+    def test_repeated_observations_are_not_deduplicated(self, archive: Journal) -> None:
         """Unlike bars: seeing the same price twice is two facts about us."""
         stamp = datetime.now(timezone.utc)
         for _ in range(3):
@@ -115,18 +124,21 @@ class TestDecisionJournal:
         """Without the inputs, a post-mortem can see that a trade lost money
         but never why the system thought otherwise."""
         archive.record_decision(
-            stage="signal", outcome="approved", symbol="AAPL", action="BUY",
-            reason="ema cross", inputs={"rsi": 58.2, "adx": 27.1},
-            outputs={"size_pct": 0.02}, correlation_id="sig-1",
+            stage="signal",
+            outcome="approved",
+            symbol="AAPL",
+            action="BUY",
+            reason="ema cross",
+            inputs={"rsi": 58.2, "adx": 27.1},
+            outputs={"size_pct": 0.02},
+            correlation_id="sig-1",
         )
         entry = archive.recent_decisions()[0]
         assert entry["inputs"] == {"rsi": 58.2, "adx": 27.1}
         assert entry["outputs"] == {"size_pct": 0.02}
         assert entry["correlation_id"] == "sig-1"
 
-    def test_correlation_id_links_the_stages_of_one_signal(
-        self, archive: Journal
-    ) -> None:
+    def test_correlation_id_links_the_stages_of_one_signal(self, archive: Journal) -> None:
         for stage in ("signal", "risk", "policy", "order"):
             archive.record_decision(
                 stage=stage, outcome="approved", symbol="AAPL", correlation_id="sig-7"
@@ -139,8 +151,11 @@ class TestDecisionJournal:
         base = datetime.now(timezone.utc)
         for i in range(3):
             archive.record_decision(
-                stage="signal", outcome="approved", symbol="AAPL",
-                reason=f"n{i}", ts=base + timedelta(seconds=i),
+                stage="signal",
+                outcome="approved",
+                symbol="AAPL",
+                reason=f"n{i}",
+                ts=base + timedelta(seconds=i),
             )
         assert [e["reason"] for e in archive.recent_decisions()] == ["n2", "n1", "n0"]
 
@@ -157,7 +172,9 @@ class TestDecisionJournal:
 
     def test_unserialisable_inputs_do_not_raise(self, archive: Journal) -> None:
         archive.record_decision(
-            stage="signal", outcome="approved", symbol="AAPL",
+            stage="signal",
+            outcome="approved",
+            symbol="AAPL",
             inputs={"obj": object(), "when": datetime.now(timezone.utc)},
         )
         assert len(archive.recent_decisions()) == 1
@@ -175,9 +192,7 @@ class TestFailureIsNeverFatal:
         assert archive.recent_decisions() == []
         assert archive.stats()["enabled"] is False
 
-    def test_an_unwritable_path_disables_rather_than_raises(
-        self, tmp_path: Path
-    ) -> None:
+    def test_an_unwritable_path_disables_rather_than_raises(self, tmp_path: Path) -> None:
         blocker = tmp_path / "not-a-dir"
         blocker.write_text("x", encoding="utf-8")
         archive = Journal(path=blocker / "nested" / "j.db")
@@ -214,8 +229,11 @@ class TestExecutionQuality:
 
     def test_a_fill_records_its_shortfall(self, archive: Journal) -> None:
         shortfall = archive.record_execution(
-            symbol="AAPL", side="BUY", qty=10,
-            decision_price=200.0, fill_price=200.2,
+            symbol="AAPL",
+            side="BUY",
+            qty=10,
+            decision_price=200.0,
+            fill_price=200.2,
         )
         assert shortfall == 10.0
         report = archive.execution_quality()
@@ -223,27 +241,42 @@ class TestExecutionQuality:
         assert report["filled"] == 1
         assert report["mean_shortfall_bps"] == 10.0
 
-    def test_a_sell_filled_below_the_decision_price_is_also_a_cost(
-        self, archive: Journal
-    ) -> None:
-        assert archive.record_execution(
-            symbol="AAPL", side="SELL", qty=10,
-            decision_price=200.0, fill_price=199.8,
-        ) == 10.0
+    def test_a_sell_filled_below_the_decision_price_is_also_a_cost(self, archive: Journal) -> None:
+        assert (
+            archive.record_execution(
+                symbol="AAPL",
+                side="SELL",
+                qty=10,
+                decision_price=200.0,
+                fill_price=199.8,
+            )
+            == 10.0
+        )
 
     def test_a_missed_limit_is_recorded_and_counts_against_the_fill_rate(
         self, archive: Journal
     ) -> None:
         """Reading a fill rate only from fills yields 100% — the number is useless."""
         archive.record_execution(
-            symbol="AAPL", side="BUY", qty=10,
-            decision_price=200.0, fill_price=200.2,
+            symbol="AAPL",
+            side="BUY",
+            qty=10,
+            decision_price=200.0,
+            fill_price=200.2,
         )
-        assert archive.record_execution(
-            symbol="AAPL", side="BUY", qty=10,
-            decision_price=200.0, fill_price=None,
-            order_type="LIMIT", limit_price=200.2, outcome="limit_not_marketable",
-        ) is None
+        assert (
+            archive.record_execution(
+                symbol="AAPL",
+                side="BUY",
+                qty=10,
+                decision_price=200.0,
+                fill_price=None,
+                order_type="LIMIT",
+                limit_price=200.2,
+                outcome="limit_not_marketable",
+            )
+            is None
+        )
 
         report = archive.execution_quality()
         assert report["orders"] == 2
@@ -256,8 +289,11 @@ class TestExecutionQuality:
         """A mean hides the fill that actually hurt."""
         for fill in (200.1, 200.2, 201.0):
             archive.record_execution(
-                symbol="AAPL", side="BUY", qty=1,
-                decision_price=200.0, fill_price=fill,
+                symbol="AAPL",
+                side="BUY",
+                qty=1,
+                decision_price=200.0,
+                fill_price=fill,
             )
         report = archive.execution_quality()
         assert report["worst_shortfall_bps"] == 50.0
@@ -274,42 +310,43 @@ class TestExecutionQuality:
         by_symbol = archive.execution_quality()["mean_shortfall_by_symbol"]
         assert by_symbol == {"AAPL": 10.0, "THIN": 50.0}
 
-    def test_a_fill_without_a_decision_price_records_no_shortfall(
-        self, archive: Journal
-    ) -> None:
+    def test_a_fill_without_a_decision_price_records_no_shortfall(self, archive: Journal) -> None:
         """It filled, but there is nothing to compare it against — not a zero cost."""
-        assert archive.record_execution(
-            symbol="AAPL", side="BUY", qty=1, decision_price=None, fill_price=200.0
-        ) is None
+        assert (
+            archive.record_execution(
+                symbol="AAPL", side="BUY", qty=1, decision_price=None, fill_price=200.0
+            )
+            is None
+        )
         report = archive.execution_quality()
         assert report["filled"] == 1
         assert report["mean_shortfall_bps"] is None
 
-    def test_no_orders_yet_reports_empty_rather_than_zero_cost(
-        self, archive: Journal
-    ) -> None:
+    def test_no_orders_yet_reports_empty_rather_than_zero_cost(self, archive: Journal) -> None:
         report = archive.execution_quality()
         assert report["orders"] == 0
         assert report["fill_rate"] is None
         assert report["mean_shortfall_bps"] is None
 
-    def test_a_disabled_journal_still_computes_the_shortfall(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_disabled_journal_still_computes_the_shortfall(self, tmp_path: Path) -> None:
         """Archiving is optional; the caller's return value should not change."""
         archive = Journal(path=tmp_path / "j.db", enabled=False)
-        assert archive.record_execution(
-            symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
-        ) == 10.0
+        assert (
+            archive.record_execution(
+                symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
+            )
+            == 10.0
+        )
         assert archive.execution_quality() == {"enabled": False}
 
-    def test_a_broken_engine_does_not_break_the_trading_path(
-        self, archive: Journal
-    ) -> None:
+    def test_a_broken_engine_does_not_break_the_trading_path(self, archive: Journal) -> None:
         archive._session_factory = None
-        assert archive.record_execution(
-            symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
-        ) == 10.0
+        assert (
+            archive.record_execution(
+                symbol="AAPL", side="BUY", qty=1, decision_price=200.0, fill_price=200.2
+            )
+            == 10.0
+        )
 
 
 class TestNetPosition:
@@ -323,45 +360,69 @@ class TestNetPosition:
 
     def test_fills_net_signed_within_the_scope(self, archive: Journal) -> None:
         archive.record_execution(
-            symbol="NVDA", side="SELL", qty=7,
-            decision_price=219.5, fill_price=219.46, strategy_id="ema_rsi_macd",
+            symbol="NVDA",
+            side="SELL",
+            qty=7,
+            decision_price=219.5,
+            fill_price=219.46,
+            strategy_id="ema_rsi_macd",
         )
         archive.record_execution(
-            symbol="NVDA", side="BUY", qty=3,
-            decision_price=219.4, fill_price=219.45, strategy_id="ema_rsi_macd",
+            symbol="NVDA",
+            side="BUY",
+            qty=3,
+            decision_price=219.4,
+            fill_price=219.45,
+            strategy_id="ema_rsi_macd",
         )
-        assert archive.net_position(
-            strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
-        ) == -4.0
+        assert (
+            archive.net_position(strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper")
+            == -4.0
+        )
 
     def test_a_miss_is_not_a_position(self, archive: Journal) -> None:
         archive.record_execution(
-            symbol="NVDA", side="BUY", qty=10,
-            decision_price=219.5, fill_price=None,
-            order_type="LIMIT", limit_price=219.4, outcome="limit_not_marketable",
+            symbol="NVDA",
+            side="BUY",
+            qty=10,
+            decision_price=219.5,
+            fill_price=None,
+            order_type="LIMIT",
+            limit_price=219.4,
+            outcome="limit_not_marketable",
             strategy_id="ema_rsi_macd",
         )
-        assert archive.net_position(
-            strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
-        ) == 0.0
+        assert (
+            archive.net_position(strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper")
+            == 0.0
+        )
 
     def test_another_sleeves_fills_do_not_count(self, archive: Journal) -> None:
         archive.record_execution(
-            symbol="NVDA", side="SELL", qty=7,
-            decision_price=219.5, fill_price=219.46, strategy_id="ema_rsi_macd",
+            symbol="NVDA",
+            side="SELL",
+            qty=7,
+            decision_price=219.5,
+            fill_price=219.46,
+            strategy_id="ema_rsi_macd",
         )
-        assert archive.net_position(
-            strategy_id="ema_rsi_macd@chal-1", symbol="NVDA", environment="paper"
-        ) == 0.0
-        assert archive.net_position(
-            strategy_id="ema_rsi_macd", symbol="NVDA", environment="live"
-        ) == 0.0
+        assert (
+            archive.net_position(
+                strategy_id="ema_rsi_macd@chal-1", symbol="NVDA", environment="paper"
+            )
+            == 0.0
+        )
+        assert (
+            archive.net_position(strategy_id="ema_rsi_macd", symbol="NVDA", environment="live")
+            == 0.0
+        )
 
     def test_a_disabled_journal_answers_none_not_flat(self, tmp_path: Path) -> None:
         dead = Journal(path=tmp_path / "off.db", enabled=False)
-        assert dead.net_position(
-            strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
-        ) is None
+        assert (
+            dead.net_position(strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper")
+            is None
+        )
 
 
 class TestBarTimeframes:
@@ -373,7 +434,11 @@ class TestBarTimeframes:
         daily = [
             SimpleNamespace(
                 timestamp=now - timedelta(days=i),
-                open=100.0, high=101.0, low=99.0, close=100.0, volume=1000.0,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
             )
             for i in range(3)
         ]
@@ -390,9 +455,7 @@ class TestSentimentArchive:
     """Append-only sentiment: the aggregator's TTL cache holds only the
     current answer, so this table is the only honest input for an as-of read."""
 
-    def test_scores_are_returned_oldest_first_within_the_window(
-        self, archive: Journal
-    ) -> None:
+    def test_scores_are_returned_oldest_first_within_the_window(self, archive: Journal) -> None:
         from datetime import datetime, timezone
 
         archive.record_sentiment("NVDA", score=0.4, confidence=0.5, sources=["news"])
@@ -402,9 +465,7 @@ class TestSentimentArchive:
         assert rows[0]["sources"] == ["news"]
         assert rows[0]["observed_at"].tzinfo is not None
 
-    def test_a_later_score_is_absent_from_an_earlier_moment(
-        self, archive: Journal
-    ) -> None:
+    def test_a_later_score_is_absent_from_an_earlier_moment(self, archive: Journal) -> None:
         """The point-in-time property itself: what was knowable then, only."""
         from datetime import datetime, timedelta, timezone
 
@@ -433,9 +494,7 @@ class TestResearchArchive:
         assert rows[0]["risk_factors"] == ["a"]
         assert rows[0]["observed_at"].tzinfo is not None
 
-    def test_a_later_report_is_absent_from_an_earlier_moment(
-        self, archive: Journal
-    ) -> None:
+    def test_a_later_report_is_absent_from_an_earlier_moment(self, archive: Journal) -> None:
         from datetime import datetime, timedelta, timezone
 
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -462,7 +521,8 @@ class TestHeadlineArchive:
         )
         rows = archive.headlines_as_of("NVDA", datetime.now(timezone.utc))
         assert [r["headline"] for r in rows] == [
-            "NVDA beats estimates", "NVDA raises guidance",
+            "NVDA beats estimates",
+            "NVDA raises guidance",
         ]
         assert rows[0]["source"] == "newsapi"
         assert rows[0]["published_at"] == stamp
@@ -539,3 +599,29 @@ def test_existing_execution_table_gets_additive_scope_columns(tmp_path: Path) ->
     rows = journal.execution_rows(strategy_version="v1")
     assert len(rows) == 1
     assert rows[0]["strategy_id"] == "ema_rsi_macd"
+
+
+def test_execution_record_can_be_deduplicated_by_order_id(
+    archive: Journal,
+) -> None:
+    for signal_id in ("first-observation", "replayed-observation"):
+        archive.record_execution(
+            symbol="AAPL",
+            side="SELL",
+            qty=2,
+            decision_price=None,
+            fill_price=201.0,
+            order_id="paper-close-order",
+            signal_id=signal_id,
+            strategy_id="ema_rsi_macd",
+            environment="paper",
+            deduplicate=True,
+        )
+
+    rows = archive.execution_rows(
+        strategy_id="ema_rsi_macd",
+        symbol="AAPL",
+        environment="paper",
+    )
+    assert len(rows) == 1
+    assert rows[0]["signal_id"] == "first-observation"

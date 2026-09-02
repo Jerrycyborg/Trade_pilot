@@ -32,3 +32,7 @@ def test_generate_checksums() -> None:
     assert payload["ok"] is True
     assert checksum_file.exists()
     assert "Project_spec2.md" in checksum_data["files"]
+    assert all(
+        "__pycache__" not in filename and not filename.endswith((".pyc", ".pyo"))
+        for filename in checksum_data["files"]
+    )

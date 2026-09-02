@@ -103,6 +103,8 @@ system recorded itself is what earns it.
 | `WEBHOOK_ALLOWED_HOSTS` | With webhook | Exact hosts permitted for HTTPS notification egress |
 | `BROKER` | No | `etoro` or `paper` (default paper) |
 | `WORKER_ENABLED` | No | `true` to enable strategy worker polling |
+| `TRADING_LOOP_OWNER` | No | `orchestrator` (default) or `strategy`; exactly one service may submit entries |
+| `SIGNAL_GENERATION_CONCURRENCY` | No | Parallel symbol generation, bounded to 1–10 (default 4) |
 | `ORCHESTRATOR_INTERVAL_MINUTES` | No | Cycle interval (default 5) |
 | `STOP_LOSS_PCT` | No | Stop loss % (default 0.03 = 3%) |
 | `TAKE_PROFIT_PCT` | No | Take profit % (default 0.06 = 6%) |
@@ -112,6 +114,8 @@ system recorded itself is what earns it.
 | `LEARNING_ENABLED` | No | Schedule bounded offline learning for paper sleeves |
 | `LEARNING_INTERVAL_SECONDS` | No | Learning cadence; minimum one hour |
 | `LEARNING_MIN_PAPER_TRADES` | No | Closed paper round trips required before evaluation |
+| `LEARNING_MAX_EXECUTION_ROWS` | No | Newest execution rows read per sleeve (default 5000) |
+| `PAPER_MAX_ACTIVE_CHALLENGERS` | No | Concurrent paper challengers per account/symbol, bounded to 1–8 (default 2) |
 | `LEARNING_STRATEGY_REGISTRY_PATH` | No | Immutable champion artifact directory |
 
 ### Intraday / real-time
@@ -132,7 +136,8 @@ system recorded itself is what earns it.
 | `TAKE_PROFIT_CHECK_INTERVAL_MINUTES` | 1 intraday / 5 daily | Take-profit poll interval |
 | `PAPER_STARTING_CASH` | `100000` | Paper broker opening cash |
 | `PAPER_SLIPPAGE_BPS` | `2` | Simulated slippage, always against the trader |
-| `PAPER_STATE_PATH` | `./paper-broker-state.json` | Paper position ledger |
+| `PAPER_STATE_PATH` | `./paper-broker-state.json` | Atomic paper position and replay ledger |
+| `PAPER_MAX_ACTIVE_CHALLENGERS` | `2` | Per-account/symbol experiment cap; activation is database-serialized |
 
 ### Execution quality
 
@@ -1065,9 +1070,10 @@ table the gate trusts is the one place it must never appear.
 paper comparison is the step where a promotion gate gets bypassed by
 arithmetic.
 
-**And challengers actually trade.** The strategy worker runs each paper
-challenger's recorded proposal through the identical pipeline — same entry
-gates, same policy service, same sizing, same PDT budget — tagged with its
+**And challengers actually trade.** With the default single-owner setup, the
+strategy service emits the champion plus each registered paper challenger's
+signal and the orchestrator routes them through the identical pipeline — same
+entry gates, same policy service, same sizing, same PDT budget — tagged with its
 derived id, so the journal separates the two sides' fills. Parameters come from
 `lifecycle.challenger_proposal` and nowhere else: no proposal row, no trades. A
 broken challenger is skipped; the champion runs first, unconditionally.
@@ -1128,6 +1134,37 @@ curl -X POST \
   http://127.0.0.1:8007/v1/orchestrator/learning/run
 curl http://127.0.0.1:8007/v1/orchestrator/learning/status
 ```
+
+Inspect the learning curve and qualified proposals, then explicitly start at
+most one reviewed proposal in paper:
+
+```bash
+curl \
+  -H "X-Internal-Key: $INTERNAL_API_KEY" \
+  http://127.0.0.1:8007/v1/orchestrator/learning/curve
+curl \
+  -H "X-Internal-Key: $INTERNAL_API_KEY" \
+  "http://127.0.0.1:8007/v1/orchestrator/learning/proposals?survived=true"
+curl -X POST \
+  -H "X-Admin-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"actor":"your-name","reason":"reviewed for controlled paper comparison"}' \
+  http://127.0.0.1:8007/v1/orchestrator/learning/proposals/PROPOSAL_ID/paper
+curl \
+  -H "X-Internal-Key: $INTERNAL_API_KEY" \
+  http://127.0.0.1:8007/v1/orchestrator/learning/proposals/PROPOSAL_ID/comparison
+```
+
+Activation is idempotent and serialized against the per-symbol challenger cap.
+The learner never activates, adopts, promotes, edits, or deploys a strategy.
+Those are separate operator actions, and live remains impossible for a
+challenger until a named human adoption plus the normal evidence gates.
+
+The local paper broker isolates every strategy/account sleeve, rejects a stale
+position generation, and keeps idempotency records independently of its bounded
+display history. It stops accepting new entries before replay capacity is
+exhausted, reserving room for risk-reducing exits. State writes are
+fsync-and-rename atomic and unreadable state refuses startup.
 
 An `INSUFFICIENT_PAPER_EVIDENCE`, `VETOED`, or
 `SKIPPED_INVALID_ARTIFACT_OR_EVIDENCE` result is a normal refusal, not a cue

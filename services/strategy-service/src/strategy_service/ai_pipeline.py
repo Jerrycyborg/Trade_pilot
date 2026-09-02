@@ -166,8 +166,7 @@ class AISignalPipeline:
             confidence=round(confidence, 4),
             size_pct=size_pct,
             model_version=(
-                f"strategy-ai-v1/{settings.claude_model}/"
-                f"prompt-{self._prompt.sha256[:12]}"
+                f"strategy-ai-v1/{settings.claude_model}/prompt-{self._prompt.sha256[:12]}"
             ),
             risk_score=risk_score,
             ta_summary=ta_contract,
@@ -300,6 +299,17 @@ def _build_deterministic_signal(
             sentiment_score=sentiment_score,
             bars=bars,
         )
+        indicators = ta_summary.indicators
+        ta_contract = TechnicalSummaryContract(
+            symbol=symbol.upper(),
+            trend_direction=ta_summary.trend_direction,
+            signal_tags=ta_summary.signal_tags,
+            rsi_14=indicators.rsi_14,
+            macd_histogram=indicators.macd_histogram,
+            bb_position=indicators.bb_position,
+            data_source=ta_summary.data_source,
+            as_of=ta_summary.as_of,
+        )
         return SignalCandidate(
             signal_id=str(uuid4()),
             symbol=symbol.upper(),
@@ -309,6 +319,8 @@ def _build_deterministic_signal(
             size_pct=rule_signal.size_pct,
             model_version="strategy-rule-v1",
             risk_score=rule_signal.risk_score,
+            ta_summary=ta_contract,
+            research_summary=rule_signal.reasoning,
         )
     # No observations means no signal. A symbol hash is deterministic, but it
     # is not market evidence; turning it into BUY/SELL makes a feed outage

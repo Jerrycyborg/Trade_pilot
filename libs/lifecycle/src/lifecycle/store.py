@@ -31,6 +31,9 @@ import hashlib
 import json
 import logging
 import os
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -57,6 +60,7 @@ STATES = ("candidate", "paper", "live", "probation", "retired")
 def sleeve_key(strategy_id: str, symbol: str) -> str:
     """The display identity of a sleeve. Symbol first, so a roster sorts by it."""
     return f"{symbol.upper()}:{strategy_id}"
+
 
 #: Entering these states sets where the sleeve's positions live, so a later
 #: reduce-only exit knows which broker to reach even after a demotion.
@@ -169,9 +173,7 @@ class StoreSettings:
         return cls(
             url=os.getenv("LIFECYCLE_DATABASE_URL", ""),
             account_id=os.getenv("TRADING_ACCOUNT_ID", DEFAULT_ACCOUNT),
-            dependency_grace_seconds=int(
-                os.getenv("RECONCILE_DEPENDENCY_GRACE_SECONDS", "600")
-            ),
+            dependency_grace_seconds=int(os.getenv("RECONCILE_DEPENDENCY_GRACE_SECONDS", "600")),
             breaks_before_halt=int(os.getenv("RECONCILE_BREAKS_BEFORE_HALT", "2")),
         )
 
@@ -191,6 +193,7 @@ class PostgresLifecycleStore:
 
     def __init__(self, settings: StoreSettings | None = None, engine: Engine | None = None) -> None:
         self._settings = settings or StoreSettings.from_env()
+        self._challenger_activation_guard = threading.Lock()
         if engine is not None:
             self._engine = engine
         else:
@@ -206,19 +209,11 @@ class PostgresLifecycleStore:
         self._sleeve = Table("sleeve", self._meta, autoload_with=self._engine)
         self._transition = Table("transition", self._meta, autoload_with=self._engine)
         self._evidence = Table("evidence_snapshot", self._meta, autoload_with=self._engine)
-        self._challenger = Table(
-            "challenger_proposal", self._meta, autoload_with=self._engine
-        )
-        self._environment = Table(
-            "execution_environment", self._meta, autoload_with=self._engine
-        )
-        self._reconciliation = Table(
-            "reconciliation_state", self._meta, autoload_with=self._engine
-        )
+        self._challenger = Table("challenger_proposal", self._meta, autoload_with=self._engine)
+        self._environment = Table("execution_environment", self._meta, autoload_with=self._engine)
+        self._reconciliation = Table("reconciliation_state", self._meta, autoload_with=self._engine)
         self._journal_health = Table("journal_health", self._meta, autoload_with=self._engine)
-        self._learning_cycle = Table(
-            "learning_cycle", self._meta, autoload_with=self._engine
-        )
+        self._learning_cycle = Table("learning_cycle", self._meta, autoload_with=self._engine)
 
     # ------------------------------------------------------------------
     # Reads — never cached
@@ -226,6 +221,31 @@ class PostgresLifecycleStore:
     @property
     def settings(self) -> StoreSettings:
         return self._settings
+
+    @contextmanager
+    def challenger_activation_lock(
+        self,
+        account_id: str,
+        symbol: str,
+    ) -> Iterator[None]:
+        """Serialize a symbol's paper-challenger cap across all processes."""
+        lock_name = f"paper-challenger-activation:{account_id}:{symbol.upper()}"
+        # Keep at most one waiter from this process in the connection pool.
+        # Otherwise enough concurrent requests could occupy every pooled
+        # connection while waiting for the same lock, starving the holder's
+        # roster reads.
+        with self._challenger_activation_guard, self._engine.connect() as conn:
+            conn.execute(
+                text("SELECT pg_advisory_lock(hashtextextended(:name, 0))"),
+                {"name": lock_name},
+            )
+            try:
+                yield
+            finally:
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(hashtextextended(:name, 0))"),
+                    {"name": lock_name},
+                )
 
     def _row_to_sleeve(self, row: Any) -> Sleeve:
         return Sleeve(
@@ -244,9 +264,7 @@ class PostgresLifecycleStore:
             origin=getattr(row, "origin", "human"),
         )
 
-    def get(
-        self, strategy_id: str, symbol: str, account_id: str | None = None
-    ) -> Sleeve | None:
+    def get(self, strategy_id: str, symbol: str, account_id: str | None = None) -> Sleeve | None:
         account = account_id or self._settings.account_id
         stmt = select(self._sleeve).where(
             self._sleeve.c.strategy_id == strategy_id,
@@ -260,9 +278,7 @@ class PostgresLifecycleStore:
     def require(self, strategy_id: str, symbol: str, account_id: str | None = None) -> Sleeve:
         sleeve = self.get(strategy_id, symbol, account_id)
         if sleeve is None:
-            raise SleeveNotFoundError(
-                f"{symbol.upper()}:{strategy_id} is not registered"
-            )
+            raise SleeveNotFoundError(f"{symbol.upper()}:{strategy_id} is not registered")
         return sleeve
 
     def all(self, account_id: str | None = None) -> list[Sleeve]:
@@ -339,7 +355,10 @@ class PostgresLifecycleStore:
             )
         logger.warning(
             "Live mode %s for account %s by %s (%s)",
-            "ENABLED" if enabled else "disabled", account, actor, reason,
+            "ENABLED" if enabled else "disabled",
+            account,
+            actor,
+            reason,
         )
         return enabled
 
@@ -396,8 +415,14 @@ class PostgresLifecycleStore:
                     )
                 )
                 self._append_transition(
-                    conn, existing.id, new_version, existing.state, "candidate",
-                    "re-registered", actor, None,
+                    conn,
+                    existing.id,
+                    new_version,
+                    existing.state,
+                    "candidate",
+                    "re-registered",
+                    actor,
+                    None,
                 )
                 row = conn.execute(
                     select(self._sleeve).where(self._sleeve.c.id == existing.id)
@@ -474,9 +499,7 @@ class PostgresLifecycleStore:
         probation_count = sleeve.probation_count + (
             1 if to_state == "probation" and sleeve.state != "probation" else 0
         )
-        position_environment = POSITION_ON_ENTRY.get(
-            to_state, sleeve.position_environment
-        )
+        position_environment = POSITION_ON_ENTRY.get(to_state, sleeve.position_environment)
 
         with self._engine.begin() as conn:
             if to_state == "live":
@@ -519,16 +542,24 @@ class PostgresLifecycleStore:
                     f"{expected}); re-read and decide again"
                 )
             self._append_transition(
-                conn, sleeve.id, new_version, sleeve.state, to_state,
-                reason, actor, evidence_snapshot_id,
+                conn,
+                sleeve.id,
+                new_version,
+                sleeve.state,
+                to_state,
+                reason,
+                actor,
+                evidence_snapshot_id,
             )
-            row = conn.execute(
-                select(self._sleeve).where(self._sleeve.c.id == sleeve.id)
-            ).first()
+            row = conn.execute(select(self._sleeve).where(self._sleeve.c.id == sleeve.id)).first()
 
         logger.info(
             "Lifecycle %s: %s -> %s (%s, by %s)",
-            sleeve.key, sleeve.state, to_state, reason, actor,
+            sleeve.key,
+            sleeve.state,
+            to_state,
+            reason,
+            actor,
         )
         return self._row_to_sleeve(row)
 
@@ -576,9 +607,7 @@ class PostgresLifecycleStore:
 
         with self._engine.begin() as conn:
             row = conn.execute(
-                select(self._sleeve)
-                .where(self._sleeve.c.id == sleeve.id)
-                .with_for_update()
+                select(self._sleeve).where(self._sleeve.c.id == sleeve.id).with_for_update()
             ).first()
             if row is None:
                 raise SleeveNotFoundError(f"sleeve {sleeve.id} is gone")
@@ -598,8 +627,14 @@ class PostgresLifecycleStore:
             # but somebody accepted a sleeve the system had refused, and that
             # belongs in the same append-only record as every other decision.
             self._append_transition(
-                conn, sleeve.id, new_version, row.state, row.state,
-                f"challenger adopted: {reason.strip()}", named, None,
+                conn,
+                sleeve.id,
+                new_version,
+                row.state,
+                row.state,
+                f"challenger adopted: {reason.strip()}",
+                named,
+                None,
             )
             refreshed = conn.execute(
                 select(self._sleeve).where(self._sleeve.c.id == sleeve.id)
@@ -748,6 +783,7 @@ class PostgresLifecycleStore:
     def challenger_proposals(
         self,
         *,
+        proposal_id: int | None = None,
         strategy_id: str | None = None,
         symbol: str | None = None,
         campaign_id: str | None = None,
@@ -757,6 +793,8 @@ class PostgresLifecycleStore:
     ) -> list[dict[str, Any]]:
         """What was proposed, and what the campaign concluded."""
         conditions = []
+        if proposal_id is not None:
+            conditions.append(self._challenger.c.id == proposal_id)
         if challenger_id is not None:
             conditions.append(self._challenger.c.challenger_id == challenger_id)
         if strategy_id is not None:
@@ -780,6 +818,7 @@ class PostgresLifecycleStore:
                     "id": r.id,
                     "challenger_id": r.challenger_id,
                     "campaign_id": r.campaign_id,
+                    "account_id": r.account_id,
                     "strategy_id": r.strategy_id,
                     "symbol": r.symbol,
                     "base_version": r.base_version,
@@ -921,9 +960,16 @@ class PostgresLifecycleStore:
 
         if row is None:
             return ReconciliationHalt(
-                account_id=account, broker=broker, environment=environment,
-                halted=False, consecutive_breaks=0, first_failure_at=None,
-                last_ok_at=None, last_checked_at=None, last_error="", halt_reason="",
+                account_id=account,
+                broker=broker,
+                environment=environment,
+                halted=False,
+                consecutive_breaks=0,
+                first_failure_at=None,
+                last_ok_at=None,
+                last_checked_at=None,
+                last_error="",
+                halt_reason="",
             )
         return ReconciliationHalt(
             account_id=row.account_id,
@@ -1001,9 +1047,7 @@ class PostgresLifecycleStore:
                 first_failure_at = moment
             if consecutive >= self._settings.breaks_before_halt:
                 halted = True
-                halt_reason = (
-                    f"{breaks} position break(s) persisted across {consecutive} checks"
-                )
+                halt_reason = f"{breaks} position break(s) persisted across {consecutive} checks"
 
         with self._engine.begin() as conn:
             conn.execute(
@@ -1024,18 +1068,26 @@ class PostgresLifecycleStore:
                     "halt_reason = EXCLUDED.halt_reason, updated_at = now()"
                 ),
                 {
-                    "a": account, "b": broker, "e": environment,
-                    "h": halted, "c": consecutive,
+                    "a": account,
+                    "b": broker,
+                    "e": environment,
+                    "h": halted,
+                    "c": consecutive,
                     "ff": first_failure_at,
                     "lo": moment if (ok and dependency_available) else None,
-                    "lc": moment, "err": error, "hr": halt_reason,
+                    "lc": moment,
+                    "err": error,
+                    "hr": halt_reason,
                 },
             )
 
         if halted and not current.halted:
             logger.error(
                 "ENTRIES HALTED for %s/%s/%s: %s. Exits remain available.",
-                account, broker, environment, halt_reason,
+                account,
+                broker,
+                environment,
+                halt_reason,
             )
         return self.reconciliation_state(broker, environment, account)
 
@@ -1075,7 +1127,10 @@ class PostgresLifecycleStore:
             )
         logger.error(
             "ENTRIES HALTED for %s/%s/%s: %s. Exits remain available.",
-            account, broker, environment, reason,
+            account,
+            broker,
+            environment,
+            reason,
         )
         return self.reconciliation_state(broker, environment, account)
 
@@ -1120,7 +1175,11 @@ class PostgresLifecycleStore:
                 )
         logger.warning(
             "Reconciliation halt cleared for %s/%s/%s by %s: %s",
-            account, broker, environment, actor, reason,
+            account,
+            broker,
+            environment,
+            actor,
+            reason,
         )
         return self.reconciliation_state(broker, environment, account)
 
@@ -1168,10 +1227,18 @@ class PostgresLifecycleStore:
                     "status = EXCLUDED.status, updated_at = now()"
                 ),
                 {
-                    "k": scope_key, "st": strategy_id, "sy": symbol.upper(),
-                    "e": environment, "ws": window_start, "we": window_end,
-                    "exp": expected_observations, "act": actual_observations,
-                    "g": gap_count, "el": eligible, "lg": last_gap_at, "s": status,
+                    "k": scope_key,
+                    "st": strategy_id,
+                    "sy": symbol.upper(),
+                    "e": environment,
+                    "ws": window_start,
+                    "we": window_end,
+                    "exp": expected_observations,
+                    "act": actual_observations,
+                    "g": gap_count,
+                    "el": eligible,
+                    "lg": last_gap_at,
+                    "s": status,
                 },
             )
 
@@ -1179,8 +1246,12 @@ class PostgresLifecycleStore:
             logger.warning(
                 "Journal health %s for %s (%s): %d/%d observations, %d gap(s). "
                 "Window is not eligible for learning or promotion evidence.",
-                status, scope_key, environment, actual_observations,
-                expected_observations, gap_count,
+                status,
+                scope_key,
+                environment,
+                actual_observations,
+                expected_observations,
+                gap_count,
             )
         return {
             "scope_key": scope_key,
@@ -1188,7 +1259,6 @@ class PostgresLifecycleStore:
             "eligible_for_learning": eligible,
             "gap_count": gap_count,
         }
-
 
     # ------------------------------------------------------------------
     # Validation artifacts — written when a validation runs, cited later
@@ -1261,9 +1331,7 @@ class PostgresLifecycleStore:
     def validation_artifact(self, artifact_id: int) -> dict[str, Any] | None:
         artifact = Table("validation_artifact", self._meta, autoload_with=self._engine)
         with self._engine.connect() as conn:
-            row = conn.execute(
-                select(artifact).where(artifact.c.id == artifact_id)
-            ).first()
+            row = conn.execute(select(artifact).where(artifact.c.id == artifact_id)).first()
         if row is None:
             return None
         return {

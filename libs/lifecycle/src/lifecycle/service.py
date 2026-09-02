@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -29,6 +30,7 @@ from .evidence import derive_backtest_evidence, derive_paper_evidence
 from .gates import GateResult, GateThresholds, evaluate_to_live, evaluate_to_paper
 from .store import (
     ConcurrentTransitionError,
+    LifecycleStoreError,
     LifecycleUnavailableError,
     PostgresLifecycleStore,
     Sleeve,
@@ -124,9 +126,7 @@ class LifecycleService:
             if sleeve.state == "live" and not self._store.live_mode_enabled(account_id):
                 return GateAnswer(False, "live_mode_disabled_by_operator")
             environment = "live" if sleeve.state == "live" else "paper"
-            halt = self._store.reconciliation_state(
-                environment, environment, account_id
-            )
+            halt = self._store.reconciliation_state(environment, environment, account_id)
         except Exception as exc:
             return GateAnswer(False, f"lifecycle_unavailable: {exc}", available=False)
 
@@ -176,7 +176,11 @@ class LifecycleService:
         if self._store is None:
             return None
         try:
-            rows = self._store.challenger_proposals(challenger_id=challenger_id, limit=1)
+            rows = self._store.challenger_proposals(
+                challenger_id=challenger_id,
+                account_id=self._store.settings.account_id,
+                limit=1,
+            )
         except Exception as exc:
             logger.error("Challenger proposal unreadable: %s", exc)
             return None
@@ -184,6 +188,122 @@ class LifecycleService:
             return None
         parameters = rows[0].get("parameters")
         return dict(parameters) if isinstance(parameters, dict) else None
+
+    def start_paper_challenger(
+        self,
+        proposal_id: int,
+        *,
+        actor: str,
+        reason: str,
+        account_id: str | None = None,
+    ) -> Sleeve:
+        """Materialise one qualified proposal as a paper-only sleeve.
+
+        This is intentionally an operator action. The scheduled learner has no
+        reference to this method, and the resulting challenger-origin sleeve is
+        categorically barred from live until a named human adopts it.
+        """
+        store = self._require()
+        account = account_id or store.settings.account_id
+        named_actor = (actor or "").strip()
+        named_reason = (reason or "").strip()
+        if not named_actor:
+            raise LifecycleStoreError("paper challenger activation needs an actor")
+        if not named_reason:
+            raise LifecycleStoreError("paper challenger activation needs a reason")
+
+        def require_proposal() -> dict[str, Any]:
+            rows = store.challenger_proposals(
+                proposal_id=proposal_id,
+                account_id=account,
+                limit=1,
+            )
+            if not rows:
+                raise LifecycleStoreError(
+                    f"qualified challenger proposal {proposal_id} was not found"
+                )
+            row = rows[0]
+            if not row["survived"]:
+                raise LifecycleStoreError(f"challenger proposal {proposal_id} did not qualify")
+            return row
+
+        proposal = require_proposal()
+        champion = str(proposal["strategy_id"])
+        challenger_id = str(proposal["challenger_id"])
+        symbol = str(proposal["symbol"]).upper()
+        if "@" in champion or not re.fullmatch(r"chal-[0-9a-f]{12}", challenger_id):
+            raise LifecycleStoreError("challenger proposal identity is invalid")
+        derived = f"{champion}@{challenger_id}"
+        maximum = max(
+            1,
+            min(8, int(os.getenv("PAPER_MAX_ACTIVE_CHALLENGERS", "2"))),
+        )
+
+        # The cap is a decision over shared state, so reading the count and
+        # committing the transition must be one serialized operation across
+        # every service process. Ordinary row locks cannot protect the
+        # not-yet-created second row; the account/symbol advisory lock can.
+        with store.challenger_activation_lock(account, symbol):
+            proposal = require_proposal()
+            if (
+                str(proposal["strategy_id"]) != champion
+                or str(proposal["challenger_id"]) != challenger_id
+                or str(proposal["symbol"]).upper() != symbol
+            ):
+                raise LifecycleStoreError(
+                    "challenger proposal changed while activation was pending"
+                )
+
+            sleeve = store.get(derived, symbol, account)
+            if sleeve is not None and (
+                sleeve.origin != "challenger" or sleeve.strategy_version != challenger_id
+            ):
+                raise LifecycleStoreError(
+                    "derived sleeve identity is already occupied by another record"
+                )
+            if sleeve is not None and sleeve.state == "paper":
+                return sleeve
+            if sleeve is not None and sleeve.state != "candidate":
+                raise LifecycleStoreError(
+                    f"{sleeve.key} is {sleeve.state}; only a candidate can start paper"
+                )
+
+            active = store.paper_challengers(symbol, account)
+            if len(active) >= maximum:
+                raise LifecycleStoreError(
+                    f"paper challenger cap reached for {symbol}: {len(active)}/{maximum}"
+                )
+
+            if sleeve is None:
+                sleeve = store.register(
+                    derived,
+                    symbol,
+                    strategy_version=challenger_id,
+                    account_id=account,
+                    actor=named_actor,
+                    origin="challenger",
+                )
+                if sleeve.origin != "challenger" or sleeve.strategy_version != challenger_id:
+                    raise LifecycleStoreError(
+                        "derived sleeve identity is already occupied by another record"
+                    )
+
+            try:
+                return store.transition(
+                    sleeve,
+                    "paper",
+                    f"qualified proposal {proposal_id}: {named_reason}",
+                    actor=named_actor,
+                )
+            except ConcurrentTransitionError:
+                refreshed = store.require(derived, symbol, account)
+                if (
+                    refreshed.state == "paper"
+                    and refreshed.origin == "challenger"
+                    and refreshed.strategy_version == challenger_id
+                ):
+                    return refreshed
+                raise
 
     def demote(
         self,
@@ -235,9 +355,7 @@ class LifecycleService:
         store = self._require()
         sleeve = store.get(strategy_id, symbol, account_id)
         if sleeve is None:
-            return None, GateResult(
-                allowed=False, target=None, failed=["sleeve is not registered"]
-            )
+            return None, GateResult(allowed=False, target=None, failed=["sleeve is not registered"])
 
         target = NEXT_STATE.get(sleeve.state)
         if target is None:

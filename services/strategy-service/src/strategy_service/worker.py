@@ -44,6 +44,7 @@ from .rule_engine import evaluate_rules
 
 logger = logging.getLogger(__name__)
 
+
 def _lifecycle():
     """The shared roster. Not a per-process copy: this worker used to hold a
     JSON registry loaded once at boot, so it could believe a sleeve was live
@@ -77,6 +78,34 @@ class WorkerRunResult:
     """Signals the strategy roster did not permit to trade. Recorded, not
     dropped — a paper sleeve's decisions are the evidence it is promoted on."""
     errors: list[str] = field(default_factory=list)
+
+
+def apply_entry_gates(signal, ta, bars) -> None:
+    """Apply the shared regime and volume gates in place.
+
+    The scheduled worker and the orchestrator-managed signal endpoint must use
+    the same pre-policy filters. Keeping this as a pure helper prevents paper
+    challengers from taking a different path merely because another scheduler
+    owns the cycle.
+    """
+    if signal.candidate_action != "BUY":
+        return
+
+    bars_count = getattr(ta, "bars_count", 0) if ta is not None else 0
+    adx = getattr(ta, "adx", ADX_NEUTRAL) if ta is not None else ADX_NEUTRAL
+    if not adx_is_computable(bars_count):
+        logger.debug("regime: not measurable (%s bars), suppressing trend signal", bars_count)
+        signal.candidate_action = CandidateAction.HOLD
+    elif adx < 20.0:
+        logger.debug("regime: ranging (adx=%s), suppressing trend signal", round(adx, 4))
+        signal.candidate_action = CandidateAction.HOLD
+    elif settings.volume_confirm_enabled and bars:
+        volumes = [float(getattr(bar, "volume", 0.0) or 0.0) for bar in bars]
+        current_volume = volumes[-1] if volumes else None
+        avg_volume = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else None
+        if current_volume is not None and avg_volume is not None and current_volume <= avg_volume:
+            logger.debug("volume_confirm: below avg, suppressing BUY")
+            signal.candidate_action = CandidateAction.HOLD
 
 
 class TradeWorker:
@@ -174,33 +203,7 @@ class TradeWorker:
         """The regime and volume gates, applied to champion and challenger
         alike. A challenger proposes thresholds inside the rule; it does not
         get to skip the filters that sit in front of the rule."""
-        if signal.candidate_action == "BUY":
-            # compute_adx returns ADX_NEUTRAL (25.0) when the series is too
-            # short, and 25.0 sits *above* this filter's threshold — so on thin
-            # or missing data the regime gate used to pass on a fabricated
-            # number rather than refuse. An unmeasurable regime is not a
-            # trending one.
-            bars_count = getattr(ta, "bars_count", 0) if ta is not None else 0
-            adx = getattr(ta, "adx", ADX_NEUTRAL) if ta is not None else ADX_NEUTRAL
-            if not adx_is_computable(bars_count):
-                logger.debug(
-                    "regime: not measurable (%s bars), suppressing trend signal", bars_count
-                )
-                signal.candidate_action = CandidateAction.HOLD
-            elif adx < 20.0:
-                logger.debug("regime: ranging (adx=%s), suppressing trend signal", round(adx, 4))
-                signal.candidate_action = CandidateAction.HOLD
-            elif settings.volume_confirm_enabled and bars:
-                volumes = [float(getattr(bar, "volume", 0.0) or 0.0) for bar in bars]
-                current_volume = volumes[-1] if volumes else None
-                avg_volume = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else None
-                if (
-                    current_volume is not None
-                    and avg_volume is not None
-                    and current_volume <= avg_volume
-                ):
-                    logger.debug("volume_confirm: below avg, suppressing BUY")
-                    signal.candidate_action = CandidateAction.HOLD
+        apply_entry_gates(signal, ta, bars)
 
     async def _process_challengers(self, symbol: str, ta, bars, result) -> None:
         """Run each paper challenger's own parameters through the same pipeline.
@@ -239,7 +242,8 @@ class TradeWorker:
             except Exception as exc:
                 logger.error(
                     "Challenger %s failed and was skipped: %s",
-                    sleeve.strategy_id, exc,
+                    sleeve.strategy_id,
+                    exc,
                 )
 
     async def _process_one_challenger(self, sleeve, symbol, ta, bars, result) -> None:
@@ -273,9 +277,7 @@ class TradeWorker:
         result.signals_generated += 1
         if signal.candidate_action == "HOLD":
             return
-        await self._execute_signal(
-            signal, symbol, bars, result, strategy_id=sleeve.strategy_id
-        )
+        await self._execute_signal(signal, symbol, bars, result, strategy_id=sleeve.strategy_id)
 
     async def _execute_signal(
         self,
@@ -309,17 +311,16 @@ class TradeWorker:
                 f"{symbol}: position unknowable, entry not submitted ({strategy_id})"
             )
             return
-        action = str(
-            getattr(signal.candidate_action, "value", signal.candidate_action)
-        ).upper()
+        action = str(getattr(signal.candidate_action, "value", signal.candidate_action)).upper()
         if any(
-            (net > 0 and action == "BUY") or (net < 0 and action == "SELL")
-            for net in held.values()
+            (net > 0 and action == "BUY") or (net < 0 and action == "SELL") for net in held.values()
         ):
             logger.info(
                 "Already positioned in %s for %s (%s) — an entry signal is not "
                 "an instruction to add",
-                symbol, strategy_id, held,
+                symbol,
+                strategy_id,
+                held,
             )
             return
 
@@ -450,7 +451,8 @@ class TradeWorker:
         if not answer.available:
             logger.error(
                 "Lifecycle authority unavailable (%s) — refusing to open %s",
-                answer.reason, signal.symbol,
+                answer.reason,
+                signal.symbol,
             )
         return answer.reason
 
@@ -764,7 +766,9 @@ class TradeWorker:
                     return True
                 logger.error(
                     "Order for %s refused by execution-service: HTTP %s %s",
-                    req.symbol, resp.status_code, resp.text[:200],
+                    req.symbol,
+                    resp.status_code,
+                    resp.text[:200],
                 )
         except Exception as exc:
             logger.error("Order submission failed: %s", exc)
