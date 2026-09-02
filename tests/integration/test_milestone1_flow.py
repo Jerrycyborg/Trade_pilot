@@ -179,7 +179,7 @@ def _list_orders(*, limit: int = 20) -> list[dict[str, object]]:
     return [row.model_dump(mode="json") for row in main.list_orders(limit=limit)]
 
 
-def test_signal_policy_execution_flow_persists_order_and_events(tmp_path: Path) -> None:
+def test_signal_policy_execution_flow_persists_order_and_events(tmp_path: Path, stub_bars) -> None:
     (
         strategy_client,
         policy_client,
@@ -273,7 +273,7 @@ def test_stale_data_rejection_blocks_execution_flow(tmp_path: Path) -> None:
 
 
 def test_duplicate_idempotency_returns_same_order_and_single_persisted_record(
-    tmp_path: Path,
+    tmp_path: Path, stub_bars
 ) -> None:
     (
         strategy_client,
@@ -309,7 +309,7 @@ def test_duplicate_idempotency_returns_same_order_and_single_persisted_record(
     assert evaluation_count == 1
 
 
-def test_dashboard_read_surfaces_expose_latest_persisted_records(tmp_path: Path) -> None:
+def test_dashboard_read_surfaces_expose_latest_persisted_records(tmp_path: Path, stub_bars) -> None:
     (
         strategy_client,
         policy_client,

@@ -21,7 +21,7 @@ def _main(tmp_path: Path):
     return main
 
 
-def test_generate_signal_returns_valid_candidate(tmp_path: Path) -> None:
+def test_generate_signal_returns_valid_candidate(tmp_path: Path, stub_bars) -> None:
     main = _main(tmp_path)
     body = asyncio.run(
         main.generate_signal(main.SignalGenerationRequest(symbol="AAPL"))
@@ -29,6 +29,10 @@ def test_generate_signal_returns_valid_candidate(tmp_path: Path) -> None:
     assert body["symbol"] == "AAPL"
     assert body["candidate_action"] in {"BUY", "SELL"}
     assert 0.0 <= body["confidence"] <= 1.0
+    # The rule read the market. Without this the endpoint can satisfy every
+    # assertion above from its no-data path, which is what it used to do.
+    assert body["model_version"].startswith("strategy-rule-v1")
+    assert body["model_version"] != "strategy-rule-v1/no-data"
 
 
 def test_generate_signal_uses_unique_signal_ids(tmp_path: Path) -> None:

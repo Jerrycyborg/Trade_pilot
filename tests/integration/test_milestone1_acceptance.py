@@ -244,7 +244,7 @@ def _get_snapshot() -> dict[str, object]:
     return main.get_snapshot().model_dump(mode="json")
 
 
-def test_milestone1_acceptance_flow(tmp_path: Path) -> None:
+def test_milestone1_acceptance_flow(tmp_path: Path, stub_bars) -> None:
     (
         strategy_client,
         policy_client,

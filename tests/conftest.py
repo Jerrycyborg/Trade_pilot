@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -86,6 +87,24 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _service_auth_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the suite the service credentials the endpoints now require.
+
+    Auth fails closed on an unset INTERNAL_API_KEY (503), which is correct for
+    a deployment and wrong for a test run: CI supplies these in ci.yml, so a
+    clean checkout failed 8 tests that CI showed green. Set here, the suite
+    needs no secrets to run. Real values in the environment win, and the tests
+    that assert the fail-closed behaviour delete these themselves.
+    """
+    for name, value in (
+        ("INTERNAL_API_KEY", "test-internal-key"),
+        ("ADMIN_API_KEY", "test-admin-key"),
+    ):
+        if not os.environ.get(name):
+            monkeypatch.setenv(name, value)
+
+
+@pytest.fixture(autouse=True)
 def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> StubPriceSource:
     """Keep every test off the network and off the developer's paper ledger."""
     global _active_prices
@@ -151,3 +170,55 @@ def _offline_market_data(request, monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
 def stub_prices(_offline_market_data: StubPriceSource) -> StubPriceSource:
     """The price book this test runs against. Mutate it to drive a scenario."""
     return _offline_market_data
+
+
+def deterministic_daily_bars(symbol: str = "AAPL", n: int = 60, split: int = 45) -> list:
+    """A bar series the rule engine reads as a clean BUY.
+
+    Shaped against the real indicators rather than guessed: EMA20 > EMA50,
+    RSI ~68 (inside the 45-70 band), MACD histogram positive, ADX ~28 (clear
+    of the regime gate's 20 floor), 60 bars so ADX is computable at all.
+    """
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    now = datetime.now(timezone.utc)
+    closes: list[float] = []
+    price = 150.0
+    for i in range(n):
+        up, down = (1.0, 0.7) if i < split else (2.2, 0.8)
+        price += up if i % 2 == 0 else -down
+        closes.append(round(price, 2))
+    return [
+        SimpleNamespace(
+            symbol=symbol.upper(),
+            timestamp=now - timedelta(days=n - i),
+            open=close - 0.3,
+            high=close + 0.7,
+            low=close - 1.0,
+            close=close,
+            volume=40_000_000.0,
+        )
+        for i, close in enumerate(closes)
+    ]
+
+
+@pytest.fixture
+def stub_bars(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Deterministic bars for tests that need a signal to actually be produced.
+
+    `_offline_market_data` above stubs *prices*, but bar fetches went to the
+    live provider — so any test asserting on a generated signal was asserting
+    on the real market. Two ways that bites: in an egress-restricted
+    environment (the one FileDropFetcher exists for) the fetch fails and the
+    signal is correctly HOLD, and in CI it passes only for as long as the real
+    symbol keeps printing the indicator shape the test wants. Neither is a
+    property of this codebase. These bars make the assertion about the rule.
+    """
+    bars = deterministic_daily_bars()
+    for target in (
+        "strategy_service.main.fetch_bars",
+        "strategy_service.worker.fetch_bars",
+    ):
+        monkeypatch.setattr(target, lambda _symbol, _settings=None, **_kw: bars)
+    return bars
