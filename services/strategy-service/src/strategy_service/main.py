@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Literal, Optional
+from uuid import uuid4
 
 from contracts import CandidateAction, SignalCandidate, TechnicalSummaryContract, WorkerStatus
 from contracts.auth import verify_admin_key, verify_internal_key
@@ -14,6 +16,7 @@ from contracts.cors import cors_origins
 from contracts.sanitize import sanitize_symbol
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from lifecycle import DEFAULT_LIVE_STRATEGY
 from market_data import MarketDataSettings, build_ta_summary, fetch_bars, get_fetcher
 from market_data.fetcher import DataUnavailableError
 from pydantic import BaseModel, Field
@@ -56,10 +59,16 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "strategy-service"}
 
 
-if settings.worker_enabled:
+if settings.worker_enabled and settings.trading_loop_owner == "strategy":
     from .scheduler import start_scheduler
 
     start_scheduler(app)
+elif settings.worker_enabled:
+    logger.warning(
+        "WORKER_ENABLED ignored because TRADING_LOOP_OWNER=%s; only the named "
+        "owner may submit entries",
+        settings.trading_loop_owner,
+    )
 
 
 def _market_snapshot(symbol: str):
@@ -92,6 +101,8 @@ async def generate_signal(
     ]
     target_symbol = symbols[0] if symbols else (request.symbol or "AAPL").strip().upper()
     should_use_ai = request.use_ai if request.use_ai is not None else settings.use_ai
+    ta = None
+    bars = []
 
     if should_use_ai:
         pipeline = AISignalPipeline()
@@ -115,6 +126,14 @@ async def generate_signal(
             signal = signal.model_copy(update={"candidate_action": CandidateAction.HOLD})
 
     _persist_signal(signal)
+    if not should_use_ai and ta is not None and settings.trading_loop_owner == "orchestrator":
+        for challenger_signal in _paper_challenger_signals(
+            target_symbol,
+            ta,
+            bars,
+            ta_contract=signal.ta_summary,
+        ):
+            _persist_signal(challenger_signal)
     return signal
 
 
@@ -124,8 +143,10 @@ def list_signals(
     symbol: str | None = None,
     acted_on: bool | None = None,
     candidate_action: CandidateAction | None = None,
+    entry_only: bool = False,
+    oldest_first: bool = False,
 ) -> list[SignalCandidate]:
-    """Return persisted signals ordered newest-first."""
+    """Return a bounded persisted-signal queue in the requested order."""
     with SessionLocal() as session:
         statement = select(SignalRecord)
         if symbol:
@@ -134,7 +155,10 @@ def list_signals(
             statement = statement.where(SignalRecord.acted_on == acted_on)
         if candidate_action is not None:
             statement = statement.where(SignalRecord.candidate_action == candidate_action.value)
-        rows = session.scalars(statement.order_by(SignalRecord.ts.desc()).limit(limit)).all()
+        if entry_only:
+            statement = statement.where(SignalRecord.candidate_action != CandidateAction.EXIT.value)
+        order = SignalRecord.ts if oldest_first else SignalRecord.ts.desc()
+        rows = session.scalars(statement.order_by(order).limit(limit)).all()
     return [_to_candidate(row) for row in rows]
 
 
@@ -217,6 +241,11 @@ async def trigger_worker_run(
     """Manually trigger one worker cycle (useful for operator testing)."""
     from .worker import TradeWorker, worker_state
 
+    if settings.trading_loop_owner != "strategy":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"strategy_worker_is_not_trading_loop_owner: {settings.trading_loop_owner}"),
+        )
     if worker_state.is_running:
         return {"status": "already_running", "message": "A cycle is already in progress."}
     worker = TradeWorker()
@@ -448,9 +477,7 @@ async def manual_trade(
     volumes = [float(bar.volume) for bar in bars[-20:] if float(bar.volume) > 0]
     average_volume = sum(volumes) / len(volumes) if volumes else 0.0
     liquidity_score = (
-        min(1.0, float(bars[-1].volume) / average_volume)
-        if average_volume > 0
-        else 0.0
+        min(1.0, float(bars[-1].volume) / average_volume) if average_volume > 0 else 0.0
     )
     internal_headers = {
         "X-Internal-Key": os.environ.get("INTERNAL_API_KEY", ""),
@@ -562,6 +589,61 @@ async def manual_trade(
 # ---------------------------------------------------------------------------
 
 
+def _paper_challenger_signals(
+    symbol: str,
+    ta,
+    bars: list,
+    *,
+    ta_contract: TechnicalSummaryContract | None,
+) -> list[SignalCandidate]:
+    """Generate signals for registered paper challengers on the same snapshot.
+
+    This is the orchestrator-owned path. The endpoint persists these signals
+    beside the champion signal, and the orchestrator then puts every one
+    through the same risk, policy, lifecycle and execution services.
+    """
+    from lifecycle.service import get_lifecycle_service
+
+    from .rule_engine import evaluate_rules
+    from .worker import apply_entry_gates
+
+    lifecycle = get_lifecycle_service()
+    generated: list[SignalCandidate] = []
+    for sleeve in lifecycle.paper_challengers(symbol):
+        parameters = lifecycle.challenger_parameters(sleeve.strategy_version)
+        if parameters is None:
+            logger.warning(
+                "Challenger %s has no readable proposal; no signal generated",
+                sleeve.strategy_id,
+            )
+            continue
+        result = evaluate_rules(
+            ta,
+            config={"sentiment_block_threshold": settings.sentiment_block_threshold},
+            bars=bars,
+            parameters=parameters,
+        )
+        if result.size_pct <= 0:
+            continue
+        signal = SignalCandidate(
+            signal_id=str(uuid4()),
+            symbol=symbol.upper(),
+            ts=datetime.now(timezone.utc),
+            candidate_action=result.action,
+            confidence=result.confidence,
+            size_pct=result.size_pct,
+            source="strategy-service",
+            model_version=f"challenger:{sleeve.strategy_version}",
+            risk_score=result.risk_score,
+            strategy=sleeve.strategy_id,
+            ta_summary=ta_contract,
+            research_summary=result.reasoning,
+        )
+        apply_entry_gates(signal, ta, bars)
+        generated.append(signal)
+    return generated
+
+
 def _persist_signal(signal: SignalCandidate) -> None:
     ta_json = signal.ta_summary.model_dump_json() if signal.ta_summary else None
     with SessionLocal() as session:
@@ -593,6 +675,12 @@ def _to_candidate(row: SignalRecord) -> SignalCandidate:
         except Exception:
             pass
 
+    strategy = DEFAULT_LIVE_STRATEGY
+    if row.model_version.startswith("challenger:"):
+        challenger_id = row.model_version.removeprefix("challenger:")
+        if re.fullmatch(r"chal-[0-9a-f]{12}", challenger_id):
+            strategy = f"{DEFAULT_LIVE_STRATEGY}@{challenger_id}"
+
     return SignalCandidate(
         signal_id=row.signal_id,
         symbol=row.symbol,
@@ -603,6 +691,7 @@ def _to_candidate(row: SignalRecord) -> SignalCandidate:
         horizon=row.horizon,
         source=row.source,
         model_version=row.model_version,
+        strategy=strategy,
         risk_score=row.risk_score or "MEDIUM",
         ta_summary=ta_summary,
         research_summary=row.research_summary,

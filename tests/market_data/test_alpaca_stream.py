@@ -33,6 +33,14 @@ async def _noop_callback(bar) -> None:
     pass
 
 
+def _make_trade(symbol: str = "AAPL", price: float = 151.25) -> MagicMock:
+    trade = MagicMock()
+    trade.symbol = symbol
+    trade.timestamp = datetime.now(timezone.utc)
+    trade.price = price
+    return trade
+
+
 def test_buffer_initialized_for_symbols() -> None:
     """Buffers are created for each subscribed symbol."""
     fetcher = AlpacaStreamFetcher(_settings(), ["AAPL", "MSFT"], _noop_callback)
@@ -76,11 +84,42 @@ async def test_latest_bars_returns_n() -> None:
 
 
 @pytest.mark.asyncio
+async def test_trade_tick_is_forwarded_with_exchange_timestamp() -> None:
+    received = []
+
+    async def on_price(snapshot) -> None:
+        received.append(snapshot)
+
+    fetcher = AlpacaStreamFetcher(_settings(), ["AAPL"], _noop_callback, on_price=on_price)
+    trade = _make_trade(price=151.25)
+    await fetcher._handle_trade(trade)
+
+    assert len(received) == 1
+    assert received[0].symbol == "AAPL"
+    assert received[0].price == 151.25
+    assert received[0].timestamp == trade.timestamp
+    assert received[0].source == "stream_trade"
+
+
+@pytest.mark.asyncio
+async def test_trade_without_timestamp_is_refused() -> None:
+    received = []
+
+    async def on_price(snapshot) -> None:
+        received.append(snapshot)
+
+    fetcher = AlpacaStreamFetcher(_settings(), ["AAPL"], _noop_callback, on_price=on_price)
+    trade = _make_trade()
+    trade.timestamp = None
+    await fetcher._handle_trade(trade)
+
+    assert received == []
+
+
+@pytest.mark.asyncio
 async def test_reconnect_on_disconnect() -> None:
     """Simulate disconnect, assert _connect called twice."""
-    fetcher = AlpacaStreamFetcher(
-        _settings(), ["AAPL"], _noop_callback, max_reconnect_attempts=2
-    )
+    fetcher = AlpacaStreamFetcher(_settings(), ["AAPL"], _noop_callback, max_reconnect_attempts=2)
     call_count = 0
 
     async def fake_connect():

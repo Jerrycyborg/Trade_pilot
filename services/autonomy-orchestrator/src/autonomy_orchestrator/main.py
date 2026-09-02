@@ -25,12 +25,12 @@ from contracts.execution import (
 )
 from contracts.rate_limit import rate_limit_write
 from contracts.sanitize import sanitize_symbol
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from lifecycle import DEFAULT_LIVE_STRATEGY
 from lifecycle.health import run_health_sweep
 from lifecycle.service import LifecycleService, get_lifecycle_service
-from lifecycle.store import STATES, LifecycleUnavailableError
+from lifecycle.store import STATES, LifecycleStoreError, LifecycleUnavailableError
 from market_data import (
     LivePriceCache,
     MarketDataSettings,
@@ -111,17 +111,29 @@ def _cycle_interval_seconds() -> int:
     return max(10, settings.orchestrator_interval_minutes * 60)
 
 
+def _trading_loop_owner() -> str:
+    owner = os.getenv("TRADING_LOOP_OWNER", "orchestrator").strip().lower()
+    if owner not in {"orchestrator", "strategy"}:
+        raise RuntimeError("TRADING_LOOP_OWNER must be 'orchestrator' or 'strategy'")
+    return owner
+
+
 def _risk_check_interval_seconds(env_var: str) -> int:
     """How often to re-check stops/targets.
 
-    An exit check is only as timely as its interval: a 5-minute poll on a
-    15-minute intraday strategy means a stop can overshoot by 5 minutes of
-    price movement. Intraday runs therefore default to 60 seconds.
+    Seconds are the primary intraday control; the legacy minutes setting is
+    still accepted. A minute-scale stop poll is not an intraday protection
+    mechanism, so streaming intraday deployments default to two seconds.
+    Broker-native protective orders remain the required live-money design.
     """
-    explicit = os.getenv(env_var)
-    if explicit:
-        return max(10, int(float(explicit) * 60))
-    return 60 if _market_settings().is_intraday else 300
+    seconds_var = env_var.removesuffix("_MINUTES") + "_SECONDS"
+    explicit_seconds = os.getenv(seconds_var, "").strip()
+    if explicit_seconds:
+        return max(1, int(float(explicit_seconds)))
+    explicit_minutes = os.getenv(env_var, "").strip()
+    if explicit_minutes:
+        return max(1, int(float(explicit_minutes) * 60))
+    return 2 if _market_settings().is_intraday else 300
 
 
 def _start_scheduler() -> None:
@@ -138,14 +150,20 @@ def _start_scheduler() -> None:
             return
         await run_cycle()
 
-    scheduler.add_job(
-        run_job,
-        trigger="interval",
-        seconds=_cycle_interval_seconds(),
-        id="autonomy_orchestrator",
-        max_instances=1,
-        coalesce=True,
-    )
+    if _trading_loop_owner() == "orchestrator":
+        scheduler.add_job(
+            run_job,
+            trigger="interval",
+            seconds=_cycle_interval_seconds(),
+            id="autonomy_orchestrator",
+            max_instances=1,
+            coalesce=True,
+        )
+    else:
+        logger.warning(
+            "Orchestrator entry scheduler disabled: TRADING_LOOP_OWNER=strategy. "
+            "Risk, reconciliation, health and learning jobs remain active."
+        )
 
     # Coroutine functions handed to the scheduler directly, never wrapped in a
     # sync lambda: AsyncIOScheduler runs a sync callable in its thread-pool
@@ -287,6 +305,56 @@ async def _check_dependency(name: str, url: str) -> dict[str, object]:
             return {"name": name, "status": "degraded", "url": url, "code": resp.status_code}
     except Exception as exc:
         return {"name": name, "status": "down", "url": url, "error": str(exc)}
+
+
+async def _generate_signals(config: dict[str, object]) -> dict[str, object]:
+    """Ask strategy-service for one fresh decision per allowed symbol.
+
+    The orchestrator is the default trading-loop owner, so merely polling the
+    signal table is insufficient: with the strategy worker disabled there is
+    nobody else to populate it. Requests are concurrent but bounded so a large
+    allowlist cannot turn one cycle into an outbound connection storm.
+    """
+    raw = config.get("symbol_allowlist", [])
+    candidates = raw if isinstance(raw, list) else []
+    symbols: list[str] = []
+    for value in candidates[:50]:
+        try:
+            symbol = sanitize_symbol(str(value))
+        except Exception:
+            continue
+        if symbol not in symbols:
+            symbols.append(symbol)
+
+    maximum = max(1, min(10, int(os.getenv("SIGNAL_GENERATION_CONCURRENCY", "4"))))
+    semaphore = asyncio.Semaphore(maximum)
+    generated: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+
+        async def one(symbol: str) -> None:
+            async with semaphore:
+                try:
+                    response = await client.post(
+                        f"{settings.strategy_service_url}/v1/signals/generate",
+                        json={"symbol": symbol},
+                        headers=_internal_headers(),
+                    )
+                    response.raise_for_status()
+                    generated.append(symbol)
+                except Exception as exc:
+                    logger.error("Signal generation failed for %s: %s", symbol, exc)
+                    errors.append({"symbol": symbol, "error_type": type(exc).__name__})
+
+        await asyncio.gather(*(one(symbol) for symbol in symbols))
+
+    return {
+        "requested": len(symbols),
+        "generated": len(generated),
+        "failed": len(errors),
+        "errors": errors,
+    }
 
 
 async def _startup_health_check() -> None:
@@ -643,6 +711,155 @@ def learning_cycle_status() -> dict[str, object]:
     }
 
 
+@app.get("/v1/orchestrator/learning/cycles")
+def learning_cycles(
+    strategy: str | None = None,
+    symbol: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Immutable learning audits, newest first."""
+    service = _lifecycle()
+    if not service.configured or service.store is None:
+        raise HTTPException(status_code=503, detail="no lifecycle authority configured")
+    clean_symbol = sanitize_symbol(symbol) if symbol else None
+    return {
+        "cycles": service.store.learning_cycles(
+            strategy_id=strategy,
+            symbol=clean_symbol,
+            limit=limit,
+        )
+    }
+
+
+@app.get("/v1/orchestrator/learning/curve")
+def learning_curve(
+    strategy: str | None = None,
+    symbol: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Chronological evidence and evaluation metrics for each learning cycle."""
+    from .learning_view import build_learning_curve
+
+    service = _lifecycle()
+    if not service.configured or service.store is None:
+        raise HTTPException(status_code=503, detail="no lifecycle authority configured")
+    clean_symbol = sanitize_symbol(symbol) if symbol else None
+    cycles = service.store.learning_cycles(
+        strategy_id=strategy,
+        symbol=clean_symbol,
+        limit=limit,
+    )
+    return {"points": build_learning_curve(cycles)}
+
+
+@app.get("/v1/orchestrator/learning/proposals")
+def learning_proposals(
+    strategy: str | None = None,
+    symbol: str | None = None,
+    survived: bool | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Bounded challenger proposals for operator review."""
+    service = _lifecycle()
+    if not service.configured or service.store is None:
+        raise HTTPException(status_code=503, detail="no lifecycle authority configured")
+    clean_symbol = sanitize_symbol(symbol) if symbol else None
+    rows = service.store.challenger_proposals(
+        strategy_id=strategy,
+        symbol=clean_symbol,
+        account_id=settings.account_id,
+        limit=limit,
+    )
+    if survived is not None:
+        rows = [row for row in rows if row["survived"] is survived]
+    return {"proposals": rows}
+
+
+class StartPaperChallengerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actor: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/v1/orchestrator/learning/proposals/{proposal_id}/paper")
+def start_paper_challenger(
+    proposal_id: int,
+    body: StartPaperChallengerRequest,
+    _: None = Depends(verify_admin_key),
+    _rl: None = Depends(rate_limit_write),
+) -> dict[str, object]:
+    """Start a qualified proposal in paper; never adopts or promotes it."""
+    try:
+        sleeve = _lifecycle().start_paper_challenger(
+            proposal_id,
+            actor=body.actor,
+            reason=body.reason,
+            account_id=settings.account_id,
+        )
+    except LifecycleUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="lifecycle authority unavailable",
+        ) from exc
+    except LifecycleStoreError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Paper challenger activation failed: lifecycle unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="lifecycle authority unavailable",
+        ) from exc
+    return {
+        "proposal_id": proposal_id,
+        "sleeve": sleeve.key,
+        "strategy_version": sleeve.strategy_version,
+        "state": sleeve.state,
+        "origin": sleeve.origin,
+        "live_eligible": False,
+    }
+
+
+@app.get("/v1/orchestrator/learning/proposals/{proposal_id}/comparison")
+def paper_challenger_comparison(
+    proposal_id: int,
+    window_days: float = Query(default=30.0, gt=0.0, le=3650.0),
+    _: None = Depends(verify_internal_key),
+) -> dict[str, object]:
+    """Champion and challenger paper outcomes over the same time window."""
+    from challengers import compare, derived_strategy_id
+
+    service = _lifecycle()
+    if not service.configured or service.store is None:
+        raise HTTPException(status_code=503, detail="no lifecycle authority configured")
+    proposals = service.store.challenger_proposals(
+        proposal_id=proposal_id,
+        account_id=settings.account_id,
+        limit=1,
+    )
+    if not proposals:
+        raise HTTPException(status_code=404, detail="challenger proposal not found")
+    proposal = proposals[0]
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=window_days)
+    return compare(
+        _journal(),
+        symbol=str(proposal["symbol"]),
+        champion_strategy_id=str(proposal["strategy_id"]),
+        challenger_strategy_id=derived_strategy_id(
+            str(proposal["strategy_id"]),
+            str(proposal["challenger_id"]),
+        ),
+        account_id=settings.account_id,
+        window_start=start,
+        window_end=end,
+        environment="paper",
+    ).to_dict()
+
+
 @app.get("/v1/orchestrator/day-trades")
 def day_trade_status() -> dict[str, object]:
     """Day-trade budget under the US pattern-day-trader rule."""
@@ -769,6 +986,11 @@ async def live_mode(
 
 
 async def run_cycle() -> dict[str, object]:
+    if _trading_loop_owner() != "orchestrator":
+        return {
+            "status": "disabled",
+            "reason": "trading_loop_owned_by_strategy",
+        }
     config = load_policy_config(settings.policy_config_path)
     if config.get("kill_switch"):
         state.last_cycle_summary = {"status": "halted", "reason": "kill_switch_active"}
@@ -801,9 +1023,20 @@ async def run_cycle() -> dict[str, object]:
         await _process_approvals()
         if not _monthly_limits_ok():
             return summary
-        signals = [
-            signal for signal in await _pending_signals() if signal.candidate_action != "EXIT"
-        ]
+        signals = await _pending_signals()
+        if signals is None:
+            summary["generation"] = {
+                "status": "skipped_signal_queue_unavailable",
+            }
+            signals = []
+        elif signals:
+            summary["generation"] = {
+                "status": "skipped_pending_backlog",
+                "pending": len(signals),
+            }
+        else:
+            summary["generation"] = await _generate_signals(config)
+            signals = await _pending_signals() or []
         portfolio_state = await _portfolio_state()
 
         # Pattern-day-trader budget. The equity lookup is a network call so it
@@ -849,8 +1082,13 @@ async def run_cycle() -> dict[str, object]:
 
         for signal in signals:
             summary["signals"] += 1
+            if signal.candidate_action == "HOLD":
+                summary["held"] = summary.get("held", 0) + 1
+                await _mark_signal_acted(signal.signal_id)
+                continue
             if reconciliation.halted:
                 summary["rejected"] += 1
+                await _mark_signal_acted(signal.signal_id)
                 continue
             pdt = _day_trades().check_entry(account_equity)
             if not pdt.allowed:
@@ -878,6 +1116,7 @@ async def run_cycle() -> dict[str, object]:
                         metadata={"guard": "pattern_day_trader"},
                     )
                 )
+                await _mark_signal_acted(signal.signal_id)
                 continue
             price_bars = _fetch_price_bars(signal.symbol)
             risk = evaluate_risk(
@@ -910,6 +1149,7 @@ async def run_cycle() -> dict[str, object]:
                         metadata={"tier": risk.tier},
                     )
                 )
+                await _mark_signal_acted(signal.signal_id)
                 continue
             policy = await _policy_evaluate(signal, risk, config, portfolio_state)
             decision = policy.get("decision", "REJECT")
@@ -967,6 +1207,7 @@ async def run_cycle() -> dict[str, object]:
                             metadata={"order": order},
                         )
                     )
+                    await _mark_signal_acted(signal.signal_id)
                     continue
                 _day_trades().record_open(signal.symbol)
                 _journal().record_decision(
@@ -991,7 +1232,9 @@ async def run_cycle() -> dict[str, object]:
                     correlation_id=signal.signal_id,
                 )
                 _register_stop_loss(
-                    signal.symbol, order, price_bars,
+                    signal.symbol,
+                    order,
+                    price_bars,
                     side=_side_of(signal.candidate_action),
                     strategy_id=_strategy_of(signal),
                 )
@@ -1026,6 +1269,7 @@ async def run_cycle() -> dict[str, object]:
                         metadata={"tier": risk.tier, "policy": policy},
                     )
                 )
+                await _mark_signal_acted(signal.signal_id)
             else:
                 summary["rejected"] += 1
                 await _audit(
@@ -1038,6 +1282,7 @@ async def run_cycle() -> dict[str, object]:
                         metadata={"tier": risk.tier},
                     )
                 )
+                await _mark_signal_acted(signal.signal_id)
         closed = await _process_exit_signals()
         summary["closed"] = closed
         summary["executed"] += closed
@@ -1068,12 +1313,17 @@ async def run_cycle() -> dict[str, object]:
     return summary
 
 
-async def _pending_signals() -> list[SignalCandidate]:
+async def _pending_signals() -> list[SignalCandidate] | None:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{settings.strategy_service_url}/v1/signals",
-                params={"limit": 50, "acted_on": "false"},
+                params={
+                    "limit": 100,
+                    "acted_on": "false",
+                    "entry_only": "true",
+                    "oldest_first": "true",
+                },
                 headers=_internal_headers(),
             )
             response.raise_for_status()
@@ -1082,7 +1332,7 @@ async def _pending_signals() -> list[SignalCandidate]:
         # not also mean no exit processing, which runs later in the same
         # cycle and used to be skipped when this raised.
         logger.error("Strategy service unreachable for pending signals: %s", exc)
-        return []
+        return None
     signals: list[SignalCandidate] = []
     for item in response.json():
         try:
@@ -1099,7 +1349,12 @@ async def _pending_exit_signals() -> list[SignalCandidate]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{settings.strategy_service_url}/v1/signals",
-                params={"limit": 50, "acted_on": "false", "candidate_action": "EXIT"},
+                params={
+                    "limit": 100,
+                    "acted_on": "false",
+                    "candidate_action": "EXIT",
+                    "oldest_first": "true",
+                },
                 headers=_internal_headers(),
             )
             response.raise_for_status()
@@ -1331,12 +1586,11 @@ def _earnings_blackout_for(symbol: str) -> bool:
         # — the gate's documented contract.
         raise
     except Exception as exc:
-        fail_closed = (
-            os.getenv("EARNINGS_GATE_FAIL_CLOSED", "false").strip().lower() == "true"
-        )
+        fail_closed = os.getenv("EARNINGS_GATE_FAIL_CLOSED", "false").strip().lower() == "true"
         logger.error(
-            "Earnings gate unavailable for %s (%s) — failing %s per "
-            "EARNINGS_GATE_FAIL_CLOSED", symbol, exc,
+            "Earnings gate unavailable for %s (%s) — failing %s per EARNINGS_GATE_FAIL_CLOSED",
+            symbol,
+            exc,
             "CLOSED" if fail_closed else "open",
         )
         return fail_closed
@@ -1361,7 +1615,8 @@ def _lifecycle_gate(signal: SignalCandidate) -> str | None:
     if not answer.available:
         logger.error(
             "Lifecycle authority unavailable (%s) — refusing to open %s",
-            answer.reason, signal.symbol,
+            answer.reason,
+            signal.symbol,
         )
     return answer.reason
 
@@ -1875,7 +2130,9 @@ async def _process_approvals() -> None:
             continue
         _day_trades().record_open(signal.symbol)
         _register_stop_loss(
-            signal.symbol, order, price_bars,
+            signal.symbol,
+            order,
+            price_bars,
             side=_side_of(signal.candidate_action),
             strategy_id=_strategy_of(signal),
         )

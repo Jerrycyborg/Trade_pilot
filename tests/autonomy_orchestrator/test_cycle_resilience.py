@@ -22,6 +22,7 @@ from dataclasses import replace
 
 import pytest
 from autonomy_orchestrator import main as m
+from httpx import Response
 
 
 @pytest.mark.asyncio
@@ -47,14 +48,92 @@ async def test_every_scheduled_job_is_a_coroutine_the_loop_can_await() -> None:
 
 
 @pytest.mark.asyncio
+async def test_only_the_configured_entry_owner_gets_a_trading_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_LOOP_OWNER", "strategy")
+    m.state.scheduler = None
+    m._start_scheduler()
+    try:
+        assert m.state.scheduler is not None
+        assert "autonomy_orchestrator" not in {job.id for job in m.state.scheduler.get_jobs()}
+        assert {
+            "stop_loss_check",
+            "take_profit_check",
+            "position_reconciliation",
+            "lifecycle_health_sweep",
+        }.issubset({job.id for job in m.state.scheduler.get_jobs()})
+        assert await m.run_cycle() == {
+            "status": "disabled",
+            "reason": "trading_loop_owned_by_strategy",
+        }
+    finally:
+        if m.state.scheduler is not None:
+            m.state.scheduler.shutdown(wait=False)
+        m.state.scheduler = None
+
+
+def test_intraday_protective_checks_default_to_two_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
+    monkeypatch.delenv("STOP_LOSS_CHECK_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("STOP_LOSS_CHECK_INTERVAL_MINUTES", raising=False)
+    monkeypatch.setattr(m.state, "market_settings", None)
+
+    assert m._risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES") == 2
+
+
+def test_protective_check_seconds_override_legacy_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STOP_LOSS_CHECK_INTERVAL_SECONDS", "3")
+    monkeypatch.setenv("STOP_LOSS_CHECK_INTERVAL_MINUTES", "1")
+
+    assert m._risk_check_interval_seconds("STOP_LOSS_CHECK_INTERVAL_MINUTES") == 3
+
+
+def test_invalid_trading_loop_owner_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_LOOP_OWNER", "both")
+    with pytest.raises(RuntimeError, match="TRADING_LOOP_OWNER"):
+        m._trading_loop_owner()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_generates_each_allowed_symbol_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    async def fake_post(self, url, **kwargs):
+        seen.append(kwargs["json"]["symbol"])
+        return Response(
+            200,
+            json={"signal_id": f"sig-{len(seen)}"},
+            request=m.httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(m.httpx.AsyncClient, "post", fake_post)
+    result = await m._generate_signals({"symbol_allowlist": ["aapl", "AAPL", "MSFT", "../bad"]})
+
+    assert sorted(seen) == ["AAPL", "MSFT"]
+    assert result == {
+        "requested": 2,
+        "generated": 2,
+        "failed": 0,
+        "errors": [],
+    }
+
+
+@pytest.mark.asyncio
 async def test_an_unreachable_audit_logger_is_zero_spend_not_an_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-200 already fell back to 0.0; a refused connection must not be a
     harder failure than a broken response."""
-    monkeypatch.setattr(
-        m, "settings", replace(m.settings, audit_logger_url="http://127.0.0.1:9")
-    )
+    monkeypatch.setattr(m, "settings", replace(m.settings, audit_logger_url="http://127.0.0.1:9"))
     assert await m._weekly_spend() == 0.0
 
 
@@ -118,9 +197,7 @@ async def test_the_earnings_posture_survives_a_broken_gate(
     def boom(_symbol: str):
         raise RuntimeError("gate unreachable")
 
-    monkeypatch.setattr(
-        "strategy_service.earnings_calendar.check_earnings_blackout", boom
-    )
+    monkeypatch.setattr("strategy_service.earnings_calendar.check_earnings_blackout", boom)
     monkeypatch.setenv("EARNINGS_GATE_FAIL_CLOSED", "true")
     assert m._earnings_blackout_for("NVDA") is True
 
@@ -151,9 +228,7 @@ async def test_the_earnings_gate_runs_off_the_cycles_event_loop(
         return False
 
     monkeypatch.setattr(m, "_earnings_blackout_for", probe)
-    monkeypatch.setattr(
-        m, "settings", replace(m.settings, policy_service_url="http://127.0.0.1:9")
-    )
+    monkeypatch.setattr(m, "settings", replace(m.settings, policy_service_url="http://127.0.0.1:9"))
     signal = SignalCandidate(
         signal_id="sig-loop-probe",
         symbol="NVDA",
@@ -185,3 +260,112 @@ async def test_a_garbage_gate_config_is_still_refused(
     monkeypatch.setenv("EARNINGS_GATE_FAIL_CLOSED", "yes please")
     with pytest.raises(ValueError, match="EARNINGS_GATE_FAIL_CLOSED"):
         m._earnings_blackout_for("NVDA")
+
+
+def _queued_signal():
+    return m.SignalCandidate(
+        signal_id="queued-entry",
+        symbol="AAPL",
+        ts=m.datetime.now(m.timezone.utc),
+        candidate_action="BUY",
+        confidence=0.8,
+        size_pct=0.01,
+        model_version="test",
+    )
+
+
+def _stub_cycle_until_portfolio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def weekly() -> float:
+        return 0.0
+
+    async def approvals() -> None:
+        return None
+
+    async def audit(_event) -> None:
+        return None
+
+    async def stop_after_queue():
+        raise RuntimeError("queue probe complete")
+
+    monkeypatch.setenv("TRADING_LOOP_OWNER", "orchestrator")
+    monkeypatch.setattr(m, "load_policy_config", lambda _path: {"kill_switch": False})
+    monkeypatch.setattr(m, "_weekly_spend_safe", weekly)
+    monkeypatch.setattr(m, "_process_approvals", approvals)
+    monkeypatch.setattr(m, "_monthly_limits_ok", lambda: True)
+    monkeypatch.setattr(m, "_portfolio_state", stop_after_queue)
+    monkeypatch.setattr(m, "_audit", audit)
+    m.state.allowlist_validation_ran = True
+    m.state.running = False
+
+
+@pytest.mark.asyncio
+async def test_cycle_drains_existing_backlog_before_generating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_cycle_until_portfolio(monkeypatch)
+
+    async def pending():
+        return [_queued_signal()]
+
+    async def generation(_config):
+        raise AssertionError("generation must wait until the durable queue drains")
+
+    monkeypatch.setattr(m, "_pending_signals", pending)
+    monkeypatch.setattr(m, "_generate_signals", generation)
+
+    summary = await m.run_cycle()
+
+    assert summary["generation"] == {
+        "status": "skipped_pending_backlog",
+        "pending": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_cycle_does_not_generate_when_queue_state_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_cycle_until_portfolio(monkeypatch)
+
+    async def pending():
+        return None
+
+    async def generation(_config):
+        raise AssertionError("an unreadable queue is not an empty queue")
+
+    monkeypatch.setattr(m, "_pending_signals", pending)
+    monkeypatch.setattr(m, "_generate_signals", generation)
+
+    summary = await m.run_cycle()
+
+    assert summary["generation"] == {"status": "skipped_signal_queue_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_cycle_generates_only_when_backlog_is_empty_then_refetches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_cycle_until_portfolio(monkeypatch)
+    reads = 0
+    generations = 0
+
+    async def pending():
+        nonlocal reads
+        reads += 1
+        return [] if reads == 1 else [_queued_signal()]
+
+    async def generation(_config):
+        nonlocal generations
+        generations += 1
+        return {"requested": 1, "generated": 1, "failed": 0, "errors": []}
+
+    monkeypatch.setattr(m, "_pending_signals", pending)
+    monkeypatch.setattr(m, "_generate_signals", generation)
+
+    summary = await m.run_cycle()
+
+    assert generations == 1
+    assert reads == 2
+    assert summary["generation"]["generated"] == 1

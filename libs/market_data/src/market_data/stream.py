@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import deque
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from .config import MarketDataSettings
-from .models import OHLCVBar
+from .models import OHLCVBar, PriceSnapshot
 
 logger = logging.getLogger(__name__)
 
 BarCallback = Callable[[OHLCVBar], Awaitable[None]]
+PriceCallback = Callable[[PriceSnapshot], Awaitable[None]]
 
 
 class AlpacaStreamFetcher:
@@ -30,10 +32,12 @@ class AlpacaStreamFetcher:
         on_bar: BarCallback,
         buffer_size: int = 200,
         max_reconnect_attempts: int = 10,
+        on_price: PriceCallback | None = None,
     ) -> None:
         self._settings = settings
         self._symbols = [s.upper() for s in symbols]
         self._on_bar = on_bar
+        self._on_price = on_price
         self._buffer_size = buffer_size
         self._max_reconnect_attempts = max_reconnect_attempts
         self._buffers: dict[str, deque[OHLCVBar]] = {
@@ -73,6 +77,10 @@ class AlpacaStreamFetcher:
             feed="iex",  # free tier; use "sip" for paid
         )
         self._stream.subscribe_bars(self._handle_bar, *self._symbols)
+        if self._on_price is not None:
+            # Bars arrive only once per minute. Trade ticks keep execution and
+            # protective exits on current prices between bar closes.
+            self._stream.subscribe_trades(self._handle_trade, *self._symbols)
         self._connect_count += 1
         logger.info("AlpacaStreamFetcher: connecting (attempt %d)", self._connect_count)
         await self._stream.run()
@@ -102,6 +110,34 @@ class AlpacaStreamFetcher:
         except Exception as exc:
             logger.error("AlpacaStreamFetcher._handle_bar error: %s", exc)
 
+    async def _handle_trade(self, trade: object) -> None:
+        """Convert a provider trade into a timestamped cache observation."""
+        if self._on_price is None:
+            return
+        try:
+            symbol = str(getattr(trade, "symbol", "")).upper()
+            timestamp = getattr(trade, "timestamp", None)
+            price = float(getattr(trade, "price", 0.0))
+            if (
+                symbol not in self._buffers
+                or not isinstance(timestamp, datetime)
+                or not math.isfinite(price)
+                or price <= 0.0
+            ):
+                raise ValueError("trade is missing a subscribed symbol, timestamp, or price")
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            await self._on_price(
+                PriceSnapshot(
+                    symbol=symbol,
+                    price=price,
+                    timestamp=timestamp.astimezone(timezone.utc),
+                    source="stream_trade",
+                )
+            )
+        except Exception as exc:
+            logger.error("AlpacaStreamFetcher._handle_trade error: %s", exc)
+
     async def _reconnect_loop(self) -> None:
         """Exponential backoff reconnect: 2, 4, 8 ... 60s."""
         attempt = 0
@@ -123,7 +159,7 @@ class AlpacaStreamFetcher:
                         self._max_reconnect_attempts,
                     )
                     break
-                delay = min(2 ** attempt, 60)
+                delay = min(2**attempt, 60)
                 logger.warning(
                     "AlpacaStreamFetcher: disconnected (%s), reconnecting in %ds (attempt %d/%d)",
                     exc,

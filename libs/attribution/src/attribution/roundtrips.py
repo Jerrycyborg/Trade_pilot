@@ -54,9 +54,7 @@ def pair_round_trips(rows: list[dict[str, Any]]) -> list[RoundTrip]:
     close whose opening fill predates the archive window looks like a fresh
     opening in the opposite direction, so windows should start flat.
     """
-    groups: dict[
-        tuple[str, str, str, str, str], list[dict[str, Any]]
-    ] = defaultdict(list)
+    groups: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if not row.get("filled"):
             continue
@@ -140,6 +138,7 @@ def load_round_trips(
     window_start: datetime | None = None,
     window_end: datetime | None = None,
     limit: int = 5000,
+    most_recent: bool = False,
 ) -> list[RoundTrip]:
     """Round trips from the journal, for one scope.
 
@@ -155,5 +154,54 @@ def load_round_trips(
         window_start=window_start,
         window_end=window_end,
         limit=limit,
+        most_recent=most_recent,
     )
+    if (
+        most_recent
+        and len(rows) == limit
+        and strategy_id is not None
+        and symbol is not None
+        and environment is not None
+        and rows
+    ):
+        initial = journal.net_position(
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            symbol=symbol,
+            environment=environment,
+            account_id=account_id,
+            before=rows[0]["recorded_at"],
+        )
+        if initial is None:
+            return []
+        rows = _after_prior_position_closes(rows, initial)
     return pair_round_trips(rows)
+
+
+def _after_prior_position_closes(
+    rows: list[dict[str, Any]],
+    initial_position: float,
+) -> list[dict[str, Any]]:
+    """Discard carry-in while preserving a fill that reverses through flat."""
+    net = float(initial_position)
+    if abs(net) <= 1e-9:
+        return rows
+    for index, row in enumerate(rows):
+        if not row.get("filled"):
+            continue
+        direction = _SIDE_DIRECTION.get(str(row.get("side", "")).upper())
+        if direction is None:
+            continue
+        signed = direction * float(row.get("filled_qty") or row.get("qty") or 0.0)
+        prior = net
+        net += signed
+        if abs(net) <= 1e-9:
+            return rows[index + 1 :]
+        if prior * net < 0:
+            # One fill closed the carry-in and opened a new position in the
+            # opposite direction. Attribute only the quantity beyond flat.
+            adjusted = dict(row)
+            adjusted["qty"] = abs(net)
+            adjusted["filled_qty"] = abs(net)
+            return [adjusted, *rows[index + 1 :]]
+    return []

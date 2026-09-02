@@ -21,9 +21,7 @@ class StrategySettings:
     prompt_id: str = field(
         default_factory=lambda: os.getenv("STRATEGY_PROMPT_ID", "strategy-system-v1")
     )
-    prompt_sha256: str = field(
-        default_factory=lambda: os.getenv("STRATEGY_PROMPT_SHA256", "")
-    )
+    prompt_sha256: str = field(default_factory=lambda: os.getenv("STRATEGY_PROMPT_SHA256", ""))
     fallback_to_deterministic: bool = field(
         default_factory=lambda: (
             os.getenv("STRATEGY_FALLBACK_DETERMINISTIC", "true").lower() == "true"
@@ -43,6 +41,9 @@ class StrategySettings:
     )
     worker_interval_minutes: int = field(
         default_factory=lambda: int(os.getenv("WORKER_INTERVAL_MINUTES", "15"))
+    )
+    trading_loop_owner: str = field(
+        default_factory=lambda: os.getenv("TRADING_LOOP_OWNER", "orchestrator").strip().lower()
     )
     # Downstream service URLs
     policy_service_url: str = field(

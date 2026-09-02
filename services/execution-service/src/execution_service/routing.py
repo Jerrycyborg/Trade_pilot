@@ -77,16 +77,14 @@ class BrokerRouter:
         # The simulated adapter is always a real PaperBroker: a PAPER sleeve
         # must produce genuine simulated fills, P&L and shortfall records, not
         # a no-op that reports success.
-        self._simulated = simulated or PaperBroker(max_qty=max_qty)
+        self._simulated = simulated if simulated is not None else PaperBroker(max_qty=max_qty)
         self._live = live
         self._live_resolved = live is not None
         # Transient authority failures may occur while a real position is open.
         # Keep only routes previously observed from the authoritative store.
         # This cache never permits entries and is intentionally process-local:
         # after a restart with no authority, guessing a venue is unsafe.
-        self._last_known_routes: dict[
-            tuple[str, str, str], tuple[ExecutionRoute, str]
-        ] = {}
+        self._last_known_routes: dict[tuple[str, str, str], tuple[ExecutionRoute, str]] = {}
 
     # ------------------------------------------------------------------
     def _live_adapter(self):
@@ -100,9 +98,7 @@ class BrokerRouter:
             # Adapter capability is explicit. Alpaca paper and eToro demo use
             # real APIs but are not real-money venues; treating "not
             # PaperBroker" as live misclassified both.
-            self._live = (
-                adapter if bool(getattr(adapter, "is_live_trading", False)) else None
-            )
+            self._live = adapter if bool(getattr(adapter, "is_live_trading", False)) else None
             self._live_resolved = True
         return self._live
 
@@ -328,8 +324,10 @@ class BrokerRouter:
 def build_router(max_qty: int = 1000, simulated: object | None = None) -> BrokerRouter:
     """The process-wide router, wired to the shared authority when configured.
 
-    `simulated` is the service's own paper adapter, when it has one. Without
-    it the router built a second PaperBroker over the same state file, so the
+    `simulated` is the service's configured non-live adapter: either its
+    internal PaperBroker or a broker-hosted paper/demo venue. Without it the
+    router builds a PaperBroker fallback. Reusing the configured adapter also
+    prevents a second PaperBroker over the same state file, where the
     process traded on one in-memory book while every read endpoint —
     /v1/positions, /v1/account, and the reconciler's broker-side view —
     answered from the other, loaded once at startup and never again. The
@@ -357,7 +355,8 @@ def build_router(max_qty: int = 1000, simulated: object | None = None) -> Broker
         # preserved until a later order succeeds in connecting.
         logger.error(
             "Lifecycle authority configured but unreachable (%s). Entries are "
-            "blocked until it responds; exits remain available.", exc,
+            "blocked until it responds; exits remain available.",
+            exc,
         )
         return BrokerRouter(
             store=None, max_qty=max_qty, store_factory=_connect, simulated=simulated

@@ -11,6 +11,8 @@ store, regardless of evidence, and only a named person can clear it.
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -114,9 +116,7 @@ class TestAdoptionIsAHumanAction:
         """It stops the refusal and nothing else. The sleeve still has to earn
         live through the ordinary gates."""
         sleeve = _paper_challenger(store, _proposal())
-        adopted = store.adopt_challenger(
-            sleeve, actor="marshal.lawrence", reason="reviewed"
-        )
+        adopted = store.adopt_challenger(sleeve, actor="marshal.lawrence", reason="reviewed")
 
         assert adopted.state == "paper"
 
@@ -137,9 +137,7 @@ class TestAdoptionIsAHumanAction:
         """Somebody accepted a sleeve the system had refused. That belongs in
         the same append-only record as every other decision."""
         sleeve = _paper_challenger(store, _proposal())
-        store.adopt_challenger(
-            sleeve, actor="marshal.lawrence", reason="reviewed the campaign"
-        )
+        store.adopt_challenger(sleeve, actor="marshal.lawrence", reason="reviewed the campaign")
 
         latest = store.transitions(sleeve.id, limit=1)[0]
         assert latest["actor"] == "marshal.lawrence"
@@ -197,11 +195,13 @@ class TestProposalsArePersistedApartFromEvidence:
         and on what evidence."""
         challenger = _proposal()
         first = store.record_challenger_proposal(
-            campaign_id="camp-2", challenger=challenger.to_dict(),
+            campaign_id="camp-2",
+            challenger=challenger.to_dict(),
             deflated_sharpe_campaign=0.5,
         )
         second = store.record_challenger_proposal(
-            campaign_id="camp-2", challenger=challenger.to_dict(),
+            campaign_id="camp-2",
+            challenger=challenger.to_dict(),
             deflated_sharpe_campaign=0.99,
         )
 
@@ -215,8 +215,10 @@ class TestProposalsArePersistedApartFromEvidence:
         into the table the promotion gate trusts is the one place it must never
         appear."""
         store.record_challenger_proposal(
-            campaign_id="camp-3", challenger=_proposal().to_dict(),
-            deflated_sharpe_campaign=0.99, survived=True,
+            campaign_id="camp-3",
+            challenger=_proposal().to_dict(),
+            deflated_sharpe_campaign=0.99,
+            survived=True,
         )
 
         # Nothing landed in the artifact table for this sleeve.
@@ -230,9 +232,13 @@ class TestTheComparisonDeclaresNoWinner:
         for value in results:
             for side, price in (("BUY", 100.0), ("SELL", 100.0 + value)):
                 journal.record_execution(
-                    symbol=SYMBOL, side=side, qty=10,
-                    decision_price=price, fill_price=price,
-                    strategy_id=strategy_id, environment="paper",
+                    symbol=SYMBOL,
+                    side=side,
+                    qty=10,
+                    decision_price=price,
+                    fill_price=price,
+                    strategy_id=strategy_id,
+                    environment="paper",
                 )
 
     def test_both_sides_are_reported_on_the_same_window(self, journal) -> None:
@@ -241,7 +247,8 @@ class TestTheComparisonDeclaresNoWinner:
         self._round_trips(journal, derived, [2.0, -0.5] * 12)
 
         result = compare(
-            journal, symbol=SYMBOL,
+            journal,
+            symbol=SYMBOL,
             champion_strategy_id=CHAMPION,
             challenger_strategy_id=derived,
         ).to_dict()
@@ -258,8 +265,10 @@ class TestTheComparisonDeclaresNoWinner:
         self._round_trips(journal, derived, [5.0] * 25)
 
         result = compare(
-            journal, symbol=SYMBOL,
-            champion_strategy_id=CHAMPION, challenger_strategy_id=derived,
+            journal,
+            symbol=SYMBOL,
+            champion_strategy_id=CHAMPION,
+            challenger_strategy_id=derived,
         ).to_dict()
 
         assert "winner" not in result
@@ -273,8 +282,10 @@ class TestTheComparisonDeclaresNoWinner:
         self._round_trips(journal, derived, [2.0, -0.5])
 
         result = compare(
-            journal, symbol=SYMBOL,
-            champion_strategy_id=CHAMPION, challenger_strategy_id=derived,
+            journal,
+            symbol=SYMBOL,
+            champion_strategy_id=CHAMPION,
+            challenger_strategy_id=derived,
         )
         assert any("fewer than" in c for c in result.cautions)
 
@@ -283,8 +294,10 @@ class TestTheComparisonDeclaresNoWinner:
         self._round_trips(journal, CHAMPION, [1.0] * 25)
 
         result = compare(
-            journal, symbol=SYMBOL,
-            champion_strategy_id=CHAMPION, challenger_strategy_id=derived,
+            journal,
+            symbol=SYMBOL,
+            champion_strategy_id=CHAMPION,
+            challenger_strategy_id=derived,
         )
         assert any("nothing to compare" in c for c in result.cautions)
 
@@ -294,13 +307,20 @@ class TestTheComparisonDeclaresNoWinner:
         for _ in range(21):
             for side, price in (("BUY", 100.0), ("SELL", 500.0)):
                 journal.record_execution(
-                    symbol=SYMBOL, side=side, qty=10, decision_price=price,
-                    fill_price=price, strategy_id=derived, environment="live",
+                    symbol=SYMBOL,
+                    side=side,
+                    qty=10,
+                    decision_price=price,
+                    fill_price=price,
+                    strategy_id=derived,
+                    environment="live",
                 )
 
         result = compare(
-            journal, symbol=SYMBOL,
-            champion_strategy_id=CHAMPION, challenger_strategy_id=derived,
+            journal,
+            symbol=SYMBOL,
+            champion_strategy_id=CHAMPION,
+            challenger_strategy_id=derived,
         )
         assert result.challenger.trades == 0, "live fills are a different kind of money"
 
@@ -412,21 +432,23 @@ class TestPaperSleevesCanActuallyTrade:
 
 
 class TestTheChallengerRoster:
-    def test_paper_challengers_lists_exactly_the_sleeves_under_comparison(
-        self, store
-    ) -> None:
+    def test_paper_challengers_lists_exactly_the_sleeves_under_comparison(self, store) -> None:
         under_test = _paper_challenger(store, _proposal())
         # A human paper sleeve, a candidate challenger, and a challenger on
         # another symbol: none of them belong in AAPL's challenger pass.
         human = store.register("human_paper", SYMBOL)
         store.transition(human, "paper", "setup")
         store.register(
-            derived_strategy_id(CHAMPION, "chal-candidate"), SYMBOL,
-            strategy_version="chal-candidate", origin="challenger",
+            derived_strategy_id(CHAMPION, "chal-candidate"),
+            SYMBOL,
+            strategy_version="chal-candidate",
+            origin="challenger",
         )
         other = store.register(
-            derived_strategy_id(CHAMPION, "chal-elsewhere"), "MSFT",
-            strategy_version="chal-elsewhere", origin="challenger",
+            derived_strategy_id(CHAMPION, "chal-elsewhere"),
+            "MSFT",
+            strategy_version="chal-elsewhere",
+            origin="challenger",
         )
         store.transition(other, "paper", "setup")
 
@@ -438,12 +460,14 @@ class TestTheChallengerRoster:
 
         challenger = _proposal()
         store.record_challenger_proposal(
-            campaign_id="camp-params", challenger=challenger.to_dict(),
+            campaign_id="camp-params",
+            challenger=challenger.to_dict(),
         )
 
         service = LifecycleService(store=store)
         assert service.challenger_parameters(challenger.challenger_id) == {
-            "ema_fast": 24.0, "ema_slow": 50.0,
+            "ema_fast": 24.0,
+            "ema_slow": 50.0,
         }
         assert service.challenger_parameters("chal-never-recorded") is None
 
@@ -455,3 +479,163 @@ class TestTheChallengerRoster:
         service = LifecycleService(store=None)
         assert service.paper_challengers(SYMBOL) == []
         assert service.challenger_parameters("chal-x") is None
+
+
+class TestQualifiedProposalPaperHandoff:
+    def _record(self, store, challenger, *, survived=True, campaign="paper-handoff"):
+        return store.record_challenger_proposal(
+            campaign_id=campaign,
+            challenger=challenger.to_dict(),
+            deflated_sharpe_campaign=0.97 if survived else 0.2,
+            out_of_sample_sharpe=1.2 if survived else -0.4,
+            survived=survived,
+        )
+
+    def test_qualified_proposal_starts_as_paper_challenger(self, store) -> None:
+        from lifecycle.service import LifecycleService
+
+        challenger = _proposal()
+        proposal_id = self._record(store, challenger)
+        sleeve = LifecycleService(store=store).start_paper_challenger(
+            proposal_id,
+            actor="paper-reviewer",
+            reason="run controlled comparison",
+        )
+
+        assert sleeve.state == "paper"
+        assert sleeve.origin == "challenger"
+        assert sleeve.strategy_version == challenger.challenger_id
+        assert sleeve.strategy_id == derived_strategy_id(CHAMPION, challenger.challenger_id)
+
+    def test_handoff_is_idempotent(self, store) -> None:
+        from lifecycle.service import LifecycleService
+
+        proposal_id = self._record(store, _proposal())
+        service = LifecycleService(store=store)
+        first = service.start_paper_challenger(
+            proposal_id,
+            actor="paper-reviewer",
+            reason="first call",
+        )
+        second = service.start_paper_challenger(
+            proposal_id,
+            actor="paper-reviewer",
+            reason="safe retry",
+        )
+
+        assert second.id == first.id
+        assert second.version == first.version
+        assert second.state == "paper"
+
+    def test_non_qualifying_proposal_is_refused(self, store) -> None:
+        from lifecycle.service import LifecycleService
+
+        proposal_id = self._record(store, _proposal(), survived=False)
+        with pytest.raises(LifecycleStoreError, match="did not qualify"):
+            LifecycleService(store=store).start_paper_challenger(
+                proposal_id,
+                actor="paper-reviewer",
+                reason="must not start",
+            )
+
+    def test_active_challenger_cap_bounds_parallel_search(
+        self,
+        store,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lifecycle.service import LifecycleService
+
+        monkeypatch.setenv("PAPER_MAX_ACTIVE_CHALLENGERS", "1")
+        first = self._record(store, _proposal(), campaign="cap-1")
+        second_challenger = _proposal(parameters={"ema_fast": 26.0, "ema_slow": 50.0})
+        second = self._record(
+            store,
+            second_challenger,
+            campaign="cap-2",
+        )
+        service = LifecycleService(store=store)
+        service.start_paper_challenger(
+            first,
+            actor="paper-reviewer",
+            reason="first experiment",
+        )
+
+        with pytest.raises(LifecycleStoreError, match="cap reached"):
+            service.start_paper_challenger(
+                second,
+                actor="paper-reviewer",
+                reason="too many experiments",
+            )
+
+    def test_existing_candidate_retry_still_obeys_the_cap(
+        self,
+        store,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lifecycle.service import LifecycleService
+
+        monkeypatch.setenv("PAPER_MAX_ACTIVE_CHALLENGERS", "1")
+        active_proposal = self._record(store, _proposal(), campaign="retry-cap-1")
+        waiting_challenger = _proposal(parameters={"ema_fast": 28.0, "ema_slow": 50.0})
+        waiting_proposal = self._record(
+            store,
+            waiting_challenger,
+            campaign="retry-cap-2",
+        )
+        store.register(
+            derived_strategy_id(CHAMPION, waiting_challenger.challenger_id),
+            SYMBOL,
+            strategy_version=waiting_challenger.challenger_id,
+            origin="challenger",
+        )
+
+        service = LifecycleService(store=store)
+        service.start_paper_challenger(
+            active_proposal,
+            actor="paper-reviewer",
+            reason="occupy the experiment slot",
+        )
+        with pytest.raises(LifecycleStoreError, match="cap reached"):
+            service.start_paper_challenger(
+                waiting_proposal,
+                actor="paper-reviewer",
+                reason="retry an existing candidate",
+            )
+
+    def test_concurrent_activations_cannot_overbook_the_cap(
+        self,
+        store,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lifecycle.service import LifecycleService
+
+        monkeypatch.setenv("PAPER_MAX_ACTIVE_CHALLENGERS", "1")
+        first = self._record(store, _proposal(), campaign="race-cap-1")
+        second = self._record(
+            store,
+            _proposal(parameters={"ema_fast": 30.0, "ema_slow": 50.0}),
+            campaign="race-cap-2",
+        )
+        barrier = threading.Barrier(2)
+        service = LifecycleService(store=store)
+
+        def activate(proposal_id: int):
+            barrier.wait(timeout=5)
+            try:
+                return service.start_paper_challenger(
+                    proposal_id,
+                    actor="paper-reviewer",
+                    reason="concurrent activation probe",
+                )
+            except LifecycleStoreError as exc:
+                return exc
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(activate, (first, second)))
+
+        sleeves = [outcome for outcome in outcomes if not isinstance(outcome, Exception)]
+        refusals = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+        assert len(sleeves) == 1
+        assert len(refusals) == 1
+        assert "cap reached" in str(refusals[0])
+        assert len(store.paper_challengers(SYMBOL)) == 1

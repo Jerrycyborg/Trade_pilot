@@ -28,6 +28,12 @@ def test_sanitize_symbol_rejects_too_long():
         sanitize_symbol("A" * 21)
 
 
+@pytest.mark.parametrize("symbol", ["../bad", "/AAPL", "AAPL/", "BTC//USD", "A..B"])
+def test_sanitize_symbol_rejects_path_like_separators(symbol):
+    with pytest.raises(HTTPException):
+        sanitize_symbol(symbol)
+
+
 def test_validate_positive_amount_ok():
     assert validate_positive_amount(100.555) == 100.56
 

@@ -66,9 +66,7 @@ class TestLivePriceCache:
         cache = LivePriceCache()
         stamp = datetime.now(timezone.utc) - timedelta(seconds=5)
         cache.record_bar(
-            OHLCVBar(
-                symbol="MSFT", timestamp=stamp, open=1, high=2, low=0.5, close=1.75, volume=10
-            )
+            OHLCVBar(symbol="MSFT", timestamp=stamp, open=1, high=2, low=0.5, close=1.75, volume=10)
         )
         snapshot = cache.get("MSFT")
         assert snapshot.price == 1.75
@@ -88,9 +86,7 @@ class TestRealtimePriceSource:
 
     def test_falls_back_to_latest_trade_when_cache_is_cold(self) -> None:
         fetcher = StubFetcher(latest=_snapshot(price=123.0))
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
 
         assert source.get_price("AAPL") == 123.0
         assert fetcher.latest_calls == 1
@@ -99,12 +95,14 @@ class TestRealtimePriceSource:
         bar = OHLCVBar(
             symbol="AAPL",
             timestamp=datetime.now(timezone.utc),
-            open=1, high=2, low=0.5, close=77.0, volume=10,
+            open=1,
+            high=2,
+            low=0.5,
+            close=77.0,
+            volume=10,
         )
         fetcher = StubFetcher(latest=None, bars=[bar])
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
 
         snapshot = source.get_snapshot("AAPL")
         assert snapshot.price == 77.0
@@ -112,9 +110,7 @@ class TestRealtimePriceSource:
 
     def test_returns_none_when_no_tier_can_supply_a_price(self) -> None:
         fetcher = StubFetcher(latest=None, bars=[])
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
         assert source.get_price("AAPL") is None
 
     def test_resolved_price_is_cached_for_the_next_caller(self) -> None:
@@ -132,9 +128,7 @@ class TestRealtimePriceSource:
     ) -> None:
         monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
         fetcher = StubFetcher(latest=None, bars=[])
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
 
         source.get_snapshot("AAPL")
         assert fetcher.intraday_calls == 1
@@ -158,13 +152,31 @@ class TestStreamManager:
         manager = StreamManager(MarketDataSettings(), ["AAPL"], LivePriceCache())
         assert asyncio.run(manager.start()) is False
 
+    def test_streamed_trade_tick_lands_in_the_cache(self) -> None:
+        cache = LivePriceCache()
+        manager = StreamManager(MarketDataSettings(), ["AAPL"], cache)
+        snapshot = _snapshot(price=251.75)
+        snapshot.source = "stream_trade"
+
+        asyncio.run(manager._on_price(snapshot))
+
+        cached = cache.get("AAPL")
+        assert cached.price == 251.75
+        assert cached.source == "stream_trade"
+        assert manager.status()["latest_price_source"] == "stream_trade"
+        assert manager.status()["latest_price_age_seconds"] is not None
+
     def test_streamed_bar_lands_in_the_cache(self) -> None:
         cache = LivePriceCache()
         manager = StreamManager(MarketDataSettings(), ["AAPL"], cache)
         bar = OHLCVBar(
             symbol="AAPL",
             timestamp=datetime.now(timezone.utc),
-            open=1, high=2, low=0.5, close=250.25, volume=10,
+            open=1,
+            high=2,
+            low=0.5,
+            close=250.25,
+            volume=10,
         )
 
         asyncio.run(manager._on_bar(bar))
@@ -184,9 +196,7 @@ class TestFreshnessAppliesToEveryTier:
     def test_stale_latest_trade_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
         fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=3_600))
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
         assert source.get_price("AAPL") is None
 
     def test_stale_last_bar_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,33 +204,29 @@ class TestFreshnessAppliesToEveryTier:
         old_bar = OHLCVBar(
             symbol="AAPL",
             timestamp=datetime.now(timezone.utc) - timedelta(days=1),
-            open=1, high=2, low=0.5, close=77.0, volume=10,
+            open=1,
+            high=2,
+            low=0.5,
+            close=77.0,
+            volume=10,
         )
         fetcher = StubFetcher(latest=None, bars=[old_bar])
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
         assert source.get_snapshot("AAPL") is None
 
     def test_fresh_price_still_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MARKET_DATA_TIMEFRAME", "intraday")
         fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=5))
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
         assert source.get_price("AAPL") == 100.0
 
-    def test_daily_timeframe_tolerates_an_old_bar(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_daily_timeframe_tolerates_an_old_bar(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """120 seconds is an intraday limit. A daily bar is hours old by
         construction, so the limit scales with the timeframe."""
         monkeypatch.delenv("MARKET_DATA_TIMEFRAME", raising=False)
         monkeypatch.delenv("MAX_PRICE_AGE_SECONDS", raising=False)
         fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=3_600 * 6))
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
         assert source.get_price("AAPL") == 100.0
 
     def test_explicit_limit_overrides_the_timeframe_default(
@@ -228,9 +234,7 @@ class TestFreshnessAppliesToEveryTier:
     ) -> None:
         monkeypatch.setenv("MAX_PRICE_AGE_SECONDS", "10")
         fetcher = StubFetcher(latest=_snapshot(price=100.0, seconds_old=60))
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
         assert source.get_price("AAPL") is None
 
     def test_a_refused_price_is_still_cached_for_inspection(
@@ -290,9 +294,7 @@ class TestFillGradeFreshness:
         quote: an unpriceable market stays None and the fill is refused."""
         monkeypatch.setenv("MAX_PRICE_AGE_SECONDS", "60")
         fetcher = StubFetcher(latest=_snapshot(price=185.0, seconds_old=3600.0))
-        source = RealtimePriceSource(
-            MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher
-        )
+        source = RealtimePriceSource(MarketDataSettings(), cache=LivePriceCache(), fetcher=fetcher)
         assert source.get_fresh_price("AAPL") is None
 
     def test_a_cached_quote_beats_the_last_bar_when_the_provider_is_down(
@@ -307,7 +309,11 @@ class TestFillGradeFreshness:
         stale_bar = OHLCVBar(
             symbol="AAPL",
             timestamp=datetime.now(timezone.utc) - timedelta(hours=6),
-            open=1, high=2, low=0.5, close=100.0, volume=10,
+            open=1,
+            high=2,
+            low=0.5,
+            close=100.0,
+            volume=10,
         )
         fetcher = _ProviderDownFetcher(bars=[stale_bar])
         cache = LivePriceCache(max_age_seconds=86400)
@@ -328,7 +334,11 @@ class TestFillGradeFreshness:
         stale_bar = OHLCVBar(
             symbol="AAPL",
             timestamp=datetime.now(timezone.utc) - timedelta(hours=6),
-            open=1, high=2, low=0.5, close=100.0, volume=10,
+            open=1,
+            high=2,
+            low=0.5,
+            close=100.0,
+            volume=10,
         )
         fetcher = _ProviderDownFetcher(bars=[stale_bar])
         cache = LivePriceCache(max_age_seconds=10)

@@ -115,9 +115,7 @@ def test_a_reduce_only_exit_passes_even_over_the_cap(main) -> None:
     assert exit_.status != OrderStatus.REJECTED
 
 
-def test_an_unknowable_book_refuses_even_a_claimed_reduce_only_order(
-    main, tmp_path: Path
-) -> None:
+def test_an_unknowable_book_refuses_even_a_claimed_reduce_only_order(main, tmp_path: Path) -> None:
     """The reduce-only flag is a claim, not a broker guarantee. If the ledger
     cannot verify the position, execution must not risk a reversal."""
     _submit(main, "SELL", 6)  # a real position, journalled
@@ -172,9 +170,7 @@ def test_a_close_returns_the_ledger_to_flat(main, monkeypatch: pytest.MonkeyPatc
 
     entry = _submit(main, "SELL", 6)
     assert entry.status != OrderStatus.REJECTED
-    net = get_journal().net_position(
-        strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
-    )
+    net = get_journal().net_position(strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper")
     assert net == -6.0
 
     # The service wrapper binds its own module-global broker; point it at the
@@ -182,15 +178,16 @@ def test_a_close_returns_the_ledger_to_flat(main, monkeypatch: pytest.MonkeyPatc
     import execution_service.broker as broker_module
 
     monkeypatch.setattr(broker_module, "broker", main.broker)
-    result = main.close_order(
-        ClosePositionRequest(
-            symbol="NVDA",
-            position_id="NVDA",
-            signal_id="stop-loss-drill",
-            strategy_id="ema_rsi_macd",
-        )
+    close_request = ClosePositionRequest(
+        symbol="NVDA",
+        position_id="NVDA",
+        signal_id="stop-loss-drill",
+        strategy_id="ema_rsi_macd",
     )
+    result = main.close_order(close_request)
+    replay = main.close_order(close_request)
     assert result["status"] == "closed"
+    assert replay["status"] == "closed"
     net_after = get_journal().net_position(
         strategy_id="ema_rsi_macd", symbol="NVDA", environment="paper"
     )

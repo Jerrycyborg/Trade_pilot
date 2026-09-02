@@ -37,9 +37,7 @@ class StrategyArtifact:
 
 
 def _registry_root() -> Path:
-    return Path(
-        os.getenv("LEARNING_STRATEGY_REGISTRY_PATH", "config/strategies")
-    ).resolve()
+    return Path(os.getenv("LEARNING_STRATEGY_REGISTRY_PATH", "config/strategies")).resolve()
 
 
 def load_strategy_artifact(
@@ -95,9 +93,7 @@ def _bar(row: dict[str, Any], symbol: str) -> OHLCVBar:
 
 
 def _one_point_grid(params: StrategyParams) -> ParameterGrid:
-    return ParameterGrid(
-        **{name: [getattr(params, name)] for name in ParameterGrid.model_fields}
-    )
+    return ParameterGrid(**{name: [getattr(params, name)] for name in ParameterGrid.model_fields})
 
 
 def run_sleeve_learning_cycle(
@@ -134,6 +130,11 @@ def run_sleeve_learning_cycle(
         environment="paper",
         account_id=sleeve.account_id,
         window_end=moment,
+        limit=max(
+            100,
+            min(100_000, int(os.getenv("LEARNING_MAX_EXECUTION_ROWS", "5000"))),
+        ),
+        most_recent=True,
     )
     paper_feedback = performance_from_trades(trips)
     paper_feedback["strategy_artifact_sha256"] = artifact.sha256

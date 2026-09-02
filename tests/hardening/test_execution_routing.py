@@ -17,7 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from brokers import PaperBroker
+from brokers import BrokerResult, PaperBroker
 from contracts import ExecutionOrderRequest, OrderStatus
 from execution_service.routing import BrokerRouter
 from lifecycle.routing import ExecutionRoute, OrderIntent, assert_not_live, resolve_route
@@ -42,6 +42,23 @@ class LiveAdapterSpy:
             )
 
         return _explode
+
+
+class HostedPaperAdapter:
+    """A broker sandbox: external, but structurally incapable of live trading."""
+
+    is_live_trading = False
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def place_order(self, request, **_kwargs) -> BrokerResult:
+        self.calls.append(request.signal_id)
+        return BrokerResult(
+            status=OrderStatus.ACCEPTED,
+            external_order_id="alpaca-paper-order",
+            fill_price=200.01,
+        )
 
 
 class Prices:
@@ -126,6 +143,23 @@ def _order(**overrides: object) -> ExecutionOrderRequest:
 
 
 class TestPaperSleeveNeverReachesLive:
+    def test_a_paper_sleeve_can_route_to_a_broker_hosted_paper_venue(
+        self, live: LiveAdapterSpy
+    ) -> None:
+        hosted = HostedPaperAdapter()
+        router = BrokerRouter(store=FakeStore(state="paper"), simulated=hosted, live=live)
+
+        routed = router.route(
+            strategy_id="ema_rsi_macd", symbol="AAPL", account_id="default", reduce_only=False
+        )
+        result = routed.adapter.place_order(_order())
+
+        assert routed.decision.route is ExecutionRoute.SIMULATED
+        assert routed.adapter is hosted
+        assert result.status is OrderStatus.ACCEPTED
+        assert hosted.calls
+        assert live.calls == []
+
     def test_a_paper_sleeve_routes_to_the_simulator(
         self, paper: PaperBroker, live: LiveAdapterSpy
     ) -> None:
@@ -184,16 +218,17 @@ class TestPaperSleeveNeverReachesLive:
         result = routed.adapter.place_order(_order())
 
         shortfall = get_journal().record_execution(
-            symbol="AAPL", side="BUY", qty=10,
-            decision_price=200.0, fill_price=result.fill_price,
+            symbol="AAPL",
+            side="BUY",
+            qty=10,
+            decision_price=200.0,
+            fill_price=result.fill_price,
         )
         assert shortfall is not None and shortfall > 0, "paper trading must cost something"
         assert get_journal().execution_quality()["filled"] == 1
         assert live.calls == []
 
-    def test_a_live_route_is_refused_when_no_live_adapter_exists(
-        self, paper: PaperBroker
-    ) -> None:
+    def test_a_live_route_is_refused_when_no_live_adapter_exists(self, paper: PaperBroker) -> None:
         """Better to block than to fill on the simulator and call it real."""
         router = BrokerRouter(
             store=FakeStore(state="live", live_mode=True), simulated=paper, live=None
@@ -216,8 +251,10 @@ class TestPaperSleeveNeverReachesLive:
         )
         for reduce_only in (False, True):
             routed = router.route(
-                strategy_id="ema_rsi_macd", symbol="AAPL",
-                account_id="default", reduce_only=reduce_only,
+                strategy_id="ema_rsi_macd",
+                symbol="AAPL",
+                account_id="default",
+                reduce_only=reduce_only,
             )
             assert routed.adapter is not live
         assert live.calls == []
@@ -232,9 +269,7 @@ class TestPaperSleeveNeverReachesLive:
 
 
 class TestCandidateShadowsOnly:
-    def test_a_candidate_places_no_order(
-        self, paper: PaperBroker, live: LiveAdapterSpy
-    ) -> None:
+    def test_a_candidate_places_no_order(self, paper: PaperBroker, live: LiveAdapterSpy) -> None:
         """Acceptance criterion 5."""
         router = BrokerRouter(store=FakeStore(state="candidate"), simulated=paper, live=live)
         routed = router.route(
@@ -274,9 +309,7 @@ class TestExitsSurviveEveryHalt:
         entry = router.route(
             strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
         )
-        exit_ = router.route(
-            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
-        )
+        exit_ = router.route(strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True)
         assert entry.decision.route is ExecutionRoute.BLOCKED
         assert exit_.places_order is True
 
@@ -284,12 +317,16 @@ class TestExitsSurviveEveryHalt:
         """Live mode is the switch pulled in a hurry; getting flat afterwards is
         the thing most needed."""
         entry = resolve_route(
-            state="live", intent=OrderIntent.ENTRY,
-            live_mode_enabled=False, position_environment="live",
+            state="live",
+            intent=OrderIntent.ENTRY,
+            live_mode_enabled=False,
+            position_environment="live",
         )
         exit_ = resolve_route(
-            state="live", intent=OrderIntent.REDUCE_ONLY,
-            live_mode_enabled=False, position_environment="live",
+            state="live",
+            intent=OrderIntent.REDUCE_ONLY,
+            live_mode_enabled=False,
+            position_environment="live",
         )
         assert entry.route is ExecutionRoute.BLOCKED
         assert exit_.route is ExecutionRoute.LIVE
@@ -304,9 +341,7 @@ class TestExitsSurviveEveryHalt:
         entry = router.route(
             strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
         )
-        exit_ = router.route(
-            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
-        )
+        exit_ = router.route(strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True)
         assert entry.decision.route is ExecutionRoute.BLOCKED
         assert "lifecycle_unavailable" in entry.decision.reason
         assert exit_.decision.route is ExecutionRoute.BLOCKED
@@ -328,9 +363,7 @@ class TestExitsSurviveEveryHalt:
         assert observed.decision.route is ExecutionRoute.LIVE
 
         store._raises = RuntimeError("connection refused")
-        exit_ = router.route(
-            strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
-        )
+        exit_ = router.route(strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True)
         assert exit_.decision.route is ExecutionRoute.LIVE
         assert exit_.adapter is live
         assert "last_known_exit" in exit_.decision.reason
@@ -377,9 +410,7 @@ class TestAnUnreachableAuthorityIsNotADevFallback:
         def _never_connects():
             raise RuntimeError("connection refused")
 
-        router = BrokerRouter(
-            store=None, simulated=paper, live=live, store_factory=_never_connects
-        )
+        router = BrokerRouter(store=None, simulated=paper, live=live, store_factory=_never_connects)
         routed = router.route(
             strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
         )
@@ -392,9 +423,7 @@ class TestAnUnreachableAuthorityIsNotADevFallback:
         def _never_connects():
             raise RuntimeError("connection refused")
 
-        router = BrokerRouter(
-            store=None, simulated=paper, live=live, store_factory=_never_connects
-        )
+        router = BrokerRouter(store=None, simulated=paper, live=live, store_factory=_never_connects)
         routed = router.route(
             strategy_id="s", symbol="AAPL", account_id="default", reduce_only=True
         )
@@ -413,9 +442,7 @@ class TestAnUnreachableAuthorityIsNotADevFallback:
                 raise RuntimeError("connection refused")
             return FakeStore(state="paper")
 
-        router = BrokerRouter(
-            store=None, simulated=paper, live=live, store_factory=_flaky
-        )
+        router = BrokerRouter(store=None, simulated=paper, live=live, store_factory=_flaky)
         first = router.route(
             strategy_id="s", symbol="AAPL", account_id="default", reduce_only=False
         )

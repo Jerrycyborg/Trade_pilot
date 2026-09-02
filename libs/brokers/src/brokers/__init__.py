@@ -7,9 +7,24 @@ import os
 from .alpaca_broker import AlpacaBroker
 from .base import BaseBroker, BrokerResult
 from .etoro_broker import EtoroBroker
-from .paper_broker import PaperBroker
+from .paper_broker import (
+    PaperBroker,
+    PaperStateCorruptError,
+    PaperStateError,
+    PaperStatePersistenceError,
+)
 
-__all__ = ["AlpacaBroker", "BaseBroker", "BrokerResult", "EtoroBroker", "PaperBroker", "get_broker"]
+__all__ = [
+    "AlpacaBroker",
+    "BaseBroker",
+    "BrokerResult",
+    "EtoroBroker",
+    "PaperBroker",
+    "PaperStateCorruptError",
+    "PaperStateError",
+    "PaperStatePersistenceError",
+    "get_broker",
+]
 
 
 def get_broker(max_qty: int = 1000) -> BaseBroker:
