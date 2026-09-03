@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from market_data.indicators import compute_atr
 from market_data.models import OHLCVBar
 
+from . import entry_gates
 from .models import (
     TRADING_DAYS_PER_YEAR,
     US_SESSION_MINUTES,
@@ -86,7 +87,13 @@ def _compute_signals(bars: list[OHLCVBar], request: BacktestRequest) -> list[str
     asked for. `request.strategy` used to be a label that nothing read, so a
     request for any other strategy silently ran the momentum one.
     """
-    return get_strategy(request.strategy).signals(bars, request.params)
+    raw = get_strategy(request.strategy).signals(bars, request.params)
+    return entry_gates.apply(
+        bars,
+        raw,
+        regime_gate=request.regime_gate,
+        volume_gate=request.volume_gate,
+    )
 
 
 def _warmup_for(request: BacktestRequest) -> int:

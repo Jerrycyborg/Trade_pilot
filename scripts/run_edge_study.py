@@ -16,15 +16,15 @@ the Deflated Sharpe — the Sharpe adjusted for how many parameter combinations
 were tried — because a raw Sharpe picked as the best of N trials is inflated by
 construction.
 
-READ THIS BEFORE BELIEVING THE OUTPUT
--------------------------------------
-This measures the rule as `backtest-service` implements it, which is *not* what
-the live worker trades. The live path additionally suppresses a BUY when ADX is
-below 20 or unmeasurable, and when current volume is at or below its 20-bar
-average (`strategy_service/worker.py`, apply_entry_gates). The backtest models
-neither gate. Live therefore takes strictly fewer trades than this study shows,
-and whether those gates help or hurt has never been measured. Treat this as the
-ungated upper bound on trade count, not as a forecast of live behaviour.
+It also answers a second question the first version could only flag: the live
+worker suppresses a BUY when ADX is below 20 or unmeasurable, and when volume
+does not exceed its 20-bar average. Those gates were applied on faith and the
+backtest never modelled them, so every run measured a more permissive strategy
+than the one that trades. Each cost case now runs twice — gated and ungated —
+and the difference is the gates' contribution.
+
+The gated variant is what live actually does. Read that row as the forecast and
+the ungated one as the counterfactual.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ import argparse
 import json
 import sys
 from datetime import datetime, timedelta, timezone
+from itertools import product
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,8 +50,14 @@ from market_data.models import OHLCVBar  # noqa: E402
 # charges. Derived in ADR-006 from Schwarz et al. (JF 2025), who measured real
 # retail round trips at 7-46 bps for identical simultaneous orders.
 COST_CASES = {
-    "base_large_cap": {"spread_bps": 10.0, "slippage_bps": 0.0},
-    "stress_large_cap": {"spread_bps": 20.0, "slippage_bps": 0.0},
+    "base": {"spread_bps": 10.0, "slippage_bps": 0.0},
+    "stress": {"spread_bps": 20.0, "slippage_bps": 0.0},
+}
+
+# Off reproduces the backtest's historical behaviour; on reproduces live.
+GATE_CASES = {
+    "ungated": {"regime_gate": False, "volume_gate": False},
+    "gated": {"regime_gate": True, "volume_gate": True},
 }
 
 
@@ -90,13 +97,17 @@ def fetch_daily_bars(symbol: str, years: int) -> list[OHLCVBar]:
 
 def study_symbol(symbol: str, bars: list[OHLCVBar], splits: int) -> dict:
     out: dict[str, object] = {"symbol": symbol, "bars": len(bars), "cases": {}}
-    for case, costs in COST_CASES.items():
+    for (cost_name, costs), (gate_name, gates) in product(
+        COST_CASES.items(), GATE_CASES.items()
+    ):
+        case = f"{cost_name}/{gate_name}"
         request = BacktestRequest(
             symbol=symbol,
             strategy="ema_rsi_macd",
             timeframe="daily",
             commission_pct=0.0,
             **costs,
+            **gates,
         )
         try:
             result = walk_forward(request, bars, n_splits=splits)
@@ -128,18 +139,19 @@ def study_symbol(symbol: str, bars: list[OHLCVBar], splits: int) -> dict:
 
 def verdict(results: list[dict]) -> dict:
     """The kill criterion from TASK-009, applied mechanically."""
+    # Judge the configuration that actually trades: gated, at stress cost.
     trades = sum(
         case.get("oos_trades", 0)
         for row in results
-        for case in row["cases"].values()
-        if "oos_trades" in case
-    ) // max(len(COST_CASES), 1)
+        for name, case in row["cases"].items()
+        if name == "stress/gated" and "oos_trades" in case
+    )
 
     stress = [
         case.get("deflated_sharpe")
         for row in results
         for name, case in row["cases"].items()
-        if name.startswith("stress") and case.get("deflated_sharpe") is not None
+        if name == "stress/gated" and case.get("deflated_sharpe") is not None
     ]
     positive = [d for d in stress if d > 0]
 

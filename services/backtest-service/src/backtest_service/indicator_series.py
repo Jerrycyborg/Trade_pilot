@@ -30,6 +30,8 @@ MACD_SIGNAL = 9
 
 # What the originals return when there is not enough data to compute anything.
 RSI_NEUTRAL = 50.0
+ADX_NEUTRAL = 25.0
+ADX_PERIOD = 14
 
 
 @dataclass(frozen=True)
@@ -190,3 +192,76 @@ def bollinger(closes: list[float], period: int, std_dev: float) -> BollingerSeri
         lower.append(mean - spread)
 
     return BollingerSeries(upper=upper, middle=middle, lower=lower)
+
+
+def adx_series(
+    highs: list[float], lows: list[float], closes: list[float], period: int = ADX_PERIOD
+) -> list[float]:
+    """ADX at every bar, where element i equals `compute_adx` over `[:i+1]`.
+
+    The live regime gate reads one scalar ADX from the whole fetched window, so
+    reproducing it in a backtest means the value the gate *would* have seen at
+    each bar — an expanding window, not a rolling one. Recomputing the scalar
+    per bar is O(n^2) and the walk-forward calls it once per trial per fold, so
+    this runs the same Wilder recursion forward once and records the running
+    value. It is a performance rewrite of `market_data.indicators.compute_adx`
+    and nothing else: a test asserts the two agree bar for bar, and that test is
+    the only thing keeping them honest.
+    """
+    n = len(closes)
+    out = [ADX_NEUTRAL] * n
+    if n < period + 2:
+        return out
+
+    tr_list: list[float] = []
+    plus_dm_list: list[float] = []
+    minus_dm_list: list[float] = []
+
+    atr = plus_smooth = minus_smooth = 0.0
+    dx_count = 0
+    dx_running_sum = 0.0
+    dx_seed_sum = 0.0
+    adx_state = 0.0
+
+    for i in range(1, n):
+        high, low, prev_close = highs[i], lows[i], closes[i - 1]
+        prev_high, prev_low = highs[i - 1], lows[i - 1]
+
+        tr_list.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+        up_move = high - prev_high
+        down_move = prev_low - low
+        plus_dm_list.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm_list.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+
+        if len(tr_list) < period:
+            continue
+        if len(tr_list) == period:
+            # Seed the Wilder sums exactly as compute_adx does.
+            atr = sum(tr_list[:period])
+            plus_smooth = sum(plus_dm_list[:period])
+            minus_smooth = sum(minus_dm_list[:period])
+            continue
+
+        atr = atr - atr / period + tr_list[-1]
+        plus_smooth = plus_smooth - plus_smooth / period + plus_dm_list[-1]
+        minus_smooth = minus_smooth - minus_smooth / period + minus_dm_list[-1]
+
+        plus_di = 100.0 * plus_smooth / atr if atr > 0 else 0.0
+        minus_di = 100.0 * minus_smooth / atr if atr > 0 else 0.0
+        di_sum = plus_di + minus_di
+        dx = 100.0 * abs(plus_di - minus_di) / di_sum if di_sum > 0 else 0.0
+
+        dx_count += 1
+        dx_running_sum += dx
+        if dx_count < period:
+            # Fewer DX values than the smoothing period: compute_adx takes a
+            # plain mean here rather than smoothing, so this branch must too.
+            adx_state = dx_running_sum / dx_count
+        elif dx_count == period:
+            dx_seed_sum = dx_running_sum
+            adx_state = dx_seed_sum / period
+        else:
+            adx_state = (adx_state * (period - 1) + dx) / period
+        out[i] = adx_state
+
+    return out

@@ -138,6 +138,17 @@ class BacktestRequest(BaseModel):
     slippage_bps: float = Field(default=1.0, ge=0.0)
     """Additional adverse fill vs the quote, per side, in basis points."""
 
+    # --- Live entry gates ------------------------------------------------
+    # The trading worker suppresses BUYs on a weak regime or unconfirmed
+    # volume; the backtest never did, so it measured a more permissive
+    # strategy than the one that trades. Both default off to keep existing
+    # results comparable — turning them on is an explicit request.
+    regime_gate: bool = False
+    """Suppress a BUY when ADX is below 20 or not measurable."""
+
+    volume_gate: bool = False
+    """Suppress a BUY when volume does not exceed its 20-bar average."""
+
     @property
     def is_intraday(self) -> bool:
         return self.timeframe == "intraday"
