@@ -144,11 +144,17 @@ def verdict(results: list[dict]) -> dict:
     positive = [d for d in stress if d > 0]
 
     if trades < 100:
-        call = "NO VERDICT — under 100 out-of-sample trades; the sample cannot support a claim either way"
+        call = (
+            "NO VERDICT — under 100 out-of-sample trades; the sample "
+            "cannot support a claim either way"
+        )
     elif not positive:
         call = "DEAD — no symbol clears a positive Deflated Sharpe at the stress cost case"
     else:
-        call = f"SURVIVES on {len(positive)}/{len(stress)} symbols at stress cost — worth continuing to Phase 2"
+        call = (
+            f"SURVIVES on {len(positive)}/{len(stress)} symbols at stress "
+            "cost — worth continuing to Phase 2"
+        )
     return {"total_oos_trades": trades, "verdict": call}
 
 
