@@ -1,7 +1,8 @@
 # CI for the trading stack.
 #
-# Runs with no secrets and no third-party network access: no broker, no market
-# data provider, no API keys. Every job here must be reproducible by anyone who
+# Runs with no production secrets and no broker or market-data access. Network
+# access is limited to the pinned actions, package registry, and image sources.
+# Every job here must be reproducible by anyone who
 # clones the repository, which is the point — before this workflow existed,
 # every guarantee in the repo depended on somebody running pytest by hand and
 # remembering the result.
@@ -12,6 +13,10 @@ on:
   push:
     branches: ["**"]
   pull_request:
+
+# Repository code and third-party actions never need write authority in CI.
+permissions:
+  contents: read
 
 env:
   # Deliberately fake. Nothing in CI may reach a real broker or data provider,
@@ -26,9 +31,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
+          version: "0.12.4"
+          python-version: "3.11"
           enable-cache: true
+          prune-cache: true
       - run: uv sync --frozen --all-packages
       - name: Ruff
         run: uv run ruff check .
@@ -51,9 +61,14 @@ jobs:
       LIFECYCLE_DATABASE_URL: postgresql+psycopg://postgres:ci-postgres-password@localhost:5432/trading_stack
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
+          version: "0.12.4"
+          python-version: "3.11"
           enable-cache: true
+          prune-cache: true
       - run: uv sync --frozen --all-packages
 
       - name: Migration smoke test
@@ -91,6 +106,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Build and start the stack
         run: docker compose up -d --build --wait postgres migrate execution-service
